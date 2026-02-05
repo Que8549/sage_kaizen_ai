@@ -326,19 +326,6 @@ class SageKaizenLLM:
 
         debug_gpu_memory_banner("after model load")
 
-        # DEBUG
-        # 
-        # # Force some compute
-        # out = llm(
-        #     "Say 'GPU test' and count from 1 to 20.",
-        #     max_tokens=128,
-        #     temperature=0.0,
-        # )
-
-        # print(out["choices"][0]["text"][:200])
-        #      
-        # End DEBUG
-
         start = time.time()
 
         # Mirror your working create_completion usage :contentReference[oaicite:1]{index=1}
