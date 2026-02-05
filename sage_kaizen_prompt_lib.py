@@ -291,6 +291,7 @@ class SageKaizenLLM:
             self._llm_q6 = Llama(model_path=Q6_MODEL_PATH, **self._init_kwargs)
         return self._llm_q6
 
+
     def generate(
         self,
         user_text: str,
@@ -323,19 +324,19 @@ class SageKaizenLLM:
 
         llm = self._load(chosen)
 
+        debug_gpu_memory_banner("after model load")
+
         # DEBUG
-        debug_gpu_memory_banner("after model load and before inference")
+        # 
+        # # Force some compute
+        # out = llm(
+        #     "Say 'GPU test' and count from 1 to 20.",
+        #     max_tokens=128,
+        #     temperature=0.0,
+        # )
 
-        # Force some compute
-        out = llm(
-            "Say 'GPU test' and count from 1 to 20.",
-            max_tokens=128,
-            temperature=0.0,
-        )
-
-        debug_gpu_memory_banner("after inference")
-        print(out["choices"][0]["text"][:200])
-
+        # print(out["choices"][0]["text"][:200])
+        #      
         # End DEBUG
 
         start = time.time()
@@ -350,6 +351,8 @@ class SageKaizenLLM:
             max_tokens=profile.max_tokens,
             stop=profile.stop,  # None or sequence[str]
         )
+
+        debug_gpu_memory_banner("after create_completion (inference)")
 
         elapsed = time.time() - start
         text = raw["choices"][0]["text"]

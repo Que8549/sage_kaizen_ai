@@ -185,7 +185,8 @@ build_windows/
 errors/
 info/
 logs/
-Step-by-Step Guide to Installing CUDA and cuDNN for GPU Acceleration _ DigitalOcean_files/
+output.txt
+output_old.txt
 
 
 *.cpp
@@ -198,3 +199,4 @@ Step-by-Step Guide to Installing CUDA and cuDNN for GPU Acceleration _ DigitalOc
 *.ptx
 *.cubin
 *.fatbin
+output.txt
