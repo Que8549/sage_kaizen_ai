@@ -5,13 +5,14 @@ import os
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Optional, Sequence, Tuple, Any
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 # NOTE: The biggest compatibility variable for Python 3.13 on Windows is whether
 # llama_cpp has a wheel for your Python version/arch. The code below is 3.13-safe,
 # but llama_cpp installation must also be 3.13-compatible.
 try:
-    from llama_cpp import Llama
+    os.environ["LLAMA_CPP_LIB"] = r"F:\Projects\sage_kaizen_ai\llama.cpp\build\bin\Release\llama.dll"
+    from llama_cpp import Llama # requires your CUDA 13.1-enabled build
 except Exception as e:  # pragma: no cover
     raise RuntimeError(
         "Failed to import llama_cpp.Llama.\n"
@@ -230,28 +231,53 @@ class SageKaizenLLM:
     def __init__(
         self,
         *,
+        # Context & batching
         n_ctx: int = 8192,
         n_batch: int = 2048,
         n_ubatch: int = 512,
-        n_gpu_layers: int = 61,
-        tensor_split: Tuple[float, float] = (2.0, 1.0),
-        split_mode: int = 1,
-        main_gpu: int = 0,
+
+        # GPU offload
+        n_gpu_layers: int = -1, # prefer "offload as many as possible" 61 fine for testing,
+        tensor_split: Tuple[float, float] = (2.0, 1.0),  # 5090:5080 = 32GB:16GB
+        split_mode: int = 1,     # layer-wise
+        main_gpu: int = 0,       # 5090 as primary
+
+        # Performance toggles
+        flash_attn: bool = True,
+        offload_kqv: bool = True,
+
+        # CPU parallelism (9950X3D has lots of cores; tune to your preference)
+        n_threads: Optional[int] = None,
+        n_threads_batch: Optional[int] = None,
+
         verbose: bool = True,
     ):
         self._llm_q5: Optional[Llama] = None
         self._llm_q6: Optional[Llama] = None
 
-        self._init_kwargs: Dict[str, Any] = dict(
+        init_kwargs: Dict[str, Any] = dict(
             n_ctx=n_ctx,
             n_batch=n_batch,
             n_ubatch=n_ubatch,
+
             n_gpu_layers=n_gpu_layers,
             tensor_split=[float(tensor_split[0]), float(tensor_split[1])],
             split_mode=split_mode,
             main_gpu=main_gpu,
+
+            flash_attn=flash_attn,      # supported by llama-cpp-python :contentReference[oaicite:10]{index=10}
+            offload_kqv=offload_kqv,    # supported by llama-cpp-python :contentReference[oaicite:11]{index=11}
+
             verbose=verbose,
         )
+
+        # Only set thread params if caller provided them
+        if n_threads is not None:
+            init_kwargs["n_threads"] = int(n_threads)
+        if n_threads_batch is not None:
+            init_kwargs["n_threads_batch"] = int(n_threads_batch)
+
+        self._init_kwargs = init_kwargs
 
     def _load(self, quant: Quant) -> Llama:
         if quant == Quant.Q5_K_M:
