@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional, Sequence, Tuple
+from time import sleep
+from test_using_gpus import debug_gpu_memory_banner
 
 # NOTE: The biggest compatibility variable for Python 3.13 on Windows is whether
 # llama_cpp has a wheel for your Python version/arch. The code below is 3.13-safe,
@@ -317,8 +319,24 @@ class SageKaizenLLM:
             templates=templates,
             include_system_prompt=True,
         )
+        
 
         llm = self._load(chosen)
+
+        # DEBUG
+        debug_gpu_memory_banner("after model load and before inference")
+
+        # Force some compute
+        out = llm(
+            "Say 'GPU test' and count from 1 to 20.",
+            max_tokens=128,
+            temperature=0.0,
+        )
+
+        debug_gpu_memory_banner("after inference")
+        print(out["choices"][0]["text"][:200])
+
+        # End DEBUG
 
         start = time.time()
 

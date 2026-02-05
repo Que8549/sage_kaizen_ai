@@ -179,6 +179,7 @@ cython_debug/
 .outputs/
 models/
 llama_cpp/
+llama-cpp-python/
 llama_windows_binary/
 build_windows/
 errors/
