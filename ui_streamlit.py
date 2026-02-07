@@ -10,6 +10,12 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, TypedDict, Literal
 import streamlit as st
 from llama_cpp import Llama
 
+# --- CUDA backend perf knobs (best-effort; harmless if ignored) ---
+# CUDA graph optimization is referenced in llama.cpp CUDA backend discussions.
+# NOTE: Some builds/issues suggest disabling if you see instability.
+os.environ.setdefault("GGML_CUDA_GRAPH_OPT", "1")
+os.environ.setdefault("GGML_CUDA_F16", "1")
+
 if TYPE_CHECKING:
     from llama_cpp import ChatCompletionRequestMessage
 
@@ -25,7 +31,6 @@ except Exception:
 # ----------------------------
 Q5_MODEL_PATH = r"E:/DeepSeek-V3.2-GGUF/Q5_K_M/DeepSeek-V3.2-Q5_K_M-00001-of-00010.gguf"
 Q6_MODEL_PATH = r"E:/DeepSeek-V3.2-GGUF/Q6_K/DeepSeek-V3.2-Q6_K-00001-of-00012.gguf"
-
 SYSTEM_PROMPT_PATH = r"./sage_kaizen_system_prompt.txt"
 
 
@@ -60,25 +65,9 @@ def safe_debug(tag: str) -> None:
 
 
 DEPTH_HINTS = (
-    "explain",
-    "analyze",
-    "compare",
-    "why",
-    "how",
-    "history",
-    "philosophy",
-    "theology",
-    "deep",
-    "in depth",
-    "detailed",
-    "step-by-step",
-    "teach",
-    "tutor",
-    "architecture",
-    "design",
-    "tradeoff",
-    "pros and cons",
-    "evaluate",
+    "explain", "analyze", "compare", "why", "how", "history", "philosophy", "theology",
+    "deep", "in depth", "detailed", "step-by-step", "teach", "tutor", "architecture",
+    "design", "tradeoff", "pros and cons", "evaluate",
 )
 CODE_HINTS = ("code", "python", "c#", "typescript", "debug", "stack trace", "error")
 
@@ -108,7 +97,7 @@ def stream_chat_completion_to_placeholder(
     placeholder: Any,
 ) -> Tuple[str, float]:
     """
-    Streams llama-cpp-python chat completion chunks into a Streamlit placeholder.
+    Stream llama-cpp-python chat completion chunks into a Streamlit placeholder.
 
     Returns: (final_text, elapsed_seconds)
 
@@ -130,8 +119,6 @@ def stream_chat_completion_to_placeholder(
     )
 
     for chunk in cast(Iterator[Any], stream):
-        # Typical chunk:
-        # {"choices": [{"delta": {"content": "..."}, ...}], ...}
         try:
             choice0 = chunk["choices"][0]
             delta = choice0.get("delta", {})
@@ -140,7 +127,6 @@ def stream_chat_completion_to_placeholder(
                 acc.append(piece)
                 placeholder.markdown("".join(acc))
         except Exception:
-            # Be resilient to minor shape differences across builds
             pass
 
     elapsed = time.time() - start
@@ -154,14 +140,27 @@ def stream_chat_completion_to_placeholder(
 class BrainConfig:
     # Context + batching
     n_ctx: int = 8192
-    # Conservative default to avoid RAM runaway; increase once stable.
+
+    # IMPORTANT:
+    # For large models, too-high n_batch can blow CPU RAM during prompt/prefill.
+    # Keep conservative defaults; raise once stable.
     n_batch: int = 512
     n_ubatch: int = 256
 
-    # GPU offload
-    n_gpu_layers: int = 128
-    tensor_split: Tuple[float, float] = (0.55, 0.45)  # push more onto 5080 than VRAM-proportional
-    split_mode: int = 1
+    # GPU offload:
+    # n_gpu_layers=-1 tells llama.cpp to offload as many layers as possible.
+    n_gpu_layers: int = -1
+
+    # Multi-GPU split:
+    # split_mode:
+    #   0 = none, 1 = layer, 2 = row (row is generally better at engaging GPU1)
+    split_mode: int = 2
+
+    # tensor_split controls distribution across GPUs when split_mode != none
+    # Start slightly favoring GPU0 but keep GPU1 meaningful
+    tensor_split: Tuple[float, float] = (0.55, 0.45)
+
+    # main_gpu meaning depends on split_mode (see llama-cpp-python docs)
     main_gpu: int = 0
 
     flash_attn: bool = True
@@ -170,7 +169,6 @@ class BrainConfig:
     use_mmap: bool = True
     use_mlock: bool = False
 
-    # CPU-side work (sampling/logits) can bottleneck; threads can help throughput
     n_threads: int = max(1, (os.cpu_count() or 1) - 2)
     n_threads_batch: int = max(1, (os.cpu_count() or 1) - 2)
 
@@ -204,11 +202,11 @@ st.title("🧠 Sage Kaizen (Dual-Brain Chat) 🧠")
 
 system_prompt = load_system_prompt(SYSTEM_PROMPT_PATH)
 
-# --- State: UI must render instantly; loading happens only after button click ---
+# --- State: UI renders instantly; loading happens only after button click ---
 if "models_loaded" not in st.session_state:
-    st.session_state.models_loaded = False  # user intent: clicked Load models
+    st.session_state.models_loaded = False
 if "models_ready" not in st.session_state:
-    st.session_state.models_ready = False   # actual: load succeeded
+    st.session_state.models_ready = False
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "last_used_brain" not in st.session_state:
@@ -223,29 +221,39 @@ with st.sidebar:
         st.caption(f"⏱️ Last thinking time: {st.session_state.last_thinking_time:.2f}s")
 
     st.subheader("Model / Perf")
-    st.caption("Tip: Higher GPU layers uses more VRAM and can reduce CPU/RAM pressure.")
+    st.caption("Goal: move weights + KV to VRAM (higher VRAM use, less RAM pressure).")
 
     n_ctx = st.selectbox("Context (n_ctx)", [4096, 8192, 12288, 16384], index=1)
 
-    # Conservative default (RAM stability); increase if stable
+    # Keep conservative; raise after stable VRAM offload
     n_batch = st.selectbox("Batch (n_batch)", [256, 512, 1024, 1536, 2048], index=1)
     n_ubatch = st.selectbox("Micro-batch (n_ubatch)", [128, 256, 512], index=1)
 
-    # Offload defaults: higher to push compute to GPU
-    q5_gpu_layers = st.selectbox("Q5 n_gpu_layers", [64, 80, 96, 112, 128, 160, 192, 224], index=5)  # 160 default
-    q6_gpu_layers = st.selectbox("Q6 n_gpu_layers", [32, 48, 64, 80, 96, 112, 128, 160], index=5)   # 112 default
+    # Include -1 for "offload as many layers as possible"
+    q5_gpu_layers = st.selectbox("Q5 n_gpu_layers", [-1, 96, 112, 128, 160, 192, 224], index=0)
+    q6_gpu_layers = st.selectbox("Q6 n_gpu_layers", [-1, 64, 80, 96, 112, 128, 160], index=0)
 
-    # Push more weight to GPU1 so 5080 does more than ~3%
+    split_mode_label = st.selectbox(
+        "split_mode",
+        ["row (more balanced)", "layer (default-ish)", "none (GPU0 only)"],
+        index=0,
+        help="Row mode often engages GPU1 better than layer mode for multi-GPU.",
+    )
+    split_mode = 2 if split_mode_label.startswith("row") else (1 if split_mode_label.startswith("layer") else 0)
+
+    # Tensor split: offer a range; default pushes GPU1 higher than your old baseline
     split = st.selectbox(
         "tensor_split (5090, 5080)",
-        [(0.67, 0.33), (0.60, 0.40), (0.55, 0.45), (0.50, 0.50)],
+        [(0.67, 0.33), (0.60, 0.40), (0.55, 0.45), (0.50, 0.50), (0.45, 0.55)],
         index=2,
+        help="Try 0.50/0.50 or even 0.45/0.55 to push more work to GPU1 (watch OOM).",
     )
 
+    # CRITICAL for RAM: default to NOT preloading Q6
     preload_q6 = st.toggle(
         "Preload Q6 (uses more RAM)",
-        value=True,
-        help="If RAM is pegged at 100%, disable this to load Q6 only when needed.",
+        value=False,
+        help="Disable to reduce RAM. Q6 will load on-demand only when needed.",
     )
 
     if st.button("New chat"):
@@ -272,10 +280,18 @@ def get_brains(
     n_ubatch: int,
     q5_layers: int,
     q6_layers: int,
+    split_mode: int,
     tensor_split: Tuple[float, float],
     preload_q6: bool,
 ) -> Tuple[Llama, Optional[Llama]]:
-    cfg_common = BrainConfig(n_ctx=n_ctx, n_batch=n_batch, n_ubatch=n_ubatch, tensor_split=tensor_split)
+    cfg_common = BrainConfig(
+        n_ctx=n_ctx,
+        n_batch=n_batch,
+        n_ubatch=n_ubatch,
+        n_gpu_layers=-1,             # base default, overridden per model below
+        split_mode=split_mode,
+        tensor_split=tensor_split,
+    )
 
     cfg_q5 = BrainConfig(**{**cfg_common.__dict__, "n_gpu_layers": q5_layers})
     cfg_q6 = BrainConfig(**{**cfg_common.__dict__, "n_gpu_layers": q6_layers})
@@ -307,11 +323,12 @@ if st.session_state.models_loaded:
                 n_ubatch=n_ubatch,
                 q5_layers=q5_gpu_layers,
                 q6_layers=q6_gpu_layers,
+                split_mode=split_mode,
                 tensor_split=split,
                 preload_q6=preload_q6,
             )
             if preload_q6:
-                status.write("Q6 loaded ✅")
+                status.write("Q6 preloaded ✅")
             else:
                 status.write("Q6 preload disabled (will load on demand) ✅")
 
@@ -346,12 +363,18 @@ if user_text:
     use_q6 = should_escalate_to_q6(user_text, deep_mode) if auto_escalate else deep_mode
     brain_name = "Q6" if use_q6 else "Q5"
 
-    # Ensure Q6 exists if required (load on demand if preload disabled)
+    # Ensure Q6 exists if required (load on demand if not preloaded)
     if use_q6 and q6_llm is None:
         with st.status("Loading Q6 on demand…", expanded=True) as status:
             try:
                 status.write("Loading Q6…")
-                cfg_common = BrainConfig(n_ctx=n_ctx, n_batch=n_batch, n_ubatch=n_ubatch, tensor_split=split)
+                cfg_common = BrainConfig(
+                    n_ctx=n_ctx,
+                    n_batch=n_batch,
+                    n_ubatch=n_ubatch,
+                    split_mode=split_mode,
+                    tensor_split=split,
+                )
                 cfg_q6 = BrainConfig(**{**cfg_common.__dict__, "n_gpu_layers": q6_gpu_layers})
                 q6_llm = Llama(model_path=Q6_MODEL_PATH, **_llama_kwargs(cfg_q6))
                 status.update(label="Q6 loaded ✅", state="complete")
@@ -375,7 +398,7 @@ if user_text:
     # Cast to satisfy llama-cpp-python typing (Pylance-safe)
     messages_for_llama = cast("list[ChatCompletionRequestMessage]", cast(Any, messages))
 
-    # Accuracy-first sampling defaults (explicit kwargs, no **params)
+    # Accuracy-first sampling defaults
     temperature = 0.4 if not use_q6 else 0.6
     top_p = 0.92 if not use_q6 else 0.95
     top_k = 40 if not use_q6 else 50
@@ -402,7 +425,6 @@ if user_text:
             safe_debug("after chat_completion (stream)")
             st.session_state.last_thinking_time = elapsed
 
-        # Ensure final content is rendered
         live.markdown(content)
         st.caption(f"⏱️ Thinking time: {elapsed:.2f}s • Brain: {brain_name}")
 
