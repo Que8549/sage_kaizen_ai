@@ -218,7 +218,7 @@ with st.sidebar:
     auto_escalate = st.toggle("Auto-escalate when needed", value=True)
 
     if "last_thinking_time" in st.session_state:
-        st.caption(f"⏱️ Last thinking time: {time.strftime("%H:%M:%S", time.gmtime(st.session_state.last_thinking_time))}s")    # st.session_state.last_thinking_time:.2f
+        st.caption(f"⏱️ Last thinking time: {time.strftime("%H:%M:%S", time.gmtime(cast(float, st.session_state.last_thinking_time) ))}s")  # st.session_state.last_thinking_time:.2f
 
     st.subheader("Model / Perf")
     st.caption("Goal: move weights + KV to VRAM (higher VRAM use, less RAM pressure).")

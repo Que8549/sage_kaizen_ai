@@ -44,6 +44,7 @@ class Quant(str, Enum):
     Q5_K_M = "Q5_K_M"
     Q6_K = "Q6_K"
 
+load_dotenv()
 
 @dataclass(frozen=True)
 class SamplingProfile:
