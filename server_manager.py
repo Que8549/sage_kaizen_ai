@@ -1,17 +1,20 @@
-\
+
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, cast
+from dotenv import load_dotenv
 
 # NOTE:
 # - llama-server may not bind the listening port until after model load on some builds.
 # - DeepSeek V3.x can take several minutes to load.
 # Therefore we use generous, configurable wait timeouts and (optionally) tail logs on failure.
 
+load_dotenv()
 
 @dataclass(frozen=True)
 class ManagedServers:
@@ -23,8 +26,8 @@ class ManagedServers:
     q5_log: Optional[Path] = Path("logs/q5_server.log")
     q6_log: Optional[Path] = Path("logs/q6_server.log")
     # How long to wait for first bind after starting (seconds)
-    q5_start_timeout_s: float = 900.0  # 15 minutes
-    q6_start_timeout_s: float = 1200.0  # 20 minutes
+    q5_start_timeout_s: float = 10800.0 # 900.0  # 15 minutes
+    q6_start_timeout_s: float = 10800.0 # 1200.0  # 20 minutes
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:

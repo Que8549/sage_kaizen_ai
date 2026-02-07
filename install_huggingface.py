@@ -11,13 +11,16 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 # still relies on the globally configured token or environment variable.
 
 snapshot_download(
-    repo_id = "unsloth/DeepSeek-V3.2-GGUF",  # "unsloth/DeepSeek-V3-0324-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
+    repo_id = "unsloth/DeepSeek-V3.2-GGUF",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
     local_dir ="E:/DeepSeek-V3.2-GGUF",     
-    allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*"],  # allow_patterns = [""*Q8_0*", "*Q6_K*", "*Q4_K_S*", "*Q4_K_M*", "*Q5_K_S*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*"] 
-    # , timeout=30.0,  # Increase from default 10s [web:11]
-    # max_workers=4,  # Limit parallelism if bandwidth-constrained
-    # resume_download=True,  # Resume on retry [web:6]
+    allow_patterns = ["*UD-IQ1_S*", "*UD-IQ1_M*"],  # allow_patterns = [""*Q8_0*", "*Q6_K*", "*Q4_K_S*", "*Q4_K_M*", "*Q5_K_S*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*"] 
+    # max_workers=8,  # 8 = default
 )
+
+# NousResearch/Hermes-4.3-36B-GGUF  https://huggingface.co/NousResearch/Hermes-4.3-36B-GGUF
+# ACE-Step 1.5 https://huggingface.co/ACE-Step/Ace-Step1.5
+
+
 
 # Q5_K_M (High-quality sweet spot)
 # This is where things get good.
