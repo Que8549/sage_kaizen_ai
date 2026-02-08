@@ -1,8 +1,8 @@
 from llama_cpp import Llama
 import time
 
-q5_model_path="E:/DeepSeek-V3.2-GGUF/Q5_K_M/DeepSeek-V3.2-Q5_K_M-00001-of-00010.gguf"
-q6_model_path="E:/DeepSeek-V3.2-GGUF/Q6_K/DeepSeek-V3.2-Q6_K-00001-of-00012.gguf"
+q5_model_path=r"E:/DeepSeek-V3.2-GGUF/UD-IQ1_S/DeepSeek-V3.2-UD-IQ1_S-00001-of-00004.gguf"
+q6_model_path=r"E:/DeepSeek-V3.2-GGUF/UD-IQ1_M/DeepSeek-V3.2-UD-IQ1_M-00001-of-00005.gguf"
 
 use_model_path = q5_model_path
 

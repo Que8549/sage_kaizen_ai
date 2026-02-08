@@ -29,8 +29,8 @@ except Exception:
 # ----------------------------
 # Config (edit paths as needed)
 # ----------------------------
-Q5_MODEL_PATH = r"E:/DeepSeek-V3.2-GGUF/Q5_K_M/DeepSeek-V3.2-Q5_K_M-00001-of-00010.gguf"
-Q6_MODEL_PATH = r"E:/DeepSeek-V3.2-GGUF/Q6_K/DeepSeek-V3.2-Q6_K-00001-of-00012.gguf"
+Q5_MODEL_PATH = r"E:/DeepSeek-V3.2-GGUF/UD-IQ1_S/DeepSeek-V3.2-UD-IQ1_S-00001-of-00004.gguf"
+Q6_MODEL_PATH = r"E:/DeepSeek-V3.2-GGUF/UD-IQ1_M/DeepSeek-V3.2-UD-IQ1_M-00001-of-00005.gguf"
 SYSTEM_PROMPT_PATH = r"./sage_kaizen_system_prompt.txt"
 
 

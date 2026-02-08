@@ -11,8 +11,8 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 # still relies on the globally configured token or environment variable.
 
 snapshot_download(
-    repo_id = "unsloth/DeepSeek-V3.2-GGUF",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
-    local_dir ="E:/DeepSeek-V3.2-GGUF",     
+    repo_id = "ACE-Step/Ace-Step1.5",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
+    local_dir ="E:/Hermes-4.3-36B-GGUF",     
     allow_patterns = ["*UD-IQ1_S*", "*UD-IQ1_M*"],  # allow_patterns = [""*Q8_0*", "*Q6_K*", "*Q4_K_S*", "*Q4_K_M*", "*Q5_K_S*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*"] 
     # max_workers=8,  # 8 = default
 )
