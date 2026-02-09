@@ -19,7 +19,9 @@ snapshot_download(
 
 # NousResearch/Hermes-4.3-36B-GGUF  https://huggingface.co/NousResearch/Hermes-4.3-36B-GGUF
 # ACE-Step 1.5 https://huggingface.co/ACE-Step/Ace-Step1.5
-
+# https://huggingface.co/Qwen 
+# Qwen/Qwen3-ASR-1.7B https://huggingface.co/Qwen/Qwen3-ASR-1.7B
+# Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
 
 
 # Q5_K_M (High-quality sweet spot)

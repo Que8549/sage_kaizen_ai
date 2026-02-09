@@ -1,8 +1,6 @@
-\
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -20,37 +18,80 @@ class HttpTimeouts:
 
 
 def _timeout_tuple(t: HttpTimeouts) -> Tuple[float, float]:
-    return (t.connect_s, t.read_s)
+    return (float(t.connect_s), float(t.read_s))
+
+
+def _normalize_base_url(base_url: str) -> str:
+    """
+    Accept either:
+      - http://127.0.0.1:8011
+      - http://127.0.0.1:8011/
+      - http://127.0.0.1:8011/v1
+      - http://127.0.0.1:8011/v1/
+
+    And normalize to the server ROOT (no trailing /v1).
+    This avoids the common '/v1/v1/models' bug that makes readiness checks fail forever.
+    """
+    b = (base_url or "").strip().rstrip("/")
+    if b.endswith("/v1"):
+        b = b[:-3].rstrip("/")
+    return b
+
+
+def _probe_get(base: str, path: str, *, timeouts: HttpTimeouts) -> Tuple[bool, str]:
+    """
+    Returns (ok, detail). ok is True if HTTP 200.
+    detail includes status code or exception type.
+    """
+    url = f"{base}{path}"
+    try:
+        r = requests.get(url, timeout=_timeout_tuple(timeouts))
+        if r.status_code == 200:
+            return True, f"OK ({path})"
+        return False, f"{path}={r.status_code}"
+    except Exception as e:
+        return False, f"{path}={type(e).__name__}"
 
 
 def health_check(base_url: str, *, timeouts: HttpTimeouts) -> Tuple[bool, str]:
     """
-    Returns (ok, detail). Tries /health then /v1/models.
-    """
-    base = base_url.rstrip("/")
-    # 1) /health (newer server versions)
-    try:
-        r = requests.get(f"{base}/health", timeout=_timeout_tuple(timeouts))
-        if r.status_code == 200:
-            return True, "OK (/health)"
-    except Exception:
-        pass
+    Returns (ok, detail).
 
-    # 2) /v1/models (OpenAI-compatible)
-    try:
-        r = requests.get(f"{base}/v1/models", timeout=_timeout_tuple(timeouts))
-        if r.status_code == 200:
-            return True, "OK (/v1/models)"
-        return False, f"HTTP {r.status_code} at /v1/models"
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+    Probes readiness in this order (llama.cpp documented endpoints):
+      1) GET /health
+      2) GET /v1/health
+      3) GET /v1/models
+      4) GET /props
+
+    We return True on the first success (HTTP 200), otherwise False with a combined detail string.
+    """
+    base = _normalize_base_url(base_url)
+
+    ok, d1 = _probe_get(base, "/health", timeouts=timeouts)
+    if ok:
+        return True, d1
+
+    ok, d2 = _probe_get(base, "/v1/health", timeouts=timeouts)
+    if ok:
+        return True, d2
+
+    ok, d3 = _probe_get(base, "/v1/models", timeouts=timeouts)
+    if ok:
+        return True, d3
+
+    ok, d4 = _probe_get(base, "/props", timeouts=timeouts)
+    if ok:
+        return True, d4
+
+    return False, f"not ready ({d1}; {d2}; {d3}; {d4})"
 
 
 def discover_model_id(base_url: str, *, timeouts: HttpTimeouts) -> Optional[str]:
     """
-    Tries to read model id from /v1/models. Returns first model id if found.
+    Returns the first model id from /v1/models, if available.
+    Falls back to None if the endpoint is unavailable or payload is unexpected.
     """
-    base = base_url.rstrip("/")
+    base = _normalize_base_url(base_url)
     try:
         r = requests.get(f"{base}/v1/models", timeout=_timeout_tuple(timeouts))
         r.raise_for_status()
@@ -66,9 +107,6 @@ def discover_model_id(base_url: str, *, timeouts: HttpTimeouts) -> Optional[str]
 
 
 def _iter_sse_data_lines(resp: requests.Response) -> Iterator[str]:
-    """
-    Iterates over SSE lines that look like: 'data: {...}' or 'data: [DONE]'.
-    """
     for raw in resp.iter_lines(decode_unicode=True):
         if not raw:
             continue
@@ -89,11 +127,7 @@ def stream_chat_completions(
     max_tokens: int,
     timeouts: HttpTimeouts,
 ) -> Iterator[str]:
-    """
-    Calls POST {base_url}/v1/chat/completions with stream=True and yields token pieces (delta.content).
-    Raises LlamaServerError on non-2xx responses.
-    """
-    base = base_url.rstrip("/")
+    base = _normalize_base_url(base_url)
     url = f"{base}/v1/chat/completions"
 
     payload: Dict[str, Any] = {
@@ -107,7 +141,6 @@ def stream_chat_completions(
 
     with requests.post(url, json=payload, stream=True, timeout=_timeout_tuple(timeouts)) as r:
         if r.status_code // 100 != 2:
-            # Try to include response body for debugging
             try:
                 body = r.text
             except Exception:
@@ -124,5 +157,4 @@ def stream_chat_completions(
                 if isinstance(piece, str) and piece:
                     yield piece
             except Exception:
-                # Ignore malformed/keepalive chunks
                 continue

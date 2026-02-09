@@ -1,25 +1,16 @@
 from __future__ import annotations
 
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
-from urllib.error import URLError, HTTPError
-from urllib.request import urlopen
 
-from dotenv import load_dotenv
+import requests
 
-load_dotenv()
 
-# ---------------------------------------------------------------------
-# Production notes:
-# - llama-server may not bind until after model load on some builds.
-# - but in your case it often EXITs during load (CUDA OOM), so you must
-#   fail-fast by reading logs when connection is refused.
-# - readiness is best validated via HTTP (/health or /v1/models),
-#   not only netstat LISTENING.
-# ---------------------------------------------------------------------
+_PROJECT_ROOT = Path(__file__).resolve().parent  # bulletproof regardless of CWD
 
 
 @dataclass(frozen=True)
@@ -27,79 +18,30 @@ class ManagedServers:
     host: str = "127.0.0.1"
     q5_port: int = 8011
     q6_port: int = 8012
-    start_q5_bat: Path = Path("start_q5_server.bat")
-    start_q6_bat: Path = Path("start_q6_server.bat")
-
-    # Optional logs for diagnostics
-    q5_log: Optional[Path] = Path("logs/q5_server.log")
-    q6_log: Optional[Path] = Path("logs/q6_server.log")
-
-    # Startup timeouts (DeepSeek can take minutes if it actually loads)
-    q5_start_timeout_s: float = 1800.0  # 30 min (but we fail fast on fatal log errors)
+    start_q5_bat: Path = _PROJECT_ROOT / "start_q5_server.bat"
+    start_q6_bat: Path = _PROJECT_ROOT / "start_q6_server.bat"
+    q5_log: Optional[Path] = _PROJECT_ROOT / "logs" / "q5_server.log"
+    q6_log: Optional[Path] = _PROJECT_ROOT / "logs" / "q6_server.log"
+    q5_start_timeout_s: float = 1800.0  # 30 min
     q6_start_timeout_s: float = 2700.0  # 45 min
 
-    # HTTP probe behavior
-    http_probe_timeout_s: float = 2.0
-    poll_interval_s: float = 0.5
 
+_FATAL_MARKERS = (
+    "error while handling argument",
+    "unknown value for --flash-attn",
+    "failed to load model",
+    "error loading model",
+    "exiting due to model loading error",
+    "cudaMalloc failed",
+    "unable to allocate CUDA0 buffer",
+    "failed to allocate CUDA0 buffer",
+    "ggml_backend_cuda_buffer_type_alloc_buffer",
+)
 
-# ----------------------------- helpers --------------------------------
-
-
-def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, shell=False)
-
-
-def is_port_listening(port: int) -> bool:
-    """Returns True if something is LISTENING on the port (netstat -ano)."""
-    proc = _run(["cmd.exe", "/c", "netstat -ano"])
-    if proc.returncode != 0:
-        return False
-    needle = f":{port} "
-    for line in proc.stdout.splitlines():
-        if needle in line and "LISTENING" in line:
-            return True
-    return False
-
-
-def find_pid_by_port(port: int) -> Optional[int]:
-    """Returns PID of process LISTENING on the port (first match), else None."""
-    proc = _run(["cmd.exe", "/c", "netstat -ano"])
-    if proc.returncode != 0:
-        return None
-    needle = f":{port} "
-    for line in proc.stdout.splitlines():
-        if needle in line and "LISTENING" in line:
-            parts = line.split()
-            if len(parts) >= 5 and parts[-1].isdigit():
-                return int(parts[-1])
-    return None
-
-
-def kill_by_pid(pid: int) -> bool:
-    proc = _run(["cmd.exe", "/c", f"taskkill /PID {pid} /F"])
-    return proc.returncode == 0
-
-
-def stop_server_on_port(port: int) -> bool:
-    pid = find_pid_by_port(port)
-    if pid is None:
-        return True
-    return kill_by_pid(pid)
-
-
-def start_server_from_bat(bat_path: Path) -> Tuple[bool, str]:
-    """
-    Starts a .bat in a separate process.
-    The .bat should detach the server (e.g., `start "" /B ...`) so this returns quickly.
-    """
-    if not bat_path.exists():
-        return False, f"Missing bat: {bat_path}"
-
-    proc = _run(["cmd.exe", "/c", str(bat_path)])
-    if proc.returncode != 0:
-        return False, (proc.stderr.strip() or proc.stdout.strip() or f"bat exited {proc.returncode}")
-    return True, "Started"
+_READY_LOG_MARKERS = (
+    "main: model loaded",
+    "main: server is listening on http://",
+)
 
 
 def _tail(path: Optional[Path], n_lines: int = 120) -> str:
@@ -112,171 +54,191 @@ def _tail(path: Optional[Path], n_lines: int = 120) -> str:
         return ""
 
 
-_FATAL_MARKERS = [
-    # CLI / startup issues
-    "error while handling argument",
-    "unknown value for --flash-attn",
-    "to show complete usage",
-
-    # Model load failures
-    "failed to load model",
-    "error loading model",
-    "llama_model_load: error loading model",
-    "llama_model_load_from_file_impl: failed to load model",
-
-    # CUDA OOM patterns you are seeing
-    "cudaMalloc failed",
-    "failed to allocate CUDA0 buffer",
-    "unable to allocate CUDA0 buffer",
-    "ggml_backend_cuda_buffer_type_alloc_buffer",
-    "alloc_tensor_range: failed to allocate CUDA0 buffer",
-    "out of memory",
-]
-
-
 def _log_has_fatal_error(log_path: Optional[Path]) -> Optional[str]:
     if not log_path or not log_path.exists():
         return None
-    txt = log_path.read_text(encoding="utf-8", errors="ignore")
-    for marker in _FATAL_MARKERS:
-        if marker in txt:
-            return marker
+    try:
+        txt = log_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+    for m in _FATAL_MARKERS:
+        if m in txt:
+            return m
     return None
 
 
-def _http_ready(host: str, port: int, timeout_s: float) -> Tuple[bool, str]:
-    """
-    Returns (ready, detail) by probing /health then /v1/models.
-    Uses stdlib urllib so we don't depend on requests here.
-    """
-    base = f"http://{host}:{port}"
-
-    # 1) /health (if supported)
+def _log_looks_ready(log_path: Optional[Path]) -> bool:
+    if not log_path or not log_path.exists():
+        return False
     try:
-        with urlopen(f"{base}/health", timeout=timeout_s) as resp:
-            if 200 <= resp.status < 300:
-                return True, "OK (/health)"
-    except HTTPError as e:
-        # /health exists but returns error -> treat as not ready, but include code
-        return False, f"HTTP {e.code} (/health)"
-    except URLError as e:
-        return False, f"ConnectionError: {e.reason}"
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+        txt = log_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return False
+    return all(m in txt for m in _READY_LOG_MARKERS)
 
-    # 2) /v1/models (OpenAI-compatible)
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, capture_output=True, text=True, shell=False)
+
+
+def start_server_from_bat(bat_path: Path) -> Tuple[bool, str]:
+    """
+    Bulletproof: do NOT block Streamlit waiting for the .bat to exit.
+    Always spawn the bat detached so this returns immediately.
+    """
+    if not bat_path.exists():
+        return False, f"Missing bat: {bat_path}"
+
+    DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+    CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+
     try:
-        with urlopen(f"{base}/v1/models", timeout=timeout_s) as resp:
-            if 200 <= resp.status < 300:
-                return True, "OK (/v1/models)"
-            return False, f"HTTP {resp.status} (/v1/models)"
-    except HTTPError as e:
-        return False, f"HTTP {e.code} (/v1/models)"
-    except URLError as e:
-        return False, f"ConnectionError: {e.reason}"
+        subprocess.Popen(
+            ["cmd.exe", "/c", str(bat_path)],
+            cwd=str(_PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+        )
+        return True, "Started (detached)"
     except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+        return False, f"Failed to start bat: {type(e).__name__}: {e}"
+
+
+def find_pid_by_port(port: int) -> Optional[int]:
+    proc = _run(["cmd.exe", "/c", "netstat -ano"])
+    if proc.returncode != 0:
+        return None
+    needle = f":{port} "
+    for line in proc.stdout.splitlines():
+        if needle in line and "LISTENING" in line:
+            parts = line.split()
+            if len(parts) >= 5 and parts[-1].isdigit():
+                return int(parts[-1])
+    return None
+
+
+def stop_server_on_port(port: int) -> bool:
+    pid = find_pid_by_port(port)
+    if pid is None:
+        return True
+    proc = _run(["cmd.exe", "/c", f"taskkill /PID {pid} /F"])
+    return proc.returncode == 0
+
+
+def _tcp_connect_ok(host: str, port: int, timeout_s: float = 0.25) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True
+    except OSError:
+        return False
+
+
+def _http_ready(base_url: str, timeout_s: float = 1.5) -> Tuple[bool, str]:
+    base = base_url.rstrip("/")
+
+    def _get(path: str) -> Tuple[bool, str]:
+        try:
+            r = requests.get(f"{base}{path}", timeout=(timeout_s, timeout_s))
+            if r.status_code == 200:
+                return True, f"OK ({path})"
+            return False, f"{path}={r.status_code}"
+        except Exception as e:
+            return False, f"{path}={type(e).__name__}"
+
+    for p in ("/health", "/v1/health", "/v1/models", "/props"):
+        ok, d = _get(p)
+        if ok:
+            return True, d
+    return False, "not ready"
 
 
 def _wait_for_ready(
     *,
     host: str,
     port: int,
+    base_url: str,
     timeout_s: float,
     log_path: Optional[Path],
-    http_probe_timeout_s: float,
-    poll_interval_s: float,
+    poll_s: float = 0.05,  # near-instant responsiveness
 ) -> Tuple[bool, str]:
-    """
-    Waits until HTTP readiness succeeds, OR fails fast if log shows fatal error.
-    Returns (ok, detail).
-    """
     end = time.time() + timeout_s
-    last_detail = "Not ready yet"
+    last = "not ready"
 
     while time.time() < end:
-        # Fail-fast if process already hit a fatal error
         fatal = _log_has_fatal_error(log_path)
         if fatal:
-            tail = _tail(log_path)
-            detail = (
-                f"Fatal server error detected in log: '{fatal}'.\n\n"
-                f"--- log tail ---\n{tail}"
-            )
-            return False, detail
+            return False, f"Fatal error in log: '{fatal}'\n\n--- log tail ---\n{_tail(log_path)}"
 
-        ready, detail = _http_ready(host, port, http_probe_timeout_s)
-        last_detail = detail
-        if ready:
-            return True, detail
+        # Fast success: TCP + HTTP
+        if _tcp_connect_ok(host, port):
+            ok, detail = _http_ready(base_url)
+            last = detail
+            if ok:
+                return True, detail
 
-        # If connection refused and port isn't listening, it's probably crashed or still loading.
-        # We keep waiting, but the fatal-log check above will cut this off quickly.
-        time.sleep(poll_interval_s)
+        # Fallback success: log markers (your log proves ready)
+        if _log_looks_ready(log_path):
+            return True, "OK (log markers: model loaded + listening)"
 
-    # Timeout: include last HTTP status + log tail
-    tail = _tail(log_path)
-    detail = f"Timeout waiting for server readiness. Last probe: {last_detail}"
-    if tail:
-        detail += f"\n\n--- log tail ---\n{tail}"
-    return False, detail
+        time.sleep(poll_s)
 
+    if _log_looks_ready(log_path):
+        return True, "OK (log markers: model loaded + listening)"
 
-# ----------------------------- public API ------------------------------
+    return False, f"Timeout waiting for readiness. Last: {last}\n\n--- log tail ---\n{_tail(log_path)}"
 
 
 def ensure_q5_running(servers: ManagedServers) -> Tuple[bool, str]:
-    """Ensure Q5 is ready (HTTP-ready). Starts it if not ready."""
-    # If already ready, return quickly
-    ready, detail = _http_ready(servers.host, servers.q5_port, servers.http_probe_timeout_s)
-    if ready:
-        return True, "Q5 already ready"
+    base_url = f"http://{servers.host}:{servers.q5_port}"
 
-    ok, msg = start_server_from_bat(servers.start_q5_bat)
-    if not ok:
-        return False, f"Q5 start failed: {msg}"
+    # If already ready, return immediately (no delay)
+    ok, detail = _http_ready(base_url, timeout_s=1.0)
+    if ok:
+        return True, f"Q5 ready: {detail}"
 
-    ok2, detail2 = _wait_for_ready(
+    # Avoid duplicate spawns
+    if find_pid_by_port(servers.q5_port) is None:
+        ok, msg = start_server_from_bat(servers.start_q5_bat)
+        if not ok:
+            return False, f"Q5 start failed: {msg}"
+
+    return _wait_for_ready(
         host=servers.host,
         port=servers.q5_port,
+        base_url=base_url,
         timeout_s=servers.q5_start_timeout_s,
         log_path=servers.q5_log,
-        http_probe_timeout_s=servers.http_probe_timeout_s,
-        poll_interval_s=servers.poll_interval_s,
     )
-    if ok2:
-        return True, "Q5 ready"
-    return False, f"Q5 started but not ready:\n{detail2}"
 
 
 def ensure_q6_running(servers: ManagedServers) -> Tuple[bool, str]:
-    """Ensure Q6 is ready (HTTP-ready). Starts it if not ready."""
-    ready, detail = _http_ready(servers.host, servers.q6_port, servers.http_probe_timeout_s)
-    if ready:
-        return True, "Q6 already ready"
+    base_url = f"http://{servers.host}:{servers.q6_port}"
 
-    ok, msg = start_server_from_bat(servers.start_q6_bat)
-    if not ok:
-        return False, f"Q6 start failed: {msg}"
+    ok, detail = _http_ready(base_url, timeout_s=1.0)
+    if ok:
+        return True, f"Q6 ready: {detail}"
 
-    ok2, detail2 = _wait_for_ready(
+    if find_pid_by_port(servers.q6_port) is None:
+        ok, msg = start_server_from_bat(servers.start_q6_bat)
+        if not ok:
+            return False, f"Q6 start failed: {msg}"
+
+    return _wait_for_ready(
         host=servers.host,
         port=servers.q6_port,
+        base_url=base_url,
         timeout_s=servers.q6_start_timeout_s,
         log_path=servers.q6_log,
-        http_probe_timeout_s=servers.http_probe_timeout_s,
-        poll_interval_s=servers.poll_interval_s,
     )
-    if ok2:
-        return True, "Q6 ready"
-    return False, f"Q6 started but not ready:\n{detail2}"
+
+
+def is_port_listening(port: int) -> bool:
+    return find_pid_by_port(port) is not None
 
 
 def ensure_running(servers: ManagedServers) -> Tuple[bool, str]:
-    """
-    Backwards-compatible: ensures BOTH are ready.
-    (Your updated UI should usually call ensure_q5_running first and only ensure_q6_running on escalation.)
-    """
     ok5, msg5 = ensure_q5_running(servers)
     if not ok5:
         return False, msg5
