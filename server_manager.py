@@ -26,11 +26,6 @@ class ManagedServers:
     start_q6_bat: Path = _PROJECT_ROOT / "start_q6_server.bat"
     q5_log: Optional[Path] = _LOGDIR / "q5_server.log"
     q6_log: Optional[Path] = _LOGDIR / "q6_server.log"
-
-    # Used for debugging. Comment out for prod.
-    print(f"q5_log path:{q5_log}")
-    print(f"q6_log path:{q6_log}")
-
     q5_start_timeout_s: float = 1800.0  # 30 min
     q6_start_timeout_s: float = 2700.0  # 45 min
 
