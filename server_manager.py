@@ -1,17 +1,38 @@
 from __future__ import annotations
 
-import socket
+import os
+import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
-import requests
 
-# Project root = folder containing this file (works regardless of Streamlit CWD)
+# ---------------------------
+# Project paths (pinned)
+# ---------------------------
+
 _PROJECT_ROOT = Path(__file__).resolve().parent
 _LOGS_DIR = _PROJECT_ROOT / "logs"
+_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+_FATAL_MARKERS = (
+    "error while handling argument",
+    "failed to load model",
+    "error loading model",
+    "exiting due to model loading error",
+    "cudaMalloc failed",
+    "unable to allocate CUDA0 buffer",
+    "failed to allocate CUDA0 buffer",
+    "ggml_backend_cuda_buffer_type_alloc_buffer",
+    "The filename, directory name, or volume label syntax is incorrect",
+    "EXE not found",
+    "MODEL not found",
+)
 
 
 @dataclass(frozen=True)
@@ -26,186 +47,281 @@ class ManagedServers:
     q5_log: Path = _LOGS_DIR / "q5_server.log"
     q6_log: Path = _LOGS_DIR / "q6_server.log"
 
-    q5_start_timeout_s: float = 1800.0   # 30 min
-    q6_start_timeout_s: float = 2700.0   # 45 min
+    q5_start_timeout_s: float = 1800.0  # 30 min
+    q6_start_timeout_s: float = 2700.0  # 45 min
 
 
-_FATAL_MARKERS = (
-    "error while handling argument",
-    "failed to load model",
-    "error loading model",
-    "exiting due to model loading error",
-    "cudaMalloc failed",
-    "unable to allocate CUDA0 buffer",
-    "failed to allocate CUDA0 buffer",
-    "ggml_backend_cuda_buffer_type_alloc_buffer",
-)
+# ---------------------------
+# Windows helpers
+# ---------------------------
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        check=False,
+        cwd=str(_PROJECT_ROOT),
+    )
 
 
-def _tail(path: Optional[Path], n_lines: int = 120) -> str:
+def find_pid_by_port(port: int) -> Optional[int]:
+    """
+    Finds PID that is LISTENING on 127.0.0.1:<port> or 0.0.0.0:<port>.
+    """
+    cp = _run(["cmd.exe", "/c", "netstat -ano -p tcp"])
+    if cp.returncode != 0:
+        return None
+
+    # Example:
+    # TCP    127.0.0.1:8011     0.0.0.0:0      LISTENING       40000
+    patt = re.compile(rf"^\s*TCP\s+(\S+):{port}\s+\S+\s+LISTENING\s+(\d+)\s*$", re.I)
+    for line in cp.stdout.splitlines():
+        m = patt.match(line)
+        if m:
+            pid = int(m.group(2))
+            return pid
+    return None
+
+
+def stop_server_on_port(port: int) -> None:
+    pid = find_pid_by_port(port)
+    if pid is None:
+        return
+    _run(["taskkill", "/PID", str(pid), "/F"])
+
+
+# ---------------------------
+# HTTP readiness
+# ---------------------------
+
+def _http_get_status(url: str, timeout_s: float) -> int:
+    req = Request(url, method="GET")
+    try:
+        with urlopen(req, timeout=timeout_s) as resp:
+            return int(getattr(resp, "status", 0) or 0)
+    except HTTPError as e:
+        return int(getattr(e, "code", 0) or 0)
+    except URLError:
+        return 0
+    except Exception:
+        return 0
+
+
+def _http_ready(base_url: str, timeout_s: float = 1.0) -> Tuple[bool, str]:
+    """
+    Bulletproof: probes /health then /v1/health first (as you requested),
+    then falls back to /v1/models and /props.
+    """
+    endpoints = ["/health", "/v1/health", "/v1/models", "/props"]
+    for ep in endpoints:
+        st = _http_get_status(base_url + ep, timeout_s=timeout_s)
+        if st == 200:
+            return True, f"ready via {ep}"
+    return False, "not ready"
+
+
+# ---------------------------
+# Log tail + ready wait
+# ---------------------------
+
+def _tail(path: Optional[Path], n_lines: int = 160) -> str:
     try:
         if not path or not path.exists():
             return ""
+        # Reading whole file is ok for your current log sizes; keeps it simple and reliable.
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
         return "\n".join(lines[-n_lines:])
     except Exception:
         return ""
 
 
-def _log_has_fatal_error(log_path: Optional[Path]) -> Optional[str]:
-    if not log_path or not log_path.exists():
-        return None
-    txt = log_path.read_text(encoding="utf-8", errors="ignore")
-    for m in _FATAL_MARKERS:
-        if m in txt:
-            return m
+def _log_has_fatal_error(tail_text: str) -> Optional[str]:
+    low = tail_text.lower()
+    for marker in _FATAL_MARKERS:
+        if marker.lower() in low:
+            return marker
     return None
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, shell=False)
+def _wait_for_ready(host: str, port: int, base_url: str, timeout_s: float, log_path: Path) -> Tuple[bool, str]:
+    start = time.monotonic()
+    last_tail = ""
+
+    while (time.monotonic() - start) < timeout_s:
+        ok, how = _http_ready(base_url, timeout_s=1.0)
+        if ok:
+            return True, f"ready ({how})"
+
+        tail_text = _tail(log_path)
+        if tail_text and tail_text != last_tail:
+            last_tail = tail_text
+            fatal = _log_has_fatal_error(tail_text)
+            if fatal:
+                return False, f"fatal in log: {fatal}\n--- tail ---\n{tail_text}"
+
+        # small sleep to avoid busy loop; you asked for no “polling delays” meaning no *artificial* long waits.
+        time.sleep(0.15)
+
+    return False, f"timeout waiting for {host}:{port}\n--- tail ---\n{_tail(log_path)}"
 
 
-def find_pid_by_port(port: int) -> Optional[int]:
-    proc = _run(["cmd.exe", "/c", "netstat -ano"])
-    if proc.returncode != 0:
-        return None
-    needle = f":{port} "
-    for line in proc.stdout.splitlines():
-        if needle in line and "LISTENING" in line:
-            parts = line.split()
-            if len(parts) >= 5 and parts[-1].isdigit():
-                return int(parts[-1])
-    return None
+# ---------------------------
+# BAT parsing + direct spawn
+# ---------------------------
+
+_SET_QUOTED = re.compile(r'^\s*set\s+"([^=]+)=(.*)"\s*$', re.I)
+_SET_PLAIN  = re.compile(r'^\s*set\s+([^=]+)=(.*)\s*$', re.I)
+_VAR_REF    = re.compile(r"%([^%]+)%")
 
 
-def stop_server_on_port(port: int) -> bool:
-    pid = find_pid_by_port(port)
-    if pid is None:
-        return True
-    proc = _run(["cmd.exe", "/c", f"taskkill /PID {pid} /F"])
-    return proc.returncode == 0
+def _parse_set_vars(bat_text: str) -> Dict[str, str]:
+    vars: Dict[str, str] = {}
+    for raw in bat_text.splitlines():
+        line = raw.strip()
+        m = _SET_QUOTED.match(line)
+        if m:
+            vars[m.group(1).strip()] = m.group(2)
+            continue
+        m = _SET_PLAIN.match(line)
+        if m:
+            k = m.group(1).strip().strip('"')
+            v = m.group(2).strip().strip('"')
+            vars[k] = v
+    return vars
 
 
-def _creation_flags_no_window() -> int:
-    flags = 0
-    flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
-    flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return flags
+def _expand_vars(s: str, vars: Dict[str, str]) -> str:
+    # Expand %VARS% up to 10 passes (handles ROOT->LOGDIR->LOGFILE chains)
+    for _ in range(10):
+        new = _VAR_REF.sub(lambda m: vars.get(m.group(1), m.group(0)), s)
+        if new == s:
+            return s
+        s = new
+    return s
 
 
-def start_server_from_bat(*, bat_path: Path) -> Tuple[bool, str]:
+def _extract_llama_command_lines(bat_text: str) -> list[str]:
     """
-    Start BAT asynchronously, detached, with no console window.
-    Logging is handled inside the BAT (>> logs\q5_server.log / q6_server.log).
+    Finds the command block that starts with "%EXE%" and collects continuation lines.
+    """
+    lines = bat_text.splitlines()
+    cmd_lines: list[str] = []
+    started = False
+    for raw in lines:
+        stripped = raw.strip()
+        if not started and stripped.startswith('"%EXE%"'):
+            started = True
+        if started:
+            cmd_lines.append(raw.rstrip())
+            if not raw.rstrip().endswith("^"):
+                break
+    return cmd_lines
+
+
+def _build_llama_tokens_from_bat(bat_path: Path) -> Tuple[list[str], Dict[str, str]]:
+    bat_text = bat_path.read_text(encoding="utf-8", errors="ignore")
+
+    vars = _parse_set_vars(bat_text)
+    # Expand the vars using each other
+    vars = {k: _expand_vars(v, vars) for k, v in vars.items()}
+
+    cmd_lines = _extract_llama_command_lines(bat_text)
+    if not cmd_lines:
+        raise RuntimeError("Could not find llama-server command block (line starting with \"%EXE%\")")
+
+    # Join lines, remove trailing ^, then expand vars
+    cmd = " ".join([ln.rstrip().rstrip("^").strip() for ln in cmd_lines])
+    cmd = _expand_vars(cmd, vars)
+
+    # Strip any CMD redirection from the end (we do redirection in Python)
+    cmd = re.split(r"\s1>>", cmd, maxsplit=1)[0].strip()
+
+    # Tokenize
+    tokens = shlex.split(cmd, posix=False)
+
+    # Remove surrounding quotes from tokens (shlex(posix=False) keeps them sometimes)
+    def unquote(t: str) -> str:
+        t = t.strip()
+        if len(t) >= 2 and t[0] == '"' and t[-1] == '"':
+            return t[1:-1]
+        return t
+
+    tokens = [unquote(t) for t in tokens]
+    return tokens, vars
+
+
+def start_server_from_bat(bat_path: Path, log_path: Path) -> Tuple[bool, str]:
+    """
+    Most bulletproof: parse bat, spawn llama-server.exe directly, redirect stdout/stderr to log_path,
+    and suppress console windows.
     """
     if not bat_path.exists():
-        return False, f"Missing bat: {bat_path}"
-
-    DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0)
-    CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        return False, f"BAT not found: {bat_path}"
 
     try:
-        subprocess.Popen(
-            ["cmd.exe", "/c", str(bat_path)],
-            cwd=str(_PROJECT_ROOT),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
-            close_fds=True,
-        )
-        return True, "Spawned"
+        tokens, vars = _build_llama_tokens_from_bat(bat_path)
     except Exception as e:
-        return False, f"Failed to spawn {bat_path.name}: {type(e).__name__}: {e}"
+        return False, f"Failed to parse BAT: {e}"
 
+    if not tokens:
+        return False, "Empty command tokens parsed from BAT"
 
-def _tcp_connect_ok(host: str, port: int, timeout_s: float = 0.5) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout_s):
-            return True
-    except OSError:
-        return False
+    exe = tokens[0]
+    if not Path(exe).exists():
+        # This is the exact failure you reported; now it should be resolved because we expand %ROOT%.
+        return False, f"EXE not found (from bat): {exe}"
 
+    # Ensure log dir exists
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
-def _http_ready(base_url: str, timeout_s: float = 2.0) -> Tuple[bool, str]:
-    """
-    Readiness probe (llama-server):
-
-    Prefer:
-      - /health
-      - /v1/health
-    Fallback:
-      - /v1/models
-      - /props
-
-    Any 200 from health endpoints => READY.
-    """
-    base = base_url.rstrip("/")
-
-    for path in ("/health", "/v1/health"):
-        try:
-            r = requests.get(f"{base}{path}", timeout=(timeout_s, timeout_s))
-            if r.status_code == 200:
-                return True, f"OK ({path})"
-        except Exception:
-            pass
+    # Write a header *from Python* so you can see Streamlit launches distinctly.
+    ts = time.strftime("%a %m/%d/%Y %H:%M:%S", time.localtime())
+    header = f"\n==== PY LAUNCH {bat_path.name} {ts} ====\n".encode("utf-8", errors="ignore")
 
     try:
-        r = requests.get(f"{base}/v1/models", timeout=(timeout_s, timeout_s))
-        if r.status_code == 200:
-            return True, "OK (/v1/models)"
-    except Exception:
-        pass
+        # Binary append so subprocess can write bytes safely
+        with open(log_path, "ab", buffering=0) as fh:
+            fh.write(header)
+            fh.flush()
 
-    try:
-        r = requests.get(f"{base}/props", timeout=(timeout_s, timeout_s))
-        if r.status_code == 200:
-            return True, "OK (/props)"
-        return False, f"HTTP {r.status_code} (/props)"
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+            subprocess.Popen(
+                tokens,
+                cwd=str(_PROJECT_ROOT),
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                creationflags=creationflags,
+                close_fds=False,  # keep Windows handle behavior stable
+            )
     except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+        return False, f"Failed to spawn llama-server: {e}"
+
+    return True, "spawned"
 
 
-def _wait_for_ready(
-    *,
-    host: str,
-    port: int,
-    base_url: str,
-    timeout_s: float,
-    log_path: Path,
-    poll_s: float = 0.25,
-) -> Tuple[bool, str]:
-    end = time.time() + timeout_s
-    last = "not ready"
-    while time.time() < end:
-        fatal = _log_has_fatal_error(log_path)
-        if fatal:
-            return False, f"Fatal error in log: '{fatal}'\n\n--- log tail ---\n{_tail(log_path)}"
-
-        if _tcp_connect_ok(host, port, timeout_s=0.25):
-            ok, detail = _http_ready(base_url, timeout_s=1.5)
-            last = detail
-            if ok:
-                return True, detail
-
-        time.sleep(poll_s)
-
-    return False, f"Timeout waiting for readiness. Last: {last}\n\n--- log tail ---\n{_tail(log_path)}"
-
+# ---------------------------
+# Public API used by Streamlit
+# ---------------------------
 
 def ensure_q5_running(servers: ManagedServers) -> Tuple[bool, str]:
     base_url = f"http://{servers.host}:{servers.q5_port}"
 
-    if find_pid_by_port(servers.q5_port) is not None:
-        ok, _ = _http_ready(base_url, timeout_s=1.5)
+    pid = find_pid_by_port(servers.q5_port)
+    if pid is not None:
+        ok, how = _http_ready(base_url, timeout_s=1.0)
         if ok:
-            return True, "Q5 already ready"
+            return True, f"Q5 already ready ({how})"
 
     stop_server_on_port(servers.q5_port)
 
-    ok, msg = start_server_from_bat(bat_path=servers.start_q5_bat)
+    ok, msg = start_server_from_bat(bat_path=servers.start_q5_bat, log_path=servers.q5_log)
     if not ok:
         return False, f"Q5 start failed: {msg}"
 
@@ -221,14 +337,15 @@ def ensure_q5_running(servers: ManagedServers) -> Tuple[bool, str]:
 def ensure_q6_running(servers: ManagedServers) -> Tuple[bool, str]:
     base_url = f"http://{servers.host}:{servers.q6_port}"
 
-    if find_pid_by_port(servers.q6_port) is not None:
-        ok, _ = _http_ready(base_url, timeout_s=1.5)
+    pid = find_pid_by_port(servers.q6_port)
+    if pid is not None:
+        ok, how = _http_ready(base_url, timeout_s=1.0)
         if ok:
-            return True, "Q6 already ready"
+            return True, f"Q6 already ready ({how})"
 
     stop_server_on_port(servers.q6_port)
 
-    ok, msg = start_server_from_bat(bat_path=servers.start_q5_bat)
+    ok, msg = start_server_from_bat(bat_path=servers.start_q6_bat, log_path=servers.q6_log)
     if not ok:
         return False, f"Q6 start failed: {msg}"
 
@@ -239,12 +356,3 @@ def ensure_q6_running(servers: ManagedServers) -> Tuple[bool, str]:
         timeout_s=servers.q6_start_timeout_s,
         log_path=servers.q6_log,
     )
-
-
-# Backwards-compatible helpers
-def is_port_listening(port: int) -> bool:
-    return find_pid_by_port(port) is not None
-
-
-
-

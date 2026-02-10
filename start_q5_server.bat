@@ -23,26 +23,9 @@ if not exist "%MODEL%" (
   exit /b 1
 )
 
-REM Run llama-server in the foreground. server_manager.py will detach this BAT (no UI blocking).
-REM Devices must match `llama-server --list-devices` => CUDA0,CUDA1 on your build.
-"%EXE%" ^
-  --host 127.0.0.1 ^
-  --port 8011 ^
-  --model "%MODEL%" ^
-  --alias UD-IQ1_S ^
-  --device CUDA0,CUDA1 ^
-  --split-mode layer ^
-  --tensor-split 3,1 ^
-  --main-gpu 0 ^
-  --n-gpu-layers auto ^
-  --fit on ^
-  --flash-attn auto ^
-  --log-file "%LOGFILE%" ^
-  --log-colors off ^
-  --log-timestamps ^
-  --log-prefix ^
-  --log-verbosity 3
+>>"%LOGFILE%" echo Launching llama-server on 127.0.0.1:8011 (devices CUDA0,CUDA1) ...
 
+"%EXE%" --host 127.0.0.1 --port 8011 --model "%MODEL%" --alias UD-IQ1_S --ctx-size 4096 --batch-size 96 --ubatch-size 48 --cpu-moe --device CUDA0,CUDA1 --split-mode layer --tensor-split 3,1 --main-gpu 0 --n-gpu-layers auto --fit on --flash-attn auto --log-colors off --log-timestamps --log-prefix --log-verbosity 3 1>>"%LOGFILE%" 2>>&1
 
 set "RC=%ERRORLEVEL%"
 >>"%LOGFILE%" echo ==== Q5 EXIT %DATE% %TIME% (rc=%RC%) ====
