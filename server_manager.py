@@ -305,7 +305,6 @@ def start_server_from_bat(bat_path: Path, log_path: Path) -> Tuple[bool, str]:
 
     return True, "spawned"
 
-
 # ---------------------------
 # Public API used by Streamlit
 # ---------------------------
