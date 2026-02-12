@@ -6,6 +6,8 @@ set "EXE=%ROOT%\llama.cpp\build\bin\Release\llama-server.exe"
 set "MODEL=E:\DeepSeek-V3.2-GGUF\UD-IQ1_M\DeepSeek-V3.2-UD-IQ1_M-00001-of-00005.gguf"
 set "LOGDIR=%ROOT%\logs"
 set "LOGFILE=%LOGDIR%\q6_server.log"
+set "DRAFT=E:\DeepSeek-V3.2-GGUF\UD-IQ1_S\DeepSeek-V3.2-UD-IQ1_S-00001-of-00004.gguf"
+set "CUDA_VISIBLE_DEVICES=0"
 
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 
@@ -25,7 +27,7 @@ if not exist "%MODEL%" (
 
 >>"%LOGFILE%" echo Launching llama-server on 127.0.0.1:8012 (devices CUDA0,CUDA1) ...
 
-"%EXE%" --host 127.0.0.1 --port 8012 --model "%MODEL%" --alias UD-IQ1_M --ctx-size 4096 --batch-size 256 --ubatch-size 128 --cpu-moe --device CUDA0,CUDA1 --split-mode layer --tensor-split 2,1 --main-gpu 0 --n-gpu-layers all --n-predict 512 --fit on --flash-attn on --log-colors off --log-timestamps --log-prefix --log-verbosity 3 1>>"%LOGFILE%" 2>>&1
+"%EXE%" --host 127.0.0.1 --port 8012 --model "%MODEL%" --alias UD-IQ1_M --ctx-size 4096 --batch-size 128 --ubatch-size 64 --threads 32 --threads-batch 32 -np 1 --cpu-moe --device CUDA0,CUDA1 --split-mode layer --tensor-split 3,1 --main-gpu 0 --n-gpu-layers auto --n-predict 512 --fit on --flash-attn on -ncmoe 52 -md "%DRAFT%" -devd CUDA0 --n-gpu-layers-draft 20 -cd 4096 -cmoed --draft-max 16 --draft-min 4 --draft-p-min 0.75 --log-colors off --log-timestamps --log-prefix --log-verbosity 3 1>>"%LOGFILE%" 2>>&1
 
 set "RC=%ERRORLEVEL%"
 >>"%LOGFILE%" echo ==== Q6 EXIT %DATE% %TIME% (rc=%RC%) ====
