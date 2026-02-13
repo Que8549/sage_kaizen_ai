@@ -1,6 +1,6 @@
 # ! pip install -U huggingface_hub
 # ! pip install huggingface_hub hf_transfer hf_xet
-
+# nvidia-smi
 
 import os
 from huggingface_hub import snapshot_download
