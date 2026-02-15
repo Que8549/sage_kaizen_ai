@@ -1,6 +1,6 @@
 import time
 
-from sage_kaizen_prompt_lib import (
+from old_sage_kaizen_prompt_lib import (
     SageKaizenLLM,
     TemplateKey,
 )

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 from dotenv import load_dotenv
 
-from test_using_gpus import debug_gpu_memory_banner
+from old_test_using_gpus import debug_gpu_memory_banner
 
 # NOTE: The biggest compatibility variable for Python 3.13/3.14 on Windows is whether
 # llama_cpp has a wheel for your Python version/arch. The code below is 3.13/3.14-safe,
@@ -31,8 +31,8 @@ except Exception as e:  # pragma: no cover
 # -----------------------------
 # 1) Model paths (edit as needed)
 # -----------------------------
-Q5_MODEL_PATH = r"E:/DeepSeek-V3.2-GGUF/UD-IQ1_S/DeepSeek-V3.2-UD-IQ1_S-00001-of-00004.gguf"
-Q6_MODEL_PATH = r"E:/DeepSeek-V3.2-GGUF/UD-IQ1_M/DeepSeek-V3.2-UD-IQ1_M-00001-of-00005.gguf"
+Q5_MODEL_PATH = r"E:\Qwen\Qwen2.5-14B-Instruct-GGUF\Q6_K\qwen2.5-14b-instruct-q6_k-00001-of-00004.gguf"
+Q6_MODEL_PATH = r"E:\Qwen\bartowski-Qwen2.5-32B-Instruct-GGUF\Qwen2.5-32B-Instruct-Q6_K_L.gguf"
 
 SYSTEM_PROMPT_PATH = r"./sage_kaizen_system_prompt.txt"
 
@@ -41,8 +41,8 @@ SYSTEM_PROMPT_PATH = r"./sage_kaizen_system_prompt.txt"
 # 2) Quant + profile definitions
 # -----------------------------
 class Quant(str, Enum):
-    Q5_K_M = "Q5_K_M"
     Q6_K = "Q6_K"
+    Q6_K_L = "Q6_K_L"
 
 load_dotenv()
 
@@ -205,7 +205,7 @@ def choose_quant(user_text: str, templates: Tuple[TemplateKey, ...]) -> Quant:
     txt = user_text.lower()
 
     if any(k in txt for k in SHORT_HINTS):
-        return Quant.Q5_K_M
+        return Quant.Q6_K
 
     depth_templates = {
         TemplateKey.STRUCTURED_KNOWLEDGE,
@@ -215,20 +215,20 @@ def choose_quant(user_text: str, templates: Tuple[TemplateKey, ...]) -> Quant:
         TemplateKey.AUTO_ADAPTIVE_META,
     }
     if any(t in depth_templates for t in templates):
-        return Quant.Q6_K
+        return Quant.Q6_K_L
 
     multi_part = (" and " in txt) or (" also " in txt) or (" vs " in txt) or ("compare" in txt)
     has_depth = any(k in txt for k in DEPTH_HINTS)
     has_code = any(k in txt for k in CODE_HINTS)
 
     if multi_part or has_depth or has_code:
-        return Quant.Q6_K
+        return Quant.Q6_K_L
 
-    return Quant.Q5_K_M
+    return Quant.Q6_K
 
 
 def sampling_for_quant(q: Quant) -> SamplingProfile:
-    return Q6_DEPTH if q == Quant.Q6_K else Q5_PRECISION
+    return Q6_DEPTH if q == Quant.Q6_K_L else Q5_PRECISION
 
 
 # -----------------------------
@@ -358,7 +358,7 @@ class SageKaizenLLM:
 
     def _get_cached_gpu_layers(self, quant: Quant) -> Optional[int]:
         # Env vars override everything (fast iteration, no code changes)
-        env_key = "SAGE_KAIZEN_GPU_LAYERS_Q6" if quant == Quant.Q6_K else "SAGE_KAIZEN_GPU_LAYERS_Q5"
+        env_key = "SAGE_KAIZEN_GPU_LAYERS_Q6" if quant == Quant.Q6_K_L else "SAGE_KAIZEN_GPU_LAYERS_Q5"
         if os.getenv(env_key):
             try:
                 return int(os.environ[env_key])
@@ -415,7 +415,7 @@ class SageKaizenLLM:
         ) from last_err
 
     def _load(self, quant: Quant) -> Llama:
-        if quant == Quant.Q5_K_M:
+        if quant == Quant.Q6_K:
             if self._llm_q5 is None:
                 self._llm_q5 = self._load_with_fallback_gpu_layers(Q5_MODEL_PATH, quant)
             return self._llm_q5

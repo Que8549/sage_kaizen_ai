@@ -25,7 +25,7 @@ if not exist "%MODEL%" (
 
 >>"%LOGFILE%" echo Launching llama-server on 127.0.0.1:8012 (devices CUDA0,CUDA1) ...
 
-"%EXE%" --host 127.0.0.1 --port 8012 --model "%MODEL%" --alias Q6_K_L --device CUDA0 --n-gpu-layers auto --split-mode none  --ctx-size 8192 --batch-size 768 --ubatch-size 256 --threads 22 --threads-batch 22 --threads-http 8 --flash-attn on --cache-type-k f16 --cache-type-v q8_0 --fit on --fit-target 1024 --fit-ctx 8192 --no-warmup --n-predict 512 --log-colors off --log-timestamps --log-prefix --log-verbosity 3 1>>"%LOGFILE%" 2>>&1
+"%EXE%" --host 127.0.0.1 --port 8012 --model "%MODEL%" --alias Q6_K_L --device CUDA0 --n-gpu-layers all --split-mode none  --ctx-size 8192 --batch-size 768 --ubatch-size 256 --threads 22 --threads-batch 22 --threads-http 8 --flash-attn on --cache-type-k f16 --cache-type-v q8_0 --fit on --fit-target 1024 --fit-ctx 8192 --no-warmup --n-predict 512 --log-colors off --log-timestamps --log-prefix --log-verbosity 3 1>>"%LOGFILE%" 2>>&1
 
 set "RC=%ERRORLEVEL%"
 >>"%LOGFILE%" echo ==== Q6 EXIT %DATE% %TIME% (rc=%RC%) ====

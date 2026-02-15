@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 # Optional: GPU/RAM telemetry (must never crash the app)
 try:
-    from test_using_gpus import debug_gpu_memory_banner
+    from old_test_using_gpus import debug_gpu_memory_banner
 except Exception:
     debug_gpu_memory_banner = None
 

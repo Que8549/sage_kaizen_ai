@@ -1,0 +1,77 @@
+🌌 Benchmark A — Historical Reasoning
+What is the earliest known civilization to systematically study the stars, and how did their astronomical observations influence their religious practices and political authority? Provide historical examples and explain causal relationships.
+
+Tests:
+
+Multi-hop reasoning
+Historical synthesis
+Causal explanation
+
+
+🏗 Benchmark B — Systems Architecture
+Design a scalable dual-GPU local AI architecture using llama.cpp, where:
+
+- GPU0 prioritizes deep reasoning
+- GPU1 prioritizes low-latency responses
+
+Include:
+- Request routing strategy
+- KV cache allocation strategy
+- Failure fallback behavior
+- Telemetry collection
+- Speculative decoding option
+
+Provide a Mermaid diagram.
+
+Tests:
+Structured architecture thinking
+GPU-aware reasoning
+
+
+🧠 Benchmark C — GPU Reasoning Test
+Given:
+- 32GB VRAM
+- KV cache size 1568 MiB
+- 18 tokens/sec generation
+- 8192 context
+
+Estimate:
+1) Time to generate 1500 tokens
+2) Impact of increasing context to 16384
+3) Trade-offs in GPU memory usage
+Explain reasoning step-by-step.
+
+Tests:
+Quantitative reasoning
+Hardware awareness
+
+
+🎨 Benchmark D — Creative Writing
+Write a short story titled “Last Night in Atlanta.”
+
+Requirements:
+- Blend jazz music and urban atmosphere
+- Use sensory imagery
+- Include one recurring symbolic motif
+- Tone: reflective, not sentimental
+- Length: 900–1100 words
+
+Tests:
+Narrative control
+Thematic coherence
+Stylistic consistency
+
+
+🎓 Benchmark E — Adaptive Tutoring
+Explain why seasons occur on Earth.
+
+Provide:
+1) A version for a 3rd grader
+2) A version for a 10th grader
+3) A version for a college-level physics student
+
+Tests:
+Pedagogical flexibility
+Concept scaling
+
+

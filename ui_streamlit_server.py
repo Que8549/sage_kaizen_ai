@@ -7,9 +7,21 @@ from typing import Dict, List, Optional
 import streamlit as st
 
 from settings import CONFIG
-from openai_client import HttpTimeouts, LlamaServerError, discover_model_id, health_check, stream_chat_completions
-from router import should_escalate_to_q6
+from openai_client import (
+    HttpTimeouts,
+    LlamaServerError,
+    discover_model_id,
+    health_check,
+    stream_chat_completions,
+)
+from router import RouteDecision, route
 from server_manager import ManagedServers, ensure_q5_running, ensure_q6_running, stop_server_on_port
+from prompt_library import (
+    TemplateKey,
+    build_messages,
+    sage_architect_core,
+    sage_fast_core,
+)
 
 
 def _load_system_prompt(path: Path) -> str:
@@ -40,6 +52,36 @@ def _normalize_base_url_ui(url: str) -> str:
     return u
 
 
+def _manual_decision(deep_mode: bool) -> RouteDecision:
+    # If user disables auto-escalate, we only respect deep_mode.
+    if deep_mode:
+        return RouteDecision(brain="ARCHITECT", reasons=["manual_deep_mode"], score=999)
+    return RouteDecision(brain="FAST", reasons=["manual_fast_mode"], score=0)
+
+def _auto_templates(user_text: str) -> tuple[TemplateKey, ...]:
+    """
+    Lightweight heuristic for automatic template selection.
+    (Per-turn; user can override from sidebar.)
+    """
+    txt = (user_text or "").lower()
+    templates: List[TemplateKey] = [
+        TemplateKey.UNIVERSAL_DEPTH_ANCHOR,
+        TemplateKey.AUTO_ADAPTIVE_META,
+    ]
+
+    if any(k in txt for k in ("teach", "tutor", "explain like", "for a 3rd grader", "for a 10th grader")):
+        templates.append(TemplateKey.TEACHING_TUTORING)
+
+    if any(k in txt for k in ("history", "civilization", "ancient", "timeline", "religion", "religious")):
+        templates.append(TemplateKey.STRUCTURED_KNOWLEDGE)
+
+    if any(k in txt for k in ("philosophy", "theology", "ethics", "meaning", "debate")):
+        templates.append(TemplateKey.PHILOSOPHY_DEEP_THINKING)
+
+    # Preserve order, remove duplicates
+    return tuple(dict.fromkeys(templates))
+
+
 st.set_page_config(page_title="Sage Kaizen (llama-server)", page_icon="🧠", layout="wide")
 st.title("🧠 Sage Kaizen (Dual-Brain Chat) 🧠")
 
@@ -55,6 +97,8 @@ if "q5_model_id" not in st.session_state:
     st.session_state.q5_model_id = CONFIG.q5_model_id
 if "q6_model_id" not in st.session_state:
     st.session_state.q6_model_id = CONFIG.q6_model_id
+if "last_route" not in st.session_state:
+    st.session_state.last_route = None  # type: ignore[assignment]
 
 with st.sidebar:
     st.subheader("Servers")
@@ -75,14 +119,14 @@ with st.sidebar:
     colA, colB = st.columns(2)
     with colA:
         if st.button("Start servers"):
-            with st.status("Starting Q5 (IQ1_S)…", expanded=True) as s:
-                s.write("Waiting for **IQ1_S** to finish loading (watch logs/q5_server.log)…")
+            with st.status("Starting Q5 (Fast Brain)…", expanded=True) as s:
+                s.write("Waiting for **Fast Brain** to finish loading (watch logs/q5_server.log)…")
                 ok, msg = ensure_q5_running(servers)
                 if ok:
-                    s.write("✅ **IQ1_S** loaded (Q5 ready).")
+                    s.write("✅ **Fast Brain** loaded (Q5 ready).")
                     s.update(label="Q5 ready ✅", state="complete")
                     st.success(msg)
-                    st.info("Q6 (UD-Q6_K) will start automatically only when a turn escalates (or enable Deep mode).")
+                    st.info("Q6 (Architect Brain) will start automatically only when a turn escalates (or enable Deep mode).")
                 else:
                     s.update(label="Failed to start Q5 ❌", state="error")
                     st.error(msg)
@@ -111,9 +155,28 @@ with st.sidebar:
         st.success(f"Model IDs: Q5={st.session_state.q5_model_id} | Q6={st.session_state.q6_model_id}")
 
     st.subheader("Routing")
-    deep_mode = st.toggle("Deep mode (force Q6 this turn)", value=False)
+    deep_mode = st.toggle("Deep mode (force Architect this turn)", value=False)
     auto_escalate = st.toggle("Auto-escalate when needed", value=True)
 
+    st.subheader("Prompt Templates")
+    auto_templates = st.toggle("Auto templates", value=True)
+
+    override_templates = st.multiselect(
+        "Template overrides (optional)",
+        options=list(TemplateKey),
+        default=[],
+        format_func=lambda t: t.value,
+        help="If you select templates here, they are used for this turn and auto-templates are ignored.",
+    )
+
+
+    # Display last routing decision (helpful for tuning)
+    if st.session_state.last_route is not None:
+        rd: RouteDecision = st.session_state.last_route  # type: ignore[assignment]
+        st.caption(f"🧭 Last route: {rd.brain} • score={rd.score}")
+        if rd.reasons:
+            st.caption("Reasons: " + ", ".join(rd.reasons[:6]))
+    
     st.subheader("Generation")
     temperature_q5 = st.slider("Q5 temperature", 0.0, 1.2, 0.4, 0.05)
     temperature_q6 = st.slider("Q6 temperature", 0.0, 1.2, 0.6, 0.05)
@@ -128,6 +191,7 @@ with st.sidebar:
     if st.button("New chat"):
         st.session_state.messages = []
         st.session_state.last_thinking_time = None
+        st.session_state.last_route = None
         st.rerun()
 
 for m in st.session_state.messages:
@@ -140,7 +204,17 @@ if user_text:
     with st.chat_message("user"):
         st.markdown(user_text)
 
-    use_q6 = should_escalate_to_q6(user_text, deep_mode) if auto_escalate else deep_mode
+    # New router integration:
+    # - If auto_escalate is enabled: route() decides FAST vs ARCHITECT, deep_mode can force ARCHITECT.
+    # - If auto_escalate is disabled: only deep_mode decides.
+    if auto_escalate:
+        decision = route(user_text, force_architect=deep_mode)
+    else:
+        decision = _manual_decision(deep_mode)
+
+    st.session_state.last_route = decision
+
+    use_q6 = decision.brain == "ARCHITECT"
 
     with st.status("Checking servers…", expanded=False) as s:
         ok, msg = ensure_q5_running(servers)
@@ -150,28 +224,50 @@ if user_text:
             st.stop()
 
         if use_q6:
-            s.write("Starting **UD-Q6_K** (Q6) load…")
+            s.write("Starting **Architect Brain** (Q6) load…")
             ok, msg = ensure_q6_running(servers)
             if not ok:
                 s.update(label="Q6 not ready ❌", state="error")
                 st.error(msg)
                 st.stop()
-            s.write("✅ **UD-Q6_K** loaded (Q6 ready).")
+            s.write("✅ **Architect Brain** loaded (Q6 ready).")
 
         s.update(label="Servers ready ✅", state="complete")
 
-    brain_name = "Q6" if use_q6 else "Q5"
+    brain_name = "Architect (Q6)" if use_q6 else "Fast (Q5)"
     base_url = q6_url if use_q6 else q5_url
     model_id = st.session_state.q6_model_id if use_q6 else st.session_state.q5_model_id
     temperature = float(temperature_q6 if use_q6 else temperature_q5)
     top_p = float(top_p_q6 if use_q6 else top_p_q5)
     max_tokens = int(max_tokens_q6 if use_q6 else max_tokens_q5)
 
+    # ----- Prompt library integration -----
+    core_prompt = sage_architect_core if use_q6 else sage_fast_core
+
+    if override_templates:
+        templates = tuple(override_templates)
+    else:
+        templates = _auto_templates(user_text) if auto_templates else ()
+
+    # Build base messages (system + core + templates + current user)
+    messages = build_messages(
+        user_text=user_text,
+        system_prompt=system_prompt,
+        core_prompt=core_prompt,
+        templates=templates,
+    )
+
+    # Append prior conversation history (excluding the current user turn to avoid duplication)
     history = st.session_state.messages[-CONFIG.max_history_messages:]
-    messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-    messages.extend(history)
+    prior = history[:-1] if history else []
+    messages.extend(prior)
+
 
     with st.chat_message("assistant"):
+        # Show routing meta (tiny, useful)
+        st.caption(f"🧭 Route: {decision.brain} • score={decision.score} • reasons: {', '.join(decision.reasons[:6])}")
+        st.caption(f"🧩 Templates: {', '.join(t.value for t in templates) if templates else '(none)'}")
+        
         live = st.empty()
         acc: List[str] = []
         start = time.time()
