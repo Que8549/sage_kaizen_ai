@@ -11,9 +11,9 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 # still relies on the globally configured token or environment variable.
 
 snapshot_download(
-    repo_id = "ACE-Step/Ace-Step1.5",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
-    local_dir ="E:/Hermes-4.3-36B-GGUF",     
-    allow_patterns = ["*UD-IQ1_S*", "*UD-IQ1_M*"],  # allow_patterns = [""*Q8_0*", "*Q6_K*", "*Q4_K_S*", "*Q4_K_M*", "*Q5_K_S*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*"] 
+    repo_id = "Qwen/Qwen2.5-32B-Instruct-GGUF",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
+    local_dir ="E:/Qwen/Qwen2.5-32B-Instruct-GGUF/Q8_0",     
+    allow_patterns = ["*Q8_0*"],  # allow_patterns = [""*Q8_0*", "*Q6_K*", "*Q4_K_S*", "*Q4_K_M*", "*Q5_K_S*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*"] 
     # max_workers=8,  # 8 = default
 )
 
@@ -22,6 +22,7 @@ snapshot_download(
 # https://huggingface.co/Qwen 
 # Qwen/Qwen3-ASR-1.7B https://huggingface.co/Qwen/Qwen3-ASR-1.7B
 # Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+# Qwen/Qwen3-Omni-30B-A3B-Instruct
 
 
 # Q5_K_M (High-quality sweet spot)

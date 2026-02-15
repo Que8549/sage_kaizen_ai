@@ -3,7 +3,7 @@ setlocal EnableExtensions
 
 set "ROOT=F:\Projects\sage_kaizen_ai"
 set "EXE=%ROOT%\llama.cpp\build\bin\Release\llama-server.exe"
-set "MODEL=E:\DeepSeek-V3.2-GGUF\UD-IQ1_S\DeepSeek-V3.2-UD-IQ1_S-00001-of-00004.gguf"
+set "MODEL=E:\Qwen\Qwen2.5-14B-Instruct-GGUF\Q5_K_M\qwen2.5-14b-instruct-q5_k_m-00001-of-00003.gguf"
 set "LOGDIR=%ROOT%\logs"
 set "LOGFILE=%LOGDIR%\q5_server.log"
 
@@ -25,7 +25,7 @@ if not exist "%MODEL%" (
 
 >>"%LOGFILE%" echo Launching llama-server on 127.0.0.1:8011 (devices CUDA0,CUDA1) ...
 
-"%EXE%" --host 127.0.0.1 --port 8011 --model "%MODEL%" --alias UD-IQ1_S --ctx-size 4096 --batch-size 192 --ubatch-size 64 --threads 16 --threads-batch 16 -np 1 --device CUDA1 --main-gpu 1 --n-gpu-layers auto --n-predict 512 --fit on --flash-attn on --log-colors off --log-timestamps --log-prefix --log-verbosity 3 1>>"%LOGFILE%" 2>>&1
+"%EXE%" --host 127.0.0.1 --port 8011 --model "%MODEL%" --alias Qwen2.5-14B-Q5_K_M --device CUDA1 --n-gpu-layers auto --split-mode none --ctx-size 4096 --batch-size 1024 --ubatch-size 512 --threads 10 --threads-batch 10 --threads-http 6 --flash-attn on --cache-type-k f16 --cache-type-v f16 --fit on --fit-target 768 --no-warmup --n-predict 256 --cache-ram 0 --log-colors off --log-timestamps --log-prefix --log-verbosity 3 1>>"%LOGFILE%" 2>>&1
 
 set "RC=%ERRORLEVEL%"
 >>"%LOGFILE%" echo ==== Q5 EXIT %DATE% %TIME% (rc=%RC%) ====

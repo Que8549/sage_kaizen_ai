@@ -75,14 +75,14 @@ with st.sidebar:
     colA, colB = st.columns(2)
     with colA:
         if st.button("Start servers"):
-            with st.status("Starting Q5 (UD-IQ1_S)…", expanded=True) as s:
-                s.write("Waiting for **UD-IQ1_S** to finish loading (watch logs/q5_server.log)…")
+            with st.status("Starting Q5 (IQ1_S)…", expanded=True) as s:
+                s.write("Waiting for **IQ1_S** to finish loading (watch logs/q5_server.log)…")
                 ok, msg = ensure_q5_running(servers)
                 if ok:
-                    s.write("✅ **UD-IQ1_S** loaded (Q5 ready).")
+                    s.write("✅ **IQ1_S** loaded (Q5 ready).")
                     s.update(label="Q5 ready ✅", state="complete")
                     st.success(msg)
-                    st.info("Q6 (UD-IQ1_M) will start automatically only when a turn escalates (or enable Deep mode).")
+                    st.info("Q6 (UD-Q6_K) will start automatically only when a turn escalates (or enable Deep mode).")
                 else:
                     s.update(label="Failed to start Q5 ❌", state="error")
                     st.error(msg)
@@ -150,13 +150,13 @@ if user_text:
             st.stop()
 
         if use_q6:
-            s.write("Starting **UD-IQ1_M** (Q6) load…")
+            s.write("Starting **UD-Q6_K** (Q6) load…")
             ok, msg = ensure_q6_running(servers)
             if not ok:
                 s.update(label="Q6 not ready ❌", state="error")
                 st.error(msg)
                 st.stop()
-            s.write("✅ **UD-IQ1_M** loaded (Q6 ready).")
+            s.write("✅ **UD-Q6_K** loaded (Q6 ready).")
 
         s.update(label="Servers ready ✅", state="complete")
 
