@@ -3,7 +3,7 @@ setlocal EnableExtensions
 
 set "ROOT=F:\Projects\sage_kaizen_ai"
 set "EXE=%ROOT%\llama.cpp\build\bin\Release\llama-server.exe"
-set "MODEL=E:\Qwen\Qwen2.5-14B-Instruct-GGUF\Q5_K_M\qwen2.5-14b-instruct-q5_k_m-00001-of-00003.gguf"
+set "MODEL=E:\Qwen\Qwen2.5-14B-Instruct-GGUF\Q6_K\qwen2.5-14b-instruct-q6_k-00001-of-00004.gguf"
 set "LOGDIR=%ROOT%\logs"
 set "LOGFILE=%LOGDIR%\q5_server.log"
 

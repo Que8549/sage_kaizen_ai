@@ -11,10 +11,10 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 # still relies on the globally configured token or environment variable.
 
 snapshot_download(
-    repo_id = "Qwen/Qwen2.5-32B-Instruct-GGUF",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
-    local_dir ="E:/Qwen/Qwen2.5-32B-Instruct-GGUF/Q8_0",     
-    allow_patterns = ["*Q8_0*"],  # allow_patterns = [""*Q8_0*", "*Q6_K*", "*Q4_K_S*", "*Q4_K_M*", "*Q5_K_S*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*"] 
-    # max_workers=8,  # 8 = default
+    repo_id = "bartowski/Qwen2.5-32B-Instruct-GGUF",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
+    local_dir ="E:/Qwen/bartowski-Qwen2.5-32B-Instruct-GGUF",     
+    allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*", "*Q6_K_L*"],  # allow_patterns = [""*Q8_0*", "*Q6_K*", "*Q4_K_S*", "*Q4_K_M*", "*Q5_K_S*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*"] 
+    max_workers=16,  # 8 = default
 )
 
 # NousResearch/Hermes-4.3-36B-GGUF  https://huggingface.co/NousResearch/Hermes-4.3-36B-GGUF
