@@ -43,7 +43,7 @@ class ManagedServers:
     embed_port: int = 8020
     start_embed_bat: Path = _PROJECT_ROOT / "start_embedding_point.bat"
     embed_log: Path = _PROJECT_ROOT / "logs" / "embed_server.log"
-    embed_start_timeout_s: float = 1800.0  # 30 minutes
+    embed_start_timeout_s: float = 300.0  # 5 minutes
 
     # Chat brains
     q5_port: int = 8011

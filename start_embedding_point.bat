@@ -23,7 +23,7 @@ if not exist "%MODEL%" (
   exit /b 1
 )
 
->>"%LOGFILE%" echo Launching llama-server on 127.0.0.1:8020 (devices CUDA0,CUDA1) ...
+>>"%LOGFILE%" echo Launching llama-server on 127.0.0.1:8020 (devices CUDA0) ...
 
 "%EXE%" --host 127.0.0.1 --port 8020 --model "%MODEL%" --alias bge-m3-embed --embeddings --pooling mean --device CUDA0 --n-gpu-layers all --ctx-size 2048 --batch-size 2048 --ubatch-size 512 --threads 20 --threads-batch 20 --threads-http 8 --flash-attn on --log-colors off --log-timestamps --log-prefix --log-verbosity 3 1>>"%LOGFILE%" 2>>&1
 

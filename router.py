@@ -11,7 +11,6 @@ from sk_logging import get_logger
 from rag_v1.runtime.router_integration import RagInjector
 from rag_v1.config.rag_settings import RagSettings
 
-
 DEPTH_HINTS = (
     "explain", "analyze", "compare", "why", "how", "history", "philosophy", "theology",
     "deep", "in depth", "detailed", "step-by-step", "teach", "tutor", "architecture",
@@ -172,6 +171,7 @@ def apply_rag(
       - top_k: FAST uses SAGE_RAG_FAST_TOPK (default 4)
                ARCHITECT uses SAGE_RAG_ARCH_TOPK (default 10)
     """
+    
     if not user_text:
         return messages
 
