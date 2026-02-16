@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
-
+import router 
 import streamlit as st
 
 from settings import CONFIG
@@ -119,7 +119,7 @@ with st.sidebar:
     colA, colB = st.columns(2)
     with colA:
         if st.button("Start servers"):
-            with st.status("Starting Q5 (Fast Brain)…", expanded=True) as s:
+            with st.status("Starting Embeddings → Q5 (Fast Brain)…", expanded=True) as s:
                 s.write("Waiting for **Fast Brain** to finish loading (watch logs/q5_server.log)…")
                 ok, msg = ensure_q5_running(servers)
                 if ok:
@@ -262,6 +262,7 @@ if user_text:
     prior = history[:-1] if history else []
     messages.extend(prior)
 
+    messages = router.apply_rag(messages, user_text, decision)
 
     with st.chat_message("assistant"):
         # Show routing meta (tiny, useful)

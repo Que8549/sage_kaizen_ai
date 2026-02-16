@@ -38,6 +38,14 @@ _FATAL_MARKERS = (
 @dataclass(frozen=True)
 class ManagedServers:
     host: str = "127.0.0.1"
+
+    # Embedding server (aligned with BAT)
+    embed_port: int = 8020
+    start_embed_bat: Path = _PROJECT_ROOT / "start_embedding_point.bat"
+    embed_log: Path = _PROJECT_ROOT / "logs" / "embed_server.log"
+    embed_start_timeout_s: float = 1800.0  # 30 minutes
+
+    # Chat brains
     q5_port: int = 8011
     q6_port: int = 8012
 
@@ -75,22 +83,23 @@ def find_pid_by_port(port: int) -> Optional[int]:
     if cp.returncode != 0:
         return None
 
-    # Example:
-    # TCP    127.0.0.1:8011     0.0.0.0:0      LISTENING       40000
     patt = re.compile(rf"^\s*TCP\s+(\S+):{port}\s+\S+\s+LISTENING\s+(\d+)\s*$", re.I)
     for line in cp.stdout.splitlines():
         m = patt.match(line)
         if m:
-            pid = int(m.group(2))
-            return pid
+            return int(m.group(2))
     return None
 
 
-def stop_server_on_port(port: int) -> None:
+def stop_server_on_port(port: int) -> bool:
+    """
+    Stops server listening on given port. Returns True if nothing is running or kill succeeded.
+    """
     pid = find_pid_by_port(port)
     if pid is None:
-        return
-    _run(["taskkill", "/PID", str(pid), "/F"])
+        return True
+    cp = _run(["taskkill", "/PID", str(pid), "/F"])
+    return cp.returncode == 0
 
 
 # ---------------------------
@@ -112,8 +121,7 @@ def _http_get_status(url: str, timeout_s: float) -> int:
 
 def _http_ready(base_url: str, timeout_s: float = 1.0) -> Tuple[bool, str]:
     """
-    Bulletproof: probes /health then /v1/health first (as you requested),
-    then falls back to /v1/models and /props.
+    Probes /health then /v1/health first, then falls back to /v1/models and /props.
     """
     endpoints = ["/health", "/v1/health", "/v1/models", "/props"]
     for ep in endpoints:
@@ -131,7 +139,6 @@ def _tail(path: Optional[Path], n_lines: int = 160) -> str:
     try:
         if not path or not path.exists():
             return ""
-        # Reading whole file is ok for your current log sizes; keeps it simple and reliable.
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
         return "\n".join(lines[-n_lines:])
     except Exception:
@@ -162,7 +169,6 @@ def _wait_for_ready(host: str, port: int, base_url: str, timeout_s: float, log_p
             if fatal:
                 return False, f"fatal in log: {fatal}\n--- tail ---\n{tail_text}"
 
-        # small sleep to avoid busy loop; you asked for no “polling delays” meaning no *artificial* long waits.
         time.sleep(0.15)
 
     return False, f"timeout waiting for {host}:{port}\n--- tail ---\n{_tail(log_path)}"
@@ -194,7 +200,6 @@ def _parse_set_vars(bat_text: str) -> Dict[str, str]:
 
 
 def _expand_vars(s: str, vars: Dict[str, str]) -> str:
-    # Expand %VARS% up to 10 passes (handles ROOT->LOGDIR->LOGFILE chains)
     for _ in range(10):
         new = _VAR_REF.sub(lambda m: vars.get(m.group(1), m.group(0)), s)
         if new == s:
@@ -204,9 +209,6 @@ def _expand_vars(s: str, vars: Dict[str, str]) -> str:
 
 
 def _extract_llama_command_lines(bat_text: str) -> list[str]:
-    """
-    Finds the command block that starts with "%EXE%" and collects continuation lines.
-    """
     lines = bat_text.splitlines()
     cmd_lines: list[str] = []
     started = False
@@ -225,24 +227,19 @@ def _build_llama_tokens_from_bat(bat_path: Path) -> Tuple[list[str], Dict[str, s
     bat_text = bat_path.read_text(encoding="utf-8", errors="ignore")
 
     vars = _parse_set_vars(bat_text)
-    # Expand the vars using each other
     vars = {k: _expand_vars(v, vars) for k, v in vars.items()}
 
     cmd_lines = _extract_llama_command_lines(bat_text)
     if not cmd_lines:
-        raise RuntimeError("Could not find llama-server command block (line starting with \"%EXE%\")")
+        raise RuntimeError('Could not find llama-server command block (line starting with "%EXE%")')
 
-    # Join lines, remove trailing ^, then expand vars
     cmd = " ".join([ln.rstrip().rstrip("^").strip() for ln in cmd_lines])
     cmd = _expand_vars(cmd, vars)
 
-    # Strip any CMD redirection from the end (we do redirection in Python)
     cmd = re.split(r"\s1>>", cmd, maxsplit=1)[0].strip()
 
-    # Tokenize
     tokens = shlex.split(cmd, posix=False)
 
-    # Remove surrounding quotes from tokens (shlex(posix=False) keeps them sometimes)
     def unquote(t: str) -> str:
         t = t.strip()
         if len(t) >= 2 and t[0] == '"' and t[-1] == '"':
@@ -254,15 +251,11 @@ def _build_llama_tokens_from_bat(bat_path: Path) -> Tuple[list[str], Dict[str, s
 
 
 def start_server_from_bat(bat_path: Path, log_path: Path) -> Tuple[bool, str]:
-    """
-    Most bulletproof: parse bat, spawn llama-server.exe directly, redirect stdout/stderr to log_path,
-    and suppress console windows.
-    """
     if not bat_path.exists():
         return False, f"BAT not found: {bat_path}"
 
     try:
-        tokens, vars = _build_llama_tokens_from_bat(bat_path)
+        tokens, _vars = _build_llama_tokens_from_bat(bat_path)
     except Exception as e:
         return False, f"Failed to parse BAT: {e}"
 
@@ -271,18 +264,14 @@ def start_server_from_bat(bat_path: Path, log_path: Path) -> Tuple[bool, str]:
 
     exe = tokens[0]
     if not Path(exe).exists():
-        # This is the exact failure you reported; now it should be resolved because we expand %ROOT%.
         return False, f"EXE not found (from bat): {exe}"
 
-    # Ensure log dir exists
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write a header *from Python* so you can see Streamlit launches distinctly.
     ts = time.strftime("%a %m/%d/%Y %H:%M:%S", time.localtime())
     header = f"\n==== PY LAUNCH {bat_path.name} {ts} ====\n".encode("utf-8", errors="ignore")
 
     try:
-        # Binary append so subprocess can write bytes safely
         with open(log_path, "ab", buffering=0) as fh:
             fh.write(header)
             fh.flush()
@@ -298,18 +287,48 @@ def start_server_from_bat(bat_path: Path, log_path: Path) -> Tuple[bool, str]:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 creationflags=creationflags,
-                close_fds=False,  # keep Windows handle behavior stable
+                close_fds=False,
             )
     except Exception as e:
         return False, f"Failed to spawn llama-server: {e}"
 
     return True, "spawned"
 
+
 # ---------------------------
 # Public API used by Streamlit
 # ---------------------------
 
+def ensure_embed_running(servers: ManagedServers) -> Tuple[bool, str]:
+    base_url = f"http://{servers.host}:{servers.embed_port}"
+
+    pid = find_pid_by_port(servers.embed_port)
+    if pid is not None:
+        ok, how = _http_ready(base_url, timeout_s=1.0)
+        if ok:
+            return True, f"EMBED already ready ({how})"
+
+    stop_server_on_port(servers.embed_port)
+
+    ok, msg = start_server_from_bat(bat_path=servers.start_embed_bat, log_path=servers.embed_log)
+    if not ok:
+        return False, f"EMBED start failed: {msg}"
+
+    return _wait_for_ready(
+        host=servers.host,
+        port=servers.embed_port,
+        base_url=base_url,
+        timeout_s=servers.embed_start_timeout_s,
+        log_path=servers.embed_log,
+    )
+
+
 def ensure_q5_running(servers: ManagedServers) -> Tuple[bool, str]:
+    # NEW: embedding must be ready first
+    ok, msg = ensure_embed_running(servers)
+    if not ok:
+        return False, f"Embeddings not ready: {msg}"
+
     base_url = f"http://{servers.host}:{servers.q5_port}"
 
     pid = find_pid_by_port(servers.q5_port)
