@@ -4,6 +4,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import BaseModel
 
 
+class RetrievedChunk(BaseModel):
+    source_id: str
+    chunk_id: int
+    content: str
+    score: float
+    metadata: dict
+
 class RagSettings(BaseSettings):
     """
     RAG configuration.
@@ -25,6 +32,7 @@ class RagSettings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",   # ✅ KEY FIX: ignore unrelated .env keys
     )
 
     # -------------------------
@@ -84,9 +92,4 @@ class RagSettings(BaseSettings):
         )
 
 
-class RetrievedChunk(BaseModel):
-    source_id: str
-    chunk_id: int
-    content: str
-    score: float
-    metadata: dict
+

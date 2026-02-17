@@ -62,7 +62,7 @@ def upsert_chunks(
 def main() -> None:
     cfg = RagSettings()
 
-    folder = os.environ.get("SAGE_RAG_INGEST_DIR", r"F:\Projects\sage_kaizen_ai")
+    folder = os.environ.get("SAGE_RAG_INGEST_DIR", r"F:\Projects\sage_kaizen_ai\docs")
     root = Path(folder).resolve()
     print(f"Ingesting from: {root}")
 
