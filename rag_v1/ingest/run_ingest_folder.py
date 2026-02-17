@@ -55,7 +55,13 @@ def upsert_chunks(
     """
     with conn.cursor() as cur:
         for idx, (content, emb) in enumerate(zip(chunks, embeddings)):
-            cur.execute(sql, (source_id, idx, content, json.dumps(metadata), emb))
+            try:
+                cur.execute(sql, (source_id, idx, content, json.dumps(metadata), emb))
+            except psycopg.errors.InsufficientPrivilege as e:
+                raise RuntimeError(
+                    "Postgres user lacks permissions on rag_chunks. "
+                    "Grant INSERT/UPDATE on public.rag_chunks to the configured PG_USER."
+                ) from e
     return len(chunks)
 
 
