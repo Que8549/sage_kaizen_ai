@@ -1,24 +1,29 @@
+from __future__ import annotations
 import httpx
+from typing import List
 
 class EmbedClient:
-    def __init__(self, base_url: str, model: str):
+    def __init__(self, base_url: str, model: str, timeout_s: float = 60.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.client = httpx.Client(timeout=60.0)
+        self._client = httpx.Client(timeout=timeout_s)
 
-    def embed(self, texts):
+    def embed(self, texts: List[str]) -> List[List[float]]:
         payload = {
-            "model": self.model,
+            "model": self.model, 
             "input": texts
         }
-
-        r = self.client.post(f"{self.base_url}/embeddings", json=payload)
+        
+        r = self._client.post(f"{self.base_url}/embeddings", json=payload)
         r.raise_for_status()
-
         data = r.json()
-        out = [None] * len(texts)
+
+        # Pylance needs to know this list will hold embeddings (not None)
+        out: List[List[float]] = [ [] for _ in range(len(texts)) ]
 
         for item in data["data"]:
-            out[item["index"]] = item["embedding"]
+            emb = item["embedding"]
+            # Be explicit: ensure emb is a list[float]
+            out[item["index"]] = [float(x) for x in emb]
 
         return out
