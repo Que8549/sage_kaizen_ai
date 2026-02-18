@@ -18,10 +18,13 @@ class ServerConfig:
     # Endpoints
     q5_base_url: str = _env("SAGE_Q5_BASE_URL", "http://127.0.0.1:8011")
     q6_base_url: str = _env("SAGE_Q6_BASE_URL", "http://127.0.0.1:8012")
+    embed_base_url: str = _env("SAGE_EMBED_BASE_URL", "http://127.0.0.1:8020")
+    
 
     # Model ids (optional; client can discover via /v1/models)
     q5_model_id: str = _env("SAGE_Q5_MODEL_ID", "Q5")
     q6_model_id: str = _env("SAGE_Q6_MODEL_ID", "Q6")
+    embedded_model_id: str = _env("SAGE_EMBED_MODEL_ID", "EMBED")
 
     # Prompt + history
     system_prompt_path: Path = Path(_env("SAGE_SYSTEM_PROMPT_PATH", "./sage_kaizen_system_prompt.txt"))

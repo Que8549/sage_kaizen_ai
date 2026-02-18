@@ -1,7 +1,5 @@
-# mermaid_streamlit.py
 from __future__ import annotations
 
-import html
 import json
 import urllib.request
 from dataclasses import dataclass
@@ -48,19 +46,15 @@ def _first_non_none(*vals):
     return None
 
 
-@st.cache_data(ttl=2.0, show_spinner=False)
+# Cache probes briefly to avoid hammering endpoints during normal Streamlit reruns
+@st.cache_data(ttl=10.0, show_spinner=False)
 def probe_llama_server(base_url: str) -> LlamaServerInfo:
-    """
-    Attempts to read live config from a running llama-server.
-    Tries (in order): /health, /props, /v1/models
-    Returns best-effort normalized fields + raw payload.
-    """
-    base_url = base_url.rstrip("/")
+    """Best-effort live config discovery from a running llama-server."""
+    base_url = (base_url or "").rstrip("/")
 
     # 1) /health (common)
     ok, payload = _http_get_json(f"{base_url}/health")
     if ok and isinstance(payload, dict):
-        # Some builds return model info here (or status only).
         model_id = payload.get("model") or payload.get("model_id") or payload.get("id")
         return LlamaServerInfo(
             base_url=base_url,
@@ -73,7 +67,6 @@ def probe_llama_server(base_url: str) -> LlamaServerInfo:
     # 2) /props (supported when --props is enabled)
     ok, payload = _http_get_json(f"{base_url}/props")
     if ok and isinstance(payload, dict):
-        # Keys vary a bit by build/version; we keep this defensive.
         model_id = _first_non_none(
             payload.get("model"),
             payload.get("model_id"),
@@ -88,12 +81,21 @@ def probe_llama_server(base_url: str) -> LlamaServerInfo:
         tensor_split = payload.get("tensor_split")
         split_mode = payload.get("split_mode")
         main_gpu = payload.get("main_gpu")
+
+        # ctx_size can be str/int; normalize if possible
+        norm_ctx: Optional[int] = None
+        try:
+            if ctx_size is not None:
+                norm_ctx = int(ctx_size)
+        except Exception:
+            norm_ctx = None
+
         return LlamaServerInfo(
             base_url=base_url,
             ok=True,
             model_id=model_id if isinstance(model_id, str) else None,
             alias=alias if isinstance(alias, str) else None,
-            ctx_size=int(ctx_size) if isinstance(ctx_size, (int, float, str)) and str(ctx_size).isdigit() else None,
+            ctx_size=norm_ctx,
             n_gpu_layers=n_gpu_layers,
             device=device,
             tensor_split=tensor_split,
@@ -130,50 +132,59 @@ def _fmt(v: Any, maxlen: int = 28) -> str:
     return (s[: maxlen - 1] + "…") if len(s) > maxlen else s
 
 
-def build_sage_kaizen_mermaid(
-    q5: Optional[LlamaServerInfo],
-    q6: Optional[LlamaServerInfo],
-) -> str:
-    """
-    Builds a Mermaid diagram with labels filled from live server config.
-    """
-    q5_label = "GPU0 - Deep Reasoning"
-    q6_label = "GPU1 - Low-Latency Responses"
+def _mm_safe(s: str) -> str:
+    """Make a string safe for Mermaid node labels."""
+    # Mermaid labels get confused by unescaped quotes/brackets and some punctuation.
+    # We'll render labels inside quoted node syntax: C["..."]
+    # So we must escape double quotes and backslashes.
+    s = (s or "")
+    s = s.replace("\\", "\\\\").replace('"', "\\\"")
+    # Avoid square brackets inside labels (can confuse bracketed node syntax).
+    s = s.replace("[", "(").replace("]", ")")
+    return s
 
-    if q5 and q5.ok:
-        q5_label += f"\\n{_fmt(q5.alias) if q5.alias else ''}{('' if not q5.model_id else f'[{_fmt(q5.model_id)}]')}"
-        q5_label += f"\\nctx={_fmt(q5.ctx_size)}"
-        q5_label += f"\\nngl={_fmt(q5.n_gpu_layers)}"
-        q5_label += f"\\ndev={_fmt(q5.device)}"
 
-    if q6 and q6.ok:
-        q6_label += f"\\n{_fmt(q6.alias) if q6.alias else ''}{('' if not q6.model_id else f'[{_fmt(q6.model_id)}]')}"
-        q6_label += f"\\nctx={_fmt(q6.ctx_size)}"
-        q6_label += f"\\nngl={_fmt(q6.n_gpu_layers)}"
-        q6_label += f"\\ndev={_fmt(q6.device)}"
-        if q6.tensor_split is not None:
-            q6_label += f"\\nts={_fmt(q6.tensor_split)}"
-        if q6.split_mode is not None:
-            q6_label += f"\\nsplit={_fmt(q6.split_mode)}"
+def build_sage_kaizen_mermaid(q5: Optional[LlamaServerInfo], q6: Optional[LlamaServerInfo]) -> str:
+    """Build Mermaid diagram; uses quoted node labels + <br/> for line breaks."""
 
-    return f"""\
-graph TD
-    A[User Request] --> B{{Routing Strategy}}
-    B --> C[{q5_label}]
-    B --> D[{q6_label}]
+    def node_label(title: str, info: Optional[LlamaServerInfo]) -> str:
+        lines = [title]
+        if info and info.ok:
+            if info.alias:
+                lines.append(_fmt(info.alias))
+            if info.model_id:
+                # NO nested [] — use plain text
+                lines.append(f"model={_fmt(info.model_id)}")
+            lines.append(f"ctx={_fmt(info.ctx_size)}")
+            lines.append(f"ngl={_fmt(info.n_gpu_layers)}")
+            lines.append(f"dev={_fmt(info.device)}")
+            if info.tensor_split is not None:
+                lines.append(f"ts={_fmt(info.tensor_split)}")
+            if info.split_mode is not None:
+                lines.append(f"split={_fmt(info.split_mode)}")
+        return _mm_safe("<br/>".join(lines))
+
+    q5_label = node_label("GPU0 - Deep Reasoning", q5)
+    q6_label = node_label("GPU1 - Low-Latency Responses", q6)
+
+    # Use quoted node labels to tolerate spaces, punctuation, and <br/>
+    return f"""graph TD
+    A[\"User Request\"] --> B{{Routing Strategy}}
+    B --> C[\"{q5_label}\"]
+    B --> D[\"{q6_label}\"]
     C --> E{{KV Cache Allocation}}
     D --> F{{KV Cache Allocation}}
-    E --> G[Large KV Cache]
-    F --> H[Small KV Cache]
-    G --> I[Process Request]
-    H --> I[Process Request]
+    E --> G[\"Large KV Cache\"]
+    F --> H[\"Small KV Cache\"]
+    G --> I[\"Process Request\"]
+    H --> I
     I --> J{{Telemetry Collection}}
-    J --> K[Request Latency]
-    J --> L[Cache Utilization]
-    J --> M[Error Logs]
-    J --> N[Throughput]
-    C --> O[Speculative Decoding]
-    D --> P[Speculative Decoding]
+    J --> K[\"Request Latency\"]
+    J --> L[\"Cache Utilization\"]
+    J --> M[\"Error Logs\"]
+    J --> N[\"Throughput\"]
+    C --> O[\"Speculative Decoding\"]
+    D --> P[\"Speculative Decoding\"]
 """
 
 
@@ -181,28 +192,25 @@ graph TD
 # Mermaid renderer + export
 # ----------------------------
 
+
 def render_mermaid_with_exports(
     diagram: str,
     *,
     height: int = 620,
-    theme: str = "default",   # default | dark | forest | neutral
+    theme: str = "default",  # default | dark | forest | neutral
 ) -> None:
-    """
-    Renders Mermaid and provides:
-    - Download SVG
-    - Download PNG (canvas)
-    All handled inside the iframe (no Python roundtrip needed).
-    """
-    safe_diagram = html.escape((diagram or "").strip())
-    safe_theme = html.escape(theme)
+    """Render Mermaid in Streamlit and provide SVG/PNG download buttons."""
 
-    # Uses mermaid.render() as recommended by Mermaid usage docs
-    # and then injects resulting SVG into the DOM. :contentReference[oaicite:2]{index=2}
-    mermaid_html = f"""
-<!doctype html>
+    diagram_text = (diagram or "").strip()
+
+    # IMPORTANT: do NOT html.escape() the Mermaid source; it changes syntax.
+    # Instead, embed it into JS safely via JSON string literal.
+    diagram_js = json.dumps(diagram_text)
+
+    mermaid_html = f"""<!doctype html>
 <html>
   <head>
-    <meta charset="utf-8" />
+    <meta charset=\"utf-8\" />
     <style>
       body {{
         margin: 0;
@@ -232,32 +240,24 @@ def render_mermaid_with_exports(
         font-size: 12px;
         margin-left: auto;
       }}
-      #out {{
-        padding: 10px;
-      }}
-      #out svg {{
-        max-width: 100% !important;
-        height: auto !important;
-      }}
-      pre {{
-        display:none;
-      }}
+      #out {{ padding: 10px; }}
+      #out svg {{ max-width: 100% !important; height: auto !important; }}
     </style>
 
-    <script type="module">
-      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    <script type=\"module\">
+      import mermaid from \"https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs\";
 
-      const graphDef = `{safe_diagram}`;
+      const graphDef = {diagram_js};
 
       mermaid.initialize({{
         startOnLoad: false,
-        securityLevel: "loose",
-        theme: "{safe_theme}"
+        securityLevel: \"loose\",
+        theme: {json.dumps(theme)}
       }});
 
       function downloadBlob(blob, filename) {{
         const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
+        const a = document.createElement(\"a\");
         a.href = url;
         a.download = filename;
         document.body.appendChild(a);
@@ -268,23 +268,23 @@ def render_mermaid_with_exports(
 
       function svgToPng(svgText, scale=2) {{
         return new Promise((resolve, reject) => {{
-          const svgBlob = new Blob([svgText], {{type: "image/svg+xml;charset=utf-8"}});
+          const svgBlob = new Blob([svgText], {{type: \"image/svg+xml;charset=utf-8\"}});
           const url = URL.createObjectURL(svgBlob);
           const img = new Image();
           img.onload = () => {{
             try {{
               const w = img.width || 1200;
               const h = img.height || 800;
-              const canvas = document.createElement("canvas");
+              const canvas = document.createElement(\"canvas\");
               canvas.width = Math.ceil(w * scale);
               canvas.height = Math.ceil(h * scale);
-              const ctx = canvas.getContext("2d");
+              const ctx = canvas.getContext(\"2d\");
               ctx.setTransform(scale, 0, 0, scale, 0, 0);
               ctx.drawImage(img, 0, 0);
               canvas.toBlob((b) => {{
-                if (!b) reject(new Error("PNG conversion failed"));
+                if (!b) reject(new Error(\"PNG conversion failed\"));
                 else resolve(b);
-              }}, "image/png");
+              }}, \"image/png\");
             }} catch (e) {{
               reject(e);
             }} finally {{
@@ -297,41 +297,41 @@ def render_mermaid_with_exports(
       }}
 
       async function render() {{
-        const statusEl = document.getElementById("status");
+        const statusEl = document.getElementById(\"status\");
         try {{
-          statusEl.textContent = "Rendering…";
-          const id = "m" + Math.random().toString(16).slice(2);
-          const {{ svg }} = await mermaid.render(id, graphDef);
+          statusEl.textContent = \"Rendering…\";
+          const id = \"m\" + Math.random().toString(16).slice(2);
+          const result = await mermaid.render(id, graphDef);
+          const svg = result.svg;
           window.__LAST_SVG__ = svg;
-          const out = document.getElementById("out");
-          out.innerHTML = svg;
-          statusEl.textContent = "Ready";
+          document.getElementById(\"out\").innerHTML = svg;
+          statusEl.textContent = \"Ready\";
         }} catch (e) {{
-          statusEl.textContent = "Render error";
-          const out = document.getElementById("out");
-          out.innerHTML = "<pre style='white-space:pre-wrap;color:#b00'>" + String(e) + "</pre>";
+          statusEl.textContent = \"Render error\";
+          document.getElementById(\"out\").innerHTML =
+            \"<pre style='white-space:pre-wrap;color:#b00'>\" + String(e) + \"</pre>\";
         }}
       }}
 
-      window.addEventListener("DOMContentLoaded", () => {{
-        document.getElementById("btnSvg").addEventListener("click", () => {{
+      window.addEventListener(\"DOMContentLoaded\", () => {{
+        document.getElementById(\"btnSvg\").addEventListener(\"click\", () => {{
           const svg = window.__LAST_SVG__;
           if (!svg) return;
-          downloadBlob(new Blob([svg], {{type:"image/svg+xml;charset=utf-8"}}), "sage_kaizen_arch.svg");
+          downloadBlob(new Blob([svg], {{type:\"image/svg+xml;charset=utf-8\"}}), \"sage_kaizen_arch.svg\");
         }});
 
-        document.getElementById("btnPng").addEventListener("click", async () => {{
+        document.getElementById(\"btnPng\").addEventListener(\"click\", async () => {{
           const svg = window.__LAST_SVG__;
           if (!svg) return;
           try {{
             const pngBlob = await svgToPng(svg, 2);
-            downloadBlob(pngBlob, "sage_kaizen_arch.png");
+            downloadBlob(pngBlob, \"sage_kaizen_arch.png\");
           }} catch (e) {{
-            alert("PNG export failed: " + e);
+            alert(\"PNG export failed: \" + e);
           }}
         }});
 
-        document.getElementById("btnRerender").addEventListener("click", () => {{
+        document.getElementById(\"btnRerender\").addEventListener(\"click\", () => {{
           render();
         }});
 
@@ -341,16 +341,14 @@ def render_mermaid_with_exports(
   </head>
 
   <body>
-    <div class="toolbar">
-      <button id="btnRerender" title="Re-render diagram">Re-render</button>
-      <button id="btnSvg" title="Download as SVG">Download SVG</button>
-      <button id="btnPng" title="Download as PNG">Download PNG</button>
-      <div class="status" id="status">Starting…</div>
+    <div class=\"toolbar\">
+      <button id=\"btnRerender\" title=\"Re-render diagram\">Re-render</button>
+      <button id=\"btnSvg\" title=\"Download as SVG\">Download SVG</button>
+      <button id=\"btnPng\" title=\"Download as PNG\">Download PNG</button>
+      <div class=\"status\" id=\"status\">Starting…</div>
     </div>
-    <div id="out"></div>
-    <pre class="mermaid">{safe_diagram}</pre>
+    <div id=\"out\"></div>
   </body>
-</html>
-"""
-    # No `key=` here (Streamlit docs signature doesn't include it). :contentReference[oaicite:3]{index=3}
+</html>"""
+
     components.html(mermaid_html, height=height, scrolling=True)

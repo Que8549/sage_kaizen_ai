@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import time
-import router
+import router 
 import streamlit as st
-from pathlib import Path
-from settings import CONFIG
-from typing import Dict, List, Optional
 import hashlib
 import json
+from pathlib import Path
+from typing import Dict, List, Optional
 from router import RouteDecision, route
 from server_manager import ManagedServers, ensure_q5_running, ensure_q6_running, stop_server_on_port
-from streamlit_autorefresh import st_autorefresh
+from settings import CONFIG
 
 from openai_client import (
     HttpTimeouts,
@@ -28,10 +27,11 @@ from prompt_library import (
 )
 
 from mermaid_streamlit import (
-    probe_llama_server,
     build_sage_kaizen_mermaid,
+    probe_llama_server,
     render_mermaid_with_exports,
 )
+
 
 def _load_system_prompt(path: Path) -> str:
     try:
@@ -110,56 +110,23 @@ if "last_route" not in st.session_state:
     st.session_state.last_route = None  # type: ignore[assignment]
 
 with st.sidebar:
-    st.subheader("Architecture")
-
-    q5_url = st.text_input("Q5 server URL", value="http://127.0.0.1:8011")
-    q6_url = st.text_input("Q6 server URL", value="http://127.0.0.1:8012")
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        auto_refresh = st.toggle("Auto-refresh", value=True)
-    with col_b:
-        refresh_now = st.button("Refresh now")
-
-    # Trigger refresh by changing a dummy session key
-    if refresh_now:
-        st.session_state["_arch_refresh_nonce"] = st.session_state.get("_arch_refresh_nonce", 0) + 1
-
-    if auto_refresh:
-        # Rerun every 2s to keep diagram labels live
-        st_autorefresh(interval=2000, key="arch_autorefresh")
-
-    q5_info = probe_llama_server(q5_url)
-    q6_info = probe_llama_server(q6_url)
-
-    # Nice little status lines
-    st.caption(f"Q5 probe: {'OK' if q5_info.ok else 'DOWN'} via {q5_info.source}")
-    st.caption(f"Q6 probe: {'OK' if q6_info.ok else 'DOWN'} via {q6_info.source}")
-
-    mermaid_src = build_sage_kaizen_mermaid(q5_info, q6_info)
-
-    with st.expander("Mermaid diagram (live)", expanded=True):
-        # Optional: allow edits, but default is live-generated
-        allow_edit = st.toggle("Edit source", value=False)
-        if allow_edit:
-            mermaid_src = st.text_area("Mermaid source", value=mermaid_src, height=240)
-
-        # Render + Export buttons (SVG + PNG) in the iframe
-        render_mermaid_with_exports(mermaid_src, height=680, theme="default")
-
     st.subheader("Servers")
 
     q5_url = _normalize_base_url_ui(st.text_input("Q5 base URL", value=CONFIG.q5_base_url))
     q6_url = _normalize_base_url_ui(st.text_input("Q6 base URL", value=CONFIG.q6_base_url))
+    embed_url = _normalize_base_url_ui(st.text_input("Embed base URL", value=CONFIG.embed_base_url))
 
     q5_port = _base_url_to_port(q5_url) or 8011
     q6_port = _base_url_to_port(q6_url) or 8012
+    embed_port = _base_url_to_port(embed_url) or 8020
 
     servers = ManagedServers(
         q5_port=q5_port,
         q6_port=q6_port,
+        embed_port=embed_port,
         start_q5_bat=Path("start_q5_server.bat"),
         start_q6_bat=Path("start_q6_server.bat"),
+        start_embed_bat=Path("start_embedding_point.bat"),
     )
 
     colA, colB = st.columns(2)
@@ -181,7 +148,8 @@ with st.sidebar:
         if st.button("Stop servers"):
             ok1 = stop_server_on_port(q5_port)
             ok2 = stop_server_on_port(q6_port)
-            if ok1 and ok2:
+            ok3 = stop_server_on_port(embed_port)
+            if ok1 and ok2 and ok3:
                 st.success("Stopped (or already stopped).")
             else:
                 st.warning("Tried to stop, but one or more servers may still be running.")
@@ -242,16 +210,16 @@ with st.sidebar:
 
 
 # ----------------------------
-# Mermaid Diagram (live)
+# Mermaid Diagram (Architecture)
 # ----------------------------
-def _server_signature(info) -> str:
-    """Stable signature to detect config changes without rerunning on a timer."""
-    if info is None or not getattr(info, "ok", False):
-        return "down"
-    raw = getattr(info, "raw", None)
-    if raw is None:
-        # fall back to a few visible fields
-        raw = {
+
+def _arch_sig(info) -> str:
+    """Stable signature of probe fields; changes only when server-reported config changes."""
+    if info is None:
+        payload = {"ok": False}
+    else:
+        payload = {
+            "ok": bool(getattr(info, "ok", False)),
             "model_id": getattr(info, "model_id", None),
             "alias": getattr(info, "alias", None),
             "ctx_size": getattr(info, "ctx_size", None),
@@ -261,37 +229,45 @@ def _server_signature(info) -> str:
             "split_mode": getattr(info, "split_mode", None),
             "main_gpu": getattr(info, "main_gpu", None),
             "source": getattr(info, "source", None),
+            # keep raw out of signature to avoid noisy changes
         }
-    try:
-        blob = json.dumps(raw, sort_keys=True, default=str).encode("utf-8", errors="replace")
-    except Exception:
-        blob = str(raw).encode("utf-8", errors="replace")
-    return hashlib.sha256(blob).hexdigest()
+    b = json.dumps(payload, sort_keys=True, default=str).encode("utf-8", errors="replace")
+    return hashlib.sha256(b).hexdigest()
 
 
-st.header("Mermaid Diagram")
-st.caption("Below is the Mermaid diagram that visualizes the architecture:")
+if "arch_mermaid_src" not in st.session_state:
+    st.session_state.arch_mermaid_src = ""
+if "arch_sig_q5" not in st.session_state:
+    st.session_state.arch_sig_q5 = ""
+if "arch_sig_q6" not in st.session_state:
+    st.session_state.arch_sig_q6 = ""
 
-# Probe servers (cached inside probe_llama_server); we only rebuild the diagram when the signature changes.
+# Manual refresh (forces regeneration even if signature unchanged)
+col_m1, col_m2 = st.columns([1, 6])
+with col_m1:
+    refresh_arch = st.button("Refresh diagram now", help="Re-probe Q5/Q6 and rebuild the Mermaid diagram.")
+with col_m2:
+    st.markdown("### Mermaid Diagram")
+
+# Probe (cached inside mermaid_streamlit.py with a short TTL)
 q5_info = probe_llama_server(q5_url)
 q6_info = probe_llama_server(q6_url)
 
-sig = (_server_signature(q5_info), _server_signature(q6_info))
+sig5 = _arch_sig(q5_info)
+sig6 = _arch_sig(q6_info)
 
-col_md_a, col_md_b = st.columns([1, 5])
-with col_md_a:
-    refresh_diagram = st.button("Refresh diagram now")
-with col_md_b:
-    st.caption(f"Q5 probe: {'OK' if q5_info.ok else 'DOWN'} ({q5_info.source}) • Q6 probe: {'OK' if q6_info.ok else 'DOWN'} ({q6_info.source})")
-
-if refresh_diagram or st.session_state.get("arch_sig") != sig:
-    st.session_state.arch_sig = sig
+changed = refresh_arch or (sig5 != st.session_state.arch_sig_q5) or (sig6 != st.session_state.arch_sig_q6)
+if changed:
+    st.session_state.arch_sig_q5 = sig5
+    st.session_state.arch_sig_q6 = sig6
     st.session_state.arch_mermaid_src = build_sage_kaizen_mermaid(q5_info, q6_info)
 
-mermaid_src = st.session_state.get("arch_mermaid_src") or build_sage_kaizen_mermaid(q5_info, q6_info)
-
-with st.container(border=True):
-    render_mermaid_with_exports(mermaid_src, height=680, theme="default")
+with st.expander("View architecture diagram (Mermaid)", expanded=True):
+    st.caption(
+        f"Q5 probe: {'OK' if q5_info.ok else 'DOWN'} ({q5_info.source}) • "
+        f"Q6 probe: {'OK' if q6_info.ok else 'DOWN'} ({q6_info.source})"
+    )
+    render_mermaid_with_exports(st.session_state.arch_mermaid_src, height=700, theme="default")
 
 
 for m in st.session_state.messages:
