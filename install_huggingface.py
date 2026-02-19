@@ -11,11 +11,13 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 # still relies on the globally configured token or environment variable.
 
 snapshot_download(
-    repo_id = "gpustack/bge-m3-GGUF",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
-    local_dir ="E:/bge-m3-GGUF/FP16",     
-    allow_patterns = ["*FP16*"],  # allow_patterns = [""*Q8_0*", "*Q6_K*", "*Q4_K_S*", "*Q4_K_M*", "*Q5_K_S*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*"] 
+    repo_id = "unsloth/Qwen3-32B-GGUF",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
+    local_dir ="E:/Qwen3-32B-GGUF",     
+    allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*", "*UD-IQ1_M*", "*UD-IQ1_S*", "*UD-Q6_K_XL*"],  
     max_workers=16,  # 8 = default
 )
+
+# allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*",  "*UD-IQ1_M*",  "*UD-IQ1_S*", "*UD-Q6_K_XL*",] 
 
 # NousResearch/Hermes-4.3-36B-GGUF  https://huggingface.co/NousResearch/Hermes-4.3-36B-GGUF
 # ACE-Step 1.5 https://huggingface.co/ACE-Step/Ace-Step1.5
