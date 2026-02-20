@@ -54,7 +54,7 @@ fast:
     split_mode: "none"       # single-GPU; no tensor split needed
 
     # Context & batching
-    ctx_size: 4096            # token context window
+    ctx_size: 8192            # token context window
     batch_size: 1024          # max tokens processed in one forward pass (prompt)
     ubatch_size: 512          # micro-batch size for batched decoding
 
@@ -90,7 +90,7 @@ fast:
 # -----------------------------------------------------------------------------
 architect:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
-  model: "E:/Qwen/bartowski-Qwen2.5-32B-Instruct-GGUF/Qwen2.5-32B-Instruct-Q6_K_L.gguf"
+  model: "E:/Qwen3-32B-GGUF/Qwen3-32B-Q6_K.gguf"
   log: "F:/Projects/sage_kaizen_ai/logs/q6_server.log"
   startup_timeout_s: 2700    # 45 minutes — 32B model cold load on 5090
 
@@ -98,7 +98,7 @@ architect:
     host: "127.0.0.1"
     port: 8012               # ARCHITECT brain lives on 8012
 
-    alias: "Qwen2.5-32B-Q6_K_L"
+    alias: "Qwen3-32B-Q6_K.gguf"
 
     # The 32B model needs the larger GPU
     device: "CUDA0"
@@ -106,9 +106,9 @@ architect:
     split_mode: "none"
 
     # Larger context for deep reasoning tasks
-    ctx_size: 8192
-    batch_size: 768           # smaller batch than FAST — 32B has higher per-token cost
-    ubatch_size: 256
+    ctx_size: 12288
+    batch_size: 256  #768           # smaller batch than FAST — 32B has higher per-token cost
+    ubatch_size: 128 #256
 
     # More threads for the heavier model
     threads: 22
@@ -120,8 +120,8 @@ architect:
     cache_type_v: "q8_0"     # quantized V cache — saves VRAM on the larger model
 
     fit: true
-    fit_target: 1024          # leave more headroom on the 32 GB card
-    fit_ctx: 8192
+    fit_target: 1536          # leave more headroom on the 32 GB card
+    fit_ctx: 4096  # 8192
 
     no_warmup: true
     n_predict: 512            # ARCHITECT generates longer responses by default

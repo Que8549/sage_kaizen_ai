@@ -14,10 +14,10 @@ class PgvectorRetriever:
 
         sql = """
         SELECT source_id, chunk_id, content, metadata,
-               (embedding <=> %s) AS distance
+               (embedding <=> %s::vector) AS distance
         FROM rag_chunks
         WHERE embedding IS NOT NULL
-        ORDER BY embedding <=> %s
+        ORDER BY embedding <=> %s::vector
         LIMIT %s;
         """
 
