@@ -1,0 +1,54 @@
+
+---
+
+## 6.3 Documentation Generator
+
+Purpose:
+- Scan repo
+- Generate README
+- Generate Mermaid diagrams
+- Reflect architecture updates
+
+Must not:
+- Rewrite architecture automatically
+- Modify business logic
+
+---
+
+# 7. Cross-Cutting Concerns
+
+## Observability
+- Logs are authoritative
+- Startup readiness determined by explicit log markers
+- No silent failures
+
+## Typing
+- Python typing required
+- Pylance must remain clean
+
+## Windows Compatibility
+- cmd.exe syntax
+- ^ line continuations
+- Proper quoting
+
+---
+
+# 8. Future Expansion (Planned)
+
+- Voice loop integration (Coqui XTTS / OpenVoice)
+- Expanded RAG sources
+- Persistent memory layer
+- Advanced model routing policies
+- Modular replacement of inference backend (vLLM, etc.)
+
+---
+
+# 9. Architectural Boundaries
+
+Do NOT:
+- Mix UI + server management logic
+- Couple ingest logic to UI
+- Let templates mutate core architecture
+- Collapse dual-brain into a single instance
+
+Each module must remain replaceable.

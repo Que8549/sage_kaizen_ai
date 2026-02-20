@@ -1,95 +1,105 @@
-# AGENTS.md
-Think of this file as a “README for coding agents”: setup, commands, conventions, and how to work effectively in this repo. :contentReference[oaicite:6]{index=6}
+# AGENTS.md — How to Develop Sage Kaizen (WHO / WHAT / WHY / HOW)
+This file is the “README for agents” (human or AI) working in this repo.  
+It is designed for **progressive disclosure**: quick start → validation → conventions → deep links.
 
-## Primary Goal
-Help agents ship correct, maintainable improvements to **Sage Kaizen**:
-- Dual-brain local inference via llama.cpp servers
-- Streamlit UI + router + prompt templates
-- RAG ingest pipelines
-- Pi orchestration via ZeroMQ
-- Voice loop (STT/TTS)
-- Self-documenting repo tooling
+---
 
-## Operating Principles
-1. **Follow repo invariants** (see `CLAUDE.md`).
-2. Use the **RPI loop**: Research → Plan → Implement → Validate.
-3. Prefer **small, reversible diffs** and “prove it works” with logs/tests.
-4. Accuracy > speed unless performance work is the explicit task.
+## 1) WHO
+You are an agent helping the project owner (Alquin) evolve Sage Kaizen safely.
+Assume:
+- Windows 11 dev environment in VS Code
+- Python 3.14.3
+- Dual Nvidia GPUs (5090 + 5080)
+- llama.cpp servers are the inference backbone
 
-## Quick Start (Windows / VS Code)
-> Update these if your repo already has a canonical script/Makefile.
+---
 
-### Python env
-- Create venv: `python -m venv .venv`
-- Activate (cmd.exe): `.venv\Scripts\activate`
-- Install deps (example): `python -m pip install -r requirements.txt`
+## 2) WHAT (What you’ll be changing)
+Typical work areas:
+- Streamlit UI chat experience + server status indicators
+- Router logic (FAST vs ARCHITECT, template application, escalation)
+- llama-server orchestration (process management, logging, GPU flags)
+- RAG ingestion (folder/rss/web) + shared utilities
+- Pi agent orchestration (ZeroMQ command schema + safety)
+- Repo docs generator (README + Mermaid)
 
-### Run Streamlit UI (example)
-- `python -m streamlit run ui_streamlit_server.py`
+---
 
-### Start local brains (example)
-- Prefer running via the repo’s **Python process manager** (e.g., `server_manager.py`) rather than manually.
-- `.bat` files are config-only; the Python manager reads them and launches the EXE directly (see `CLAUDE.md`).
+## 3) WHY (What “good” looks like)
+Sage Kaizen is meant to be:
+- Local-first, modular, and production-minded
+- Observable (logs), testable, reproducible
+- Accurate by default; performance optimizations must be measured and safe
 
-## Validation Checklist (pick what applies)
-### UI / Router changes
-- Launch Streamlit and confirm:
-  - FAST brain works (Q5)
-  - ARCHITECT escalation works (Q6)
-  - Model “loaded” statuses update correctly
-  - Templates apply automatically but can be overridden
+---
 
-### llama-server orchestration changes
-- Confirm:
-  - Logs written via `--log-file`
-  - Paths are fully expanded
-  - GPU selection flags match intent
-  - Startup waits for “server is listening …” and/or “slots idle” markers before enabling UI interactions
+## 4) HOW (How to work here)
+### Required workflow: RPI Loop (Research → Plan → Implement → Validate)
+1. Research: locate the current implementation and read logs
+2. Plan: propose minimal files touched + success criteria
+3. Implement: small diffs, typed Python, clear logging
+4. Validate: run checks; cite the log lines or observed behavior
 
-### RAG ingest changes
-- Confirm:
-  - Re-runs are idempotent (no duplicate rows)
-  - Uses batching (`executemany` / batch inserts)
-  - Source ID + hashing conventions are consistent across ingest scripts
-  - Failure modes are logged clearly (with actionable error messages)
+### Non-negotiables (must comply)
+See `CLAUDE.md` invariants — do not violate them.
 
-### Pi / ZeroMQ changes
-- Confirm:
-  - Command schema stays backward compatible
-  - Timeouts/retries are explicit
-  - Worker nodes handle malformed commands safely
+---
 
-## How to Work in This Codebase (recommended agent workflow)
-This is modeled after “specialized agents” patterns used by HumanLayer-style Claude Code workflows. :contentReference[oaicite:7]{index=7}
+## 5) Progressive “Start Here” Guide (for agents)
+### If you are new to this repo
+1) `docs/01-ARCHITECTURE.md`  
+2) `docs/10-RUNBOOKS/01-LLAMA-SERVERS.md`  
+3) `docs/10-RUNBOOKS/02-STREAMLIT-UI.md`  
+4) `docs/20-PROMPTS.md`  
+5) Then make changes.
 
-### Phase 1 — Research
-- Find where relevant code lives (router, UI, server manager, ingest scripts).
-- Read the *current* implementation and logs before proposing changes.
-- Identify existing patterns and match them (don’t invent a new style unless asked).
+### If you are fixing a bug
+1) Reproduce it
+2) Find the log evidence
+3) Identify the smallest responsible fix
+4) Add/adjust logging so it’s easier next time
+5) Validate fix (commands + output)
 
-### Phase 2 — Plan
-Write a short plan with:
-- Files to touch
-- Intended behavior change
-- Validation steps (exact commands/log signals)
+---
 
-### Phase 3 — Implement
-- Make minimal diffs
-- Keep functions small and typed
-- Add/adjust logs where it improves debuggability
+## 6) Validation Checklists (pick what applies)
+### UI / Router
+- FAST brain responds
+- ARCHITECT escalation works
+- template keys visible/traceable
+- UI state doesn’t get stuck after servers load
 
-### Phase 4 — Validate
-- Run the specific checks for the area you touched
-- Report results (what you ran, what happened, where logs are)
+### llama-server orchestration
+- Uses `--log-file`
+- Doesn’t run via `cmd.exe`
+- All paths are fully expanded
+- Startup readiness detection uses explicit log markers (e.g., “server is listening”, “slots idle”)
 
-## Repo-Specific Conventions to Respect
-- Python typing + Pylance correctness is a first-class requirement.
-- Windows cmd.exe command compatibility (`^` continuations).
-- Don’t “optimize away” safety checks, logging, or the Q5/Q6 routing intent.
-- Don’t change the `.bat` contract; treat `.bat` as config-only.
+### RAG ingest
+- Idempotent reruns (no duplicates)
+- Uses batching (executemany/batch inserts)
+- Shared hashing/source-id conventions used via a utility module
+- Clear failure logging
 
-## When You’re Unsure
-If the task depends on repo-specific truth (exact file paths, script names, DB schema, port numbers):
-- Prefer to **search the repo** and cite exact file references.
-- If you can’t find it, propose a conservative change that doesn’t assume structure.
-- Avoid speculative refactors; do the smallest safe step.
+### Pi agents / ZeroMQ
+- Schema is documented and backward compatible
+- Safe timeouts/retries
+- Malformed command handling is safe
+
+---
+
+## 7) Conventions to Respect
+- Python typing is a first-class requirement (Pylance clean).
+- Windows cmd.exe syntax is required when giving commands (`^` for line continuation).
+- Avoid refactors that change architecture without adding an ADR (see `docs/03-DECISIONS/`).
+
+---
+
+## 8) Deep Links
+- Architecture: `docs/01-ARCHITECTURE.md`
+- Patterns: `docs/02-ARCH-PATTERNS.md`
+- ADRs: `docs/03-DECISIONS/`
+- Runbooks: `docs/10-RUNBOOKS/`
+- Prompts/Templates: `docs/20-PROMPTS.md`
+- Quality: `docs/30-QUALITY.md`
+- Contributing: `docs/40-CONTRIBUTING.md`

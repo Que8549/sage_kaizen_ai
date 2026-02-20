@@ -1,0 +1,110 @@
+
+---
+
+# 4. Core Components
+
+## 4.1 Streamlit UI
+
+Responsibilities:
+- Chat interface
+- Model load status
+- Template visibility
+- Brain selection transparency
+- Safe state persistence
+
+Constraints:
+- No heavy side effects at import
+- Model loading must be explicit
+- UI must reflect server readiness
+
+---
+
+## 4.2 Router (Dual-Brain Selector)
+
+Responsibilities:
+- Apply template keys automatically
+- Default to FAST brain
+- Escalate to ARCHITECT brain when:
+  - Complexity threshold exceeded
+  - Template demands it
+  - User override
+- Provide traceability
+
+Router must:
+- Never embed model logic
+- Never bypass server manager
+- Remain deterministic and testable
+
+---
+
+## 4.3 Dual llama-server Brains
+
+### FAST Brain
+- Default
+- DeepSeek-V3.2 Q5_K_M (or equivalent)
+- Optimized for latency + accuracy balance
+
+### ARCHITECT Brain
+- On-demand
+- DeepSeek-V3.2 Q6_K (or equivalent)
+- Higher reasoning depth
+- Slower but more precise
+
+### Server Constraints (Hard Invariants)
+
+1. `.bat` files are configuration only.
+2. Python launches EXE directly.
+3. Always use `--log-file`.
+4. Fully expand paths before execution.
+5. Never launch via `cmd.exe`.
+
+---
+
+# 5. Hardware Context (Authoritative)
+
+Host:
+- Windows 11 Pro
+- AMD Ryzen 9 9950X3D
+- 192 GB RAM
+- RTX 5090 (GPU0)
+- RTX 5080 (GPU1)
+
+Design expectations:
+- Multi-GPU capable
+- High VRAM utilization when configured
+- CPU not acting as fallback unless explicitly configured
+
+---
+
+# 6. Tool Layer
+
+The tool layer is optional per request.
+
+## 6.1 RAG Module
+
+Components:
+- folder_ingest.py
+- rss_ingest.py
+- web_ingest.py
+- ingest_utils.py (hashing + source ID logic)
+
+Design constraints:
+- Idempotent re-runs
+- Source ID conventions consistent
+- Batch DB inserts (executemany)
+- Clear failure logging
+
+---
+
+## 6.2 Pi Agent Orchestrator
+
+Transport:
+- ZeroMQ
+
+Design:
+- Command schema versioned
+- Safe retries
+- Backward compatible
+- Worker isolation on Pi nodes
+
+Example command:

@@ -1,17 +1,104 @@
-# CLAUDE.md
-This file provides guidance to Claude Code (code.claude.com) when working in this repository. Claude should treat this as **repo-level, always-on rules**. :contentReference[oaicite:4]{index=4}
+# CLAUDE.md — Sage Kaizen Agent Index (WHO / WHAT / WHY / HOW)
+This repository is **Sage Kaizen**: a modular, production-ready local AI system with a dual-brain inference stack, voice + device control, RAG, and self-documenting tooling.
 
-## Project: Sage Kaizen (Dual-Mode Local Cognitive Engine)
-Sage Kaizen is a modular, production-minded local AI system with:
-- **Dual-brain llama.cpp stack**: “FAST” (Q5 default) + “ARCHITECT” (Q6 on demand)
-- **Streamlit chat UI** (dual-brain router + model load status)
-- **Voice loop**: STT → LLM → tools → TTS (Coqui XTTS / OpenVoice targets)
-- **Pi Agent transport**: ZeroMQ orchestration controlling Raspberry Pi 4/5 devices (LED universe, sensors, etc.)
-- **RAG v1**: local folder ingest + RSS/web ingest into a vector store
-- **Self-documenting codebase generator**: repo scan → README + Mermaid diagrams
-- Must support **creative writing** (stories/poems) and **tutoring grades 1–12** (tone + safety + pedagogy)
+This file is written for **Claude Code** and Claude-in-VS-Code usage as the always-on “project brain.”  
+It uses **progressive disclosure**:
+1) Quick orientation (who/what/why/how)  
+2) Non-negotiable invariants  
+3) How to work (workflow + definition of done)  
+4) Deep links into repo documentation (patterns, ADRs, runbooks, etc.)
 
-## Hardware + Environment (authoritative)
+---
+
+## 1) WHO (Stakeholders + Operating Context)
+### Primary user / operator
+- **Alquin Cook** (project owner), building Sage Kaizen on a high-end Windows rig.
+
+### Primary developer environment
+- VS Code on Windows 11 Pro
+- Python 3.14.3
+- CUDA 13.1
+- Custom `llama.cpp` + custom `llama-cpp-python` linked to the custom build
+
+### Target runtime environments
+- Windows host: runs llama-server brains, Streamlit UI, RAG ingestion, orchestration services
+- Raspberry Pi 4/5 fleet: runs ZeroMQ agents and physical-world modules (LED, sensors, audio, etc.)
+
+---
+
+## 2) WHAT (System Overview)
+Sage Kaizen is a **local cognitive engine** made of replaceable modules:
+
+### Core modules (v1)
+- **Dual brains** (two llama-server instances):
+  - FAST brain (default): DeepSeek-V3.2 Q5_K_M (or equivalent)
+  - ARCHITECT brain (on demand): DeepSeek-V3.2 Q6_K (or equivalent)
+- **Router**: selects brain, applies templates, escalates to ARCHITECT when needed
+- **Streamlit UI**: chat interface, status, templates visible, debugging-friendly
+- **Pi Agent Transport**: ZeroMQ messaging to Raspberry Pi agents (device orchestrator)
+- **RAG v1**: ingest (folder + RSS + web) into a vector store; query-time retrieval
+- **Docs Generator v1**: repo scan → README + Mermaid diagrams
+
+### User-facing behaviors
+- Creative writing (stories, poems)
+- Tutoring grades 1–12 (tone + safety + pedagogy)
+- Voice-driven tools (STT → LLM → Tool → TTS)
+- Physical-world control (“set LED mode cosmic”)
+
+---
+
+## 3) WHY (Goals + Non-Goals)
+### Goals
+- **Local-first**: runs without cloud dependency by default
+- **Modular**: components can be swapped/upgraded (models, STT/TTS, RAG backend)
+- **Production-minded**: observable (logs), testable, reproducible
+- **Accurate by default**: prioritize correctness over raw speed (unless performance tuning is the task)
+
+### Non-goals (unless explicitly requested)
+- Large rewrites that break conventions
+- “Magic” behavior without logs/tests
+- Coupling .bat scripts to runtime logic beyond config keys
+
+---
+
+## 4) HOW (How We Build Here)
+### Default workflow: RPI Loop (Research → Plan → Implement → Validate)
+For any non-trivial work:
+1. **Research**: locate current behavior + logs + existing patterns
+2. **Plan**: short plan with files touched + success criteria
+3. **Implement**: minimal diffs, typed, well-logged
+4. **Validate**: run checks, confirm via logs/tests, document results
+
+### Definition of Done
+A change is “done” when:
+- It respects the **Non-Negotiable Invariants**
+- It is testable (documented commands / checks)
+- It doesn’t introduce new typing/Pylance errors
+- It improves or preserves observability (logs)
+- Docs are updated if architecture/behavior changes
+
+---
+
+## 5) NON-NEGOTIABLE INVARIANTS (Never regress)
+These are **hard constraints**:
+
+1. `.bat` files are **configuration only**
+   - Only authoritative keys: `EXE=...` and `MODEL=...` (and other explicit config keys we list in docs)
+   - Nothing else in `.bat` is authoritative
+
+2. **Never** launch llama-server via `cmd.exe`
+   - No `cmd /c ...`
+   - Python must execute the EXE directly
+
+3. **Always** use `--log-file` for llama-server
+   - Never rely on `stdout/stderr` redirection (`>`, `>>`) for long-running servers
+
+4. Paths must be **fully expanded** before Python uses them
+   - No `%ROOT%`, no delayed expansion assumptions
+
+---
+
+## 6) CURRENT HARDWARE (Authoritative)
 User rig:
 - OS: Windows 11 Professional
 - CPU: AMD Ryzen 9 9950X3D
@@ -19,73 +106,43 @@ User rig:
 - GPU0: RTX 5090 (32 GB VRAM)
 - GPU1: RTX 5080 (16 GB VRAM)
 - Storage: 40 TB mixed SSD/HDD
-Dev environment:
-- VS Code
-- Python 3.14.3
-- CUDA 13.1
-- PyTorch cu130
-- Custom llama.cpp + custom llama-cpp-python linked against that build
 
-## Repo Architecture Map (keep in sync as code evolves)
-Common modules (names based on project conventions seen in this repo’s discussions):
-- `ui_streamlit_server.py` (or `ui_streamlit.py`): Streamlit chat UI + status + template display
-- `router.py`: routes requests to FAST vs ARCHITECT brain; applies prompt templates automatically
-- `server_manager.py`: launches/manages llama-server processes
-- `openai_client.py`: OpenAI-compatible client wrapper for llama-server endpoints
-- `prompt_library.py` / `sage_kaizen_prompt_lib.py`: system prompts + templates (“sage_fast_core”, “sage_architect_core”, etc.)
-- `ingest/` or `rag/`: `rss_ingest.py`, `web_ingest.py`, `folder_ingest.py`, shared `ingest_utils.py`, `ingest_runtime.py`
-- `pi_agents/` (or similar): ZeroMQ-based device orchestrator and Pi-side workers
-- `docs_tools/` (or similar): repo scan → docs + Mermaid diagrams
+---
 
-If repo differs, update this section first; it’s the agent’s “map”.
+## 7) REPO “INDEX” (Progressive Disclosure Links)
+This section is the navigation hub. When uncertain, start with **01-ARCHITECTURE**.
 
-## Non-Negotiable Invariants (do not regress)
-These rules are treated as **hard constraints**:
-1. `.bat` files are **configuration only**:
-   - Only authoritative keys are like `EXE=...` and `MODEL=...`
-   - Nothing else in `.bat` is considered authoritative
-2. Never launch llama-server via `cmd.exe` (no `cmd /c ...`).
-   - Always execute the `llama-server.exe` **directly from Python**.
-3. Always use `--log-file` for llama-server logs.
-   - Never rely on `stdout/stderr` redirection (`>`, `>>`) for long-running servers.
-4. All paths must be **fully expanded** in Python before use.
-   - No `%ROOT%`, no delayed expansion assumptions.
+### Architecture + Patterns
+- `docs/01-ARCHITECTURE.md` — system overview, data/control flow, module boundaries
+- `docs/02-ARCH-PATTERNS.md` — patterns used (dual brain, tool router, agent transport, RAG)
+- `docs/03-DECISIONS/` — ADRs (architecture decision records)
 
-## Work Style: RPI Loop (Research → Plan → Implement → Validate)
-Default workflow for any non-trivial change:
-1. **Research**: locate files + read current behavior before edits
-2. **Plan**: write a short, testable plan (phases, success criteria)
-3. **Implement**: small diffs; keep changes local and incremental
-4. **Validate**: run the right checks; confirm behavior via logs/tests
+### Runbooks + Operations
+- `docs/10-RUNBOOKS/01-LLAMA-SERVERS.md` — starting/stopping, logs, flags, ports
+- `docs/10-RUNBOOKS/02-STREAMLIT-UI.md` — UI troubleshooting + state model
+- `docs/10-RUNBOOKS/03-RAG-INGEST.md` — ingest idempotency, hashing, batching
+- `docs/10-RUNBOOKS/04-PI-AGENTS.md` — ZeroMQ schema, retries, safety
 
-This mirrors the “context engineering” approach used by HumanLayer-style workflows. :contentReference[oaicite:5]{index=5}
+### Prompting + Templates
+- `docs/20-PROMPTS.md` — prompt library overview, template keys, escalation rules
 
-## Coding Standards (Python-first)
-- Python 3.14+ compatible typing; keep Pylance happy.
-- Prefer small modules, explicit types, and clear boundaries.
-- Avoid hidden global side effects at import time (especially in Streamlit).
-- Use structured logging; never swallow exceptions silently.
-- Preserve existing conventions for naming, prompts, template keys, and file layout.
+### Testing + Quality
+- `docs/30-QUALITY.md` — typing, linting, smoke tests, performance checks
 
-### Windows / cmd.exe rules
-- Provide commands that work in **cmd.exe** (use `^` for line continuation).
-- Don’t assume PowerShell unless explicitly requested.
-- Be careful with quoting and backslashes in paths.
+### Contribution Guides
+- `docs/40-CONTRIBUTING.md` — PR checklist, commit hygiene, how to add modules safely
 
-## llama.cpp / llama-server Expectations
-- Treat llama-server flags as build-dependent; if unsure, consult the local `llama-server --help` output (this repo tracks a help dump).
-- Prioritize **accuracy over speed** by default, but improve latency when safe.
-- Multi-GPU goals: ensure GPU0 (5090) is meaningfully utilized when configured to be.
+---
 
-## Safety / Secrets
-- Never commit secrets, tokens, private keys, or personal data.
-- If a change requires credentials, add `.env.example` guidance instead.
-- Prefer least-privilege settings and explicit allowlists.
+## 8) If You’re a Coding Agent: Start Here
+1) Read `docs/01-ARCHITECTURE.md`  
+2) Read `docs/10-RUNBOOKS/01-LLAMA-SERVERS.md`  
+3) Read `AGENTS.md`  
+4) Only then propose changes
 
-## “Definition of Done” for changes
-A change is done only when:
-- It matches the architecture + invariants above
-- It’s testable (commands or checks are documented)
-- It doesn’t introduce new Pylance/type errors
-- It includes or updates logging needed for debugging
-- If it changes behavior: update docs or Mermaid diagrams accordingly
+---
+
+## 9) Notes for Claude (behavioral guidance)
+- Prefer small, incremental changes that preserve existing style.
+- When adding new features, prefer adding a module rather than tangling existing modules.
+- If a fact is uncertain (flags, versions, APIs), check local `--help` output or project docs.
