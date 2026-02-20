@@ -31,8 +31,8 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 
 ### Core modules (v1)
 - **Dual brains** (two llama-server instances):
-  - FAST brain (default): DeepSeek-V3.2 Q5_K_M (or equivalent)
-  - ARCHITECT brain (on demand): DeepSeek-V3.2 Q6_K (or equivalent)
+  - FAST brain (default): Qwen\Qwen2.5-14B-Instruct-GGUF Q6_K (or equivalent)
+  - ARCHITECT brain (on demand): bartowski Qwen2.5-32B-Instruct Q6_K_L (or equivalent)
 - **Router**: selects brain, applies templates, escalates to ARCHITECT when needed
 - **Streamlit UI**: chat interface, status, templates visible, debugging-friendly
 - **Pi Agent Transport**: ZeroMQ messaging to Raspberry Pi agents (device orchestrator)

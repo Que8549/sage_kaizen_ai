@@ -5,6 +5,7 @@ import os
 import re
 from typing import Any, Dict, List
 
+from openai_client import HttpTimeouts, stream_chat_completions
 from sk_logging import get_logger
 
 # RAG v1 integration
@@ -147,7 +148,85 @@ def route(user_text: str, force_architect: bool = False) -> RouteDecision:
 
 
 # ---------------------------------------------------
-# NEW: RAG hook you call before llama-server request
+# LLM-assisted routing
+# ---------------------------------------------------
+
+_CLASSIFY_SYSTEM = (
+    "You are a query router. Your only job is to classify queries.\n\n"
+    "Reply with exactly one word: FAST or ARCHITECT.\n\n"
+    "FAST — simple questions, quick lookups, summaries, casual chat, "
+    "basic calculations, short creative tasks\n"
+    "ARCHITECT — deep technical analysis, code review, architecture design, "
+    "complex multi-step reasoning, long-form writing, advanced tutoring, "
+    "hardware tuning, system design"
+)
+
+
+def llm_route(
+    user_text: str,
+    fast_base_url: str,
+    model_id: str,
+    timeouts: HttpTimeouts,
+    force_architect: bool = False,
+) -> RouteDecision:
+    """
+    Ask the FAST brain to classify query complexity in ~1 token.
+
+    Requires the FAST brain (Q5) to already be running.  If the call fails
+    for any reason (server error, timeout, unexpected output) this function
+    falls back to the keyword-scoring heuristic route() automatically.
+
+    Parameters
+    ----------
+    user_text:       The raw user query.
+    fast_base_url:   Base URL of the FAST brain (e.g. http://127.0.0.1:8011).
+    model_id:        Model alias reported by /v1/models.
+    timeouts:        HttpTimeouts — use short values (e.g. connect=2s, read=5s).
+    force_architect: If True, skip classification and return ARCHITECT immediately.
+    """
+    if force_architect:
+        decision = RouteDecision(brain="ARCHITECT", reasons=["force_architect"], score=999)
+        _log_decision(decision, user_text)
+        return decision
+
+    if not user_text:
+        decision = RouteDecision(brain="FAST", reasons=["empty_input"], score=0)
+        _log_decision(decision, user_text)
+        return decision
+
+    classify_messages = [
+        {"role": "system", "content": _CLASSIFY_SYSTEM},
+        # Cap at 500 chars — the classifier only needs enough context to judge
+        {"role": "user", "content": user_text[:500]},
+    ]
+
+    try:
+        chunks = list(stream_chat_completions(
+            base_url=fast_base_url,
+            model=model_id,
+            messages=classify_messages,
+            temperature=0.0,   # deterministic classification
+            top_p=1.0,
+            max_tokens=10,     # we only need "FAST" or "ARCHITECT" (1–2 tokens)
+            timeouts=timeouts,
+        ))
+        label = "".join(chunks).strip().upper()
+        brain = "ARCHITECT" if "ARCHITECT" in label else "FAST"
+        _LOG.info(
+            "llm_route | brain=%s | label=%r | input_chars=%s",
+            brain, label, len(user_text),
+        )
+        score = 999 if brain == "ARCHITECT" else 0
+        decision = RouteDecision(brain=brain, reasons=["llm_classification"], score=score)
+        return decision
+
+    except Exception:
+        _LOG.warning("llm_route failed; falling back to heuristic route()")
+        return route(user_text, force_architect=False)
+
+
+# ---------------------------------------------------
+# RAG hook you call before llama-server request
 # ---------------------------------------------------
 def apply_rag(
     messages: List[Dict[str, Any]],

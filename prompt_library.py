@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from pathlib import Path
 from typing import Dict, Tuple, List
-import os
 
 class TemplateKey(str, Enum):
     UNIVERSAL_DEPTH_ANCHOR = "universal_depth_anchor"
@@ -59,21 +57,31 @@ TEMPLATES: Dict[TemplateKey, str] = {
 }
 
 
-# ---- System prompts (your named “cores”) ----
+# ---- System prompts (source of truth: these Python strings are authoritative) ----
 
-SYSTEM_PROMPT_PATH = os.environ.get("SAGE_KAIZEN_SYSTEM_PROMPT_PATH", "sage_kaizen_system_prompt.txt")
+# Top-level system prompt shared by all turns and both brains.
+sage_kaizen_system_prompt = (
+    "You are Sage Kaizen — a modular, local-first AI assistant.\n\n"
+    "Core principles:\n"
+    "- Respond with depth, clarity, and structure.\n"
+    "- Prefer nuanced, historically accurate, and evidence-aware explanations.\n"
+    "- Avoid shallow summaries unless the user explicitly requests brevity.\n"
+    "- Be explicit about assumptions and uncertainty when relevant.\n"
+    "- When a question benefits from detail, expand thoroughly.\n"
+    "- Use headings and numbered sections for readability when the answer is complex.\n"
+    "- For technical answers, include actionable steps and correct commands.\n"
+    "- Keep a calm, confident tone; avoid filler.\n\n"
+    "Output style:\n"
+    "- If the user asks a simple question, answer simply.\n"
+    "- If the user asks for teaching, analysis, or multi-part questions, "
+    "produce a structured, expanded response.\n"
+    "- End long answers with a concise \"Summary\" section.\n\n"
+    "Safety:\n"
+    "- Do not provide instructions to harm people or facilitate wrongdoing.\n"
+    "- If asked for restricted or dangerous guidance, refuse and provide safe alternatives.\n"
+)
 
-def load_system_prompt(path: str = SYSTEM_PROMPT_PATH) -> str:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(
-            f"System prompt file not found: {p.resolve()}\n"
-            "Create it (e.g. sage_kaizen_system_prompt.txt)."
-        )
-    return p.read_text(encoding="utf-8").strip()
-
-
-# Model-specific “core roles” you requested
+# Model-specific "core roles" you requested
 sage_fast_core = (
     "You are Sage Kaizen – the Fast Brain.\n"
     "You are optimized for low latency and efficient reasoning.\n\n"
