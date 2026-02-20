@@ -145,6 +145,28 @@ def _mm_safe(s: str) -> str:
     return s
 
 
+def _preprocess_mermaid(src: str) -> str:
+    """Sanitize Mermaid source to fix parse errors common in AI-generated diagrams.
+
+    Mermaid v10 tokenizes '(' inside an unquoted '[...]' label as PS
+    (parenthesis-start), which the parser rejects.  Converting those labels
+    to quoted form — ["text (with parens)"] — is the canonical fix.
+
+    Only targets labels that are *not* already quoted and contain '(' or ')'.
+    Leaves quoted labels, sub-graph syntax, and shape variants untouched.
+    """
+    def _quote_if_needed(m: re.Match) -> str:
+        inner = m.group(1)
+        escaped = inner.replace('"', '\\"')
+        return f'["{escaped}"]'
+
+    # Match [text] where text:
+    #   - does not start with " or ' (already quoted)
+    #   - does not contain [ or ] (avoids [[subroutine]] and nested shapes)
+    #   - contains at least one ( or )
+    return re.sub(r'\[([^"\'\[\]]*[()][^"\'\[\]]*)\]', _quote_if_needed, src)
+
+
 def build_sage_kaizen_mermaid(q5: Optional[LlamaServerInfo], q6: Optional[LlamaServerInfo]) -> str:
     """Build Mermaid diagram; uses quoted node labels + <br/> for line breaks."""
 
@@ -202,7 +224,7 @@ def render_mermaid_with_exports(
 ) -> None:
     """Render Mermaid in Streamlit and provide SVG/PNG download buttons."""
 
-    diagram_text = (diagram or "").strip()
+    diagram_text = _preprocess_mermaid((diagram or "").strip())
 
     # IMPORTANT: do NOT html.escape() the Mermaid source; it changes syntax.
     # Instead, embed it into JS safely via JSON string literal.
