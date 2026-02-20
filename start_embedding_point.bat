@@ -1,4 +1,10 @@
 @echo off
+:: ============================================================================
+:: MANUAL USE ONLY
+:: Python (server_manager.py) no longer reads this file.
+:: All server config is in config/brains/brains.yaml.
+:: Use this script only for manual debugging from a terminal.
+:: ============================================================================
 setlocal EnableExtensions
 
 set "ROOT=F:\Projects\sage_kaizen_ai"

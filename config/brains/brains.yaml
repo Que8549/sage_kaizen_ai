@@ -36,6 +36,7 @@ fast:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
   model: "E:/Qwen/Qwen2.5-14B-Instruct-GGUF/Q6_K/qwen2.5-14b-instruct-q6_k-00001-of-00004.gguf"
   log: "F:/Projects/sage_kaizen_ai/logs/q5_server.log"
+  startup_timeout_s: 1800    # 30 minutes — 14B model cold load on 5080
 
   server:
     # Network — which address and port to listen on
@@ -91,6 +92,7 @@ architect:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
   model: "E:/Qwen/bartowski-Qwen2.5-32B-Instruct-GGUF/Qwen2.5-32B-Instruct-Q6_K_L.gguf"
   log: "F:/Projects/sage_kaizen_ai/logs/q6_server.log"
+  startup_timeout_s: 2700    # 45 minutes — 32B model cold load on 5090
 
   server:
     host: "127.0.0.1"
@@ -139,6 +141,7 @@ embed:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
   model: "E:/bge-m3-GGUF/FP16/bge-m3-FP16.gguf"
   log: "F:/Projects/sage_kaizen_ai/logs/embed_server.log"
+  startup_timeout_s: 300     # 5 minutes — BGE-M3 FP16 loads fast
 
   server:
     host: "127.0.0.1"

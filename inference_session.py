@@ -8,7 +8,6 @@ the UI and ChatService have no direct dependency on server_manager details.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional, Tuple
 
 from openai_client import HttpTimeouts, discover_model_id, health_check
@@ -21,16 +20,6 @@ from server_manager import (
 )
 
 
-def _url_to_port(url: str) -> Optional[int]:
-    """Extract the port number from a base URL string."""
-    try:
-        if ":" in url:
-            return int(url.rstrip("/").split(":")[-1])
-    except Exception:
-        return None
-    return None
-
-
 @dataclass
 class InferenceSession:
     """
@@ -40,8 +29,8 @@ class InferenceSession:
 
         session = InferenceSession.from_urls(q5_url, q6_url, embed_url, ...)
 
-    The session is cheap to create (just a dataclass); the underlying
-    ManagedServers tracks .bat paths and ports.
+    The session is cheap to create (just a dataclass); ManagedServers is
+    loaded from brains.yaml and owns server config and ports.
     """
 
     q5_url: str
@@ -65,14 +54,7 @@ class InferenceSession:
         q6_model_id: str,
     ) -> "InferenceSession":
         """Build a session from user-supplied base URLs."""
-        servers = ManagedServers(
-            q5_port=_url_to_port(q5_url) or 8011,
-            q6_port=_url_to_port(q6_url) or 8012,
-            embed_port=_url_to_port(embed_url) or 8020,
-            start_q5_bat=Path("start_q5_server.bat"),
-            start_q6_bat=Path("start_q6_server.bat"),
-            start_embed_bat=Path("start_embedding_point.bat"),
-        )
+        servers = ManagedServers.from_yaml()
         return cls(
             q5_url=q5_url,
             q6_url=q6_url,
