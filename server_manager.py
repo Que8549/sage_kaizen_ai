@@ -320,9 +320,12 @@ def _build_argv(brain: BrainConfig) -> list:
       <exe>  --model <path>  <server flags in YAML order>  --log-file <path>
 
     Boolean flag handling:
-      - Keys in _BOOL_ONOFF  → --flag on  /  --flag off
-      - Keys in _BOOL_PRESENCE → --flag (only when True; omitted when False)
-      - All other keys       → --flag <value>
+      - Keys in _BOOL_ONOFF    → --flag on  /  --flag off
+      - All other bool keys    → --flag (only when True; omitted when False)
+        This includes negation flags such as --no-kv-unified and
+        --no-cont-batching: set the YAML key to true to emit the flag,
+        false (or omit) to leave the positive default in effect.
+      - All other keys         → --flag <value>
 
     --log-file is always appended last (project invariant: never rely on
     stdout/stderr redirection for long-running servers).
