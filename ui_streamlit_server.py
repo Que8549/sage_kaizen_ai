@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import time
 from typing import List
 
@@ -9,11 +7,7 @@ import streamlit as st
 
 from chat_service import ChatService, TurnConfig
 from inference_session import InferenceSession
-from mermaid_streamlit import (
-    build_sage_kaizen_mermaid,
-    probe_llama_server,
-    render_mermaid_with_exports,
-)
+from mermaid_streamlit import DiagramHandler
 from openai_client import HttpTimeouts, LlamaServerError
 from prompt_library import TemplateKey
 from settings import CONFIG
@@ -28,27 +22,6 @@ def _normalize_base_url(url: str) -> str:
     if u.endswith("/v1"):
         u = u[:-3].rstrip("/")
     return u
-
-
-def _arch_sig(info: object) -> str:
-    """Stable hash of probe fields; triggers diagram rebuild on change."""
-    if info is None:
-        payload: dict = {"ok": False}
-    else:
-        payload = {
-            "ok": bool(getattr(info, "ok", False)),
-            "model_id": getattr(info, "model_id", None),
-            "alias": getattr(info, "alias", None),
-            "ctx_size": getattr(info, "ctx_size", None),
-            "n_gpu_layers": getattr(info, "n_gpu_layers", None),
-            "device": getattr(info, "device", None),
-            "tensor_split": getattr(info, "tensor_split", None),
-            "split_mode": getattr(info, "split_mode", None),
-            "main_gpu": getattr(info, "main_gpu", None),
-            "source": getattr(info, "source", None),
-        }
-    b = json.dumps(payload, sort_keys=True, default=str).encode("utf-8", errors="replace")
-    return hashlib.sha256(b).hexdigest()
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -75,12 +48,6 @@ if "q6_model_id" not in st.session_state:
     st.session_state.q6_model_id = CONFIG.q6_model_id
 if "last_route" not in st.session_state:
     st.session_state.last_route = None
-if "arch_mermaid_src" not in st.session_state:
-    st.session_state.arch_mermaid_src = ""
-if "arch_sig_q5" not in st.session_state:
-    st.session_state.arch_sig_q5 = ""
-if "arch_sig_q6" not in st.session_state:
-    st.session_state.arch_sig_q6 = ""
 
 # ─────────────────────────────────────────────────────────────────────────── #
 # Sidebar                                                                      #
@@ -180,35 +147,6 @@ with st.sidebar:
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
-# Architecture diagram (Mermaid)                                               #
-# ─────────────────────────────────────────────────────────────────────────── #
-
-col_m1, col_m2 = st.columns([1, 6])
-with col_m1:
-    refresh_arch = st.button("Refresh diagram", help="Re-probe Q5/Q6 and rebuild the diagram.")
-with col_m2:
-    st.markdown("### Architecture Diagram")
-
-q5_info = probe_llama_server(q5_url)
-q6_info = probe_llama_server(q6_url)
-sig5 = _arch_sig(q5_info)
-sig6 = _arch_sig(q6_info)
-
-if refresh_arch or sig5 != st.session_state.arch_sig_q5 or sig6 != st.session_state.arch_sig_q6:
-    st.session_state.arch_sig_q5 = sig5
-    st.session_state.arch_sig_q6 = sig6
-    st.session_state.arch_mermaid_src = build_sage_kaizen_mermaid(q5_info, q6_info)
-
-with st.expander("View architecture diagram (Mermaid)", expanded=True):
-    q5_src = q5_info.source
-    q6_src = q6_info.source
-    q5_state = "OK" if q5_info.ok else "DOWN"
-    q6_state = "OK" if q6_info.ok else "DOWN"
-    st.caption(f"Q5 probe: {q5_state} ({q5_src}) \u2022 Q6 probe: {q6_state} ({q6_src})")
-    render_mermaid_with_exports(st.session_state.arch_mermaid_src, height=700, theme="default")
-
-
-# ─────────────────────────────────────────────────────────────────────────── #
 # Chat                                                                         #
 # ─────────────────────────────────────────────────────────────────────────── #
 
@@ -302,6 +240,7 @@ if user_text:
 
         if final:
             live.markdown(final)
+            DiagramHandler.render_if_present(final)
             endpoint = session.url_for_brain(decision.brain)
             st.caption(
                 f"\u23F1\uFE0F {elapsed:.2f}s \u2022 Brain: {brain_label} \u2022 "

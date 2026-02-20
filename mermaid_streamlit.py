@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
@@ -352,3 +353,61 @@ def render_mermaid_with_exports(
 </html>"""
 
     components.html(mermaid_html, height=height, scrolling=True)
+
+
+# ----------------------------
+# On-demand diagram handler
+# ----------------------------
+
+class DiagramHandler:
+    """Detects Mermaid code blocks in AI responses and renders them inline.
+
+    Usage (inside a st.chat_message context):
+        DiagramHandler.render_if_present(response_text)
+    """
+
+    _MERMAID_BLOCK_RE = re.compile(
+        r"```mermaid\s*\n(.*?)```",
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    # Phrases in user input or AI output that signal diagram intent.
+    _TRIGGER_RE = re.compile(
+        r"(?:create|generate|draw|show|view|display|make)\s+"
+        r"(?:a\s+|an\s+|the\s+)?(?:mermaid\s+)?diagram"
+        r"|mermaid\s+diagram"
+        r"|architecture\s+diagram"
+        r"|view\s+(?:the\s+)?architecture",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def is_triggered(cls, text: str) -> bool:
+        """Return True if *text* contains a diagram trigger phrase."""
+        return bool(cls._TRIGGER_RE.search(text or ""))
+
+    @classmethod
+    def extract_mermaid(cls, text: str) -> Optional[str]:
+        """Return the first ```mermaid ... ``` block found in *text*, or None."""
+        m = cls._MERMAID_BLOCK_RE.search(text or "")
+        return m.group(1).strip() if m else None
+
+    @classmethod
+    def render_if_present(
+        cls,
+        response_text: str,
+        *,
+        height: int = 500,
+        theme: str = "default",
+    ) -> bool:
+        """If *response_text* contains a Mermaid block, render it inline.
+
+        Call this inside a ``st.chat_message`` context so the diagram appears
+        as part of the assistant message.  Returns True when a diagram was
+        rendered.
+        """
+        src = cls.extract_mermaid(response_text)
+        if src is None:
+            return False
+        render_mermaid_with_exports(src, height=height, theme=theme)
+        return True

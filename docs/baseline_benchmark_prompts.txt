@@ -75,3 +75,8 @@ Pedagogical flexibility
 Concept scaling
 
 
+Benchmark - Dataset Training
+When is the last date of the data that the FAST Brain — Qwen2.5-14B Q6_K and ARCHITECT Brain — Qwen2.5-32B Q6_K_L models were trained on?
+
+ 29.63s • Brain: Architect (Q6) 
+ 
