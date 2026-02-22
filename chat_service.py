@@ -19,6 +19,7 @@ from openai_client import HttpTimeouts, LlamaServerError, stream_chat_completion
 from prompt_library import (
     TemplateKey,
     build_messages,
+    build_system_only,
     sage_architect_core,
     sage_fast_core,
 )
@@ -182,18 +183,26 @@ class ChatService:
         Build the full OpenAI-style messages list for this turn:
             [system + core + templates] + prior_history + [current user turn]
 
-        RAG context is injected into the system message automatically.
+        History is inserted BEFORE the current user message so the last message
+        is always role=user — required by Qwen3 (enable_thinking rejects assistant prefill).
         """
         core = sage_architect_core if decision.brain == "ARCHITECT" else sage_fast_core
-        messages = build_messages(
-            user_text=user_text,
+        system_content = build_system_only(
             system_prompt=self._system_prompt,
             core_prompt=core,
             templates=templates,
         )
-        # Append prior history (slice excludes the current turn — already in messages)
+
+        messages: List[dict] = []
+        if system_content:
+            messages.append({"role": "system", "content": system_content})
+
+        # Prior turns go BEFORE the current user message.
+        # history[-1] is the current user turn (already captured in user_text).
         if history:
             messages.extend(history[:-1])
+
+        messages.append({"role": "user", "content": user_text.strip()})
 
         messages = _router.apply_rag(messages, user_text, decision)
         return messages
