@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import BaseModel
+
+from pg_settings import PgSettings
 
 
 class RetrievedChunk(BaseModel):
@@ -11,50 +12,13 @@ class RetrievedChunk(BaseModel):
     score: float
     metadata: dict
 
-class RagSettings(BaseSettings):
+class RagSettings(PgSettings):
     """
     RAG configuration.
 
-    Values are populated in this order:
-        1. .env file (env_file below)
-        2. OS environment variables
-        3. Default values defined in this class
-
-    Example .env file (project root):
-
-        PG_USER=sage
-        PG_PASSWORD=YourRealPassword
-        PG_DB=sage_kaizen
+    PG_* fields (pg_user, pg_password, pg_host, pg_port, pg_db, pg_dsn)
+    are inherited from PgSettings and loaded from .env / environment variables.
     """
-
-    # Tell pydantic to load environment variables from .env
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",   # ✅ KEY FIX: ignore unrelated .env keys
-    )
-
-    # -------------------------
-    # PostgreSQL settings
-    # -------------------------
-    # These values are automatically populated by pydantic:
-    # - First from .env file
-    # - Then from system environment variables
-    # - Otherwise default values below are used
-    #
-    # So:
-    # self.pg_user       ← loaded from PG_USER in .env
-    # self.pg_password   ← loaded from PG_PASSWORD in .env
-    # self.pg_db         ← loaded from PG_DB in .env
-    #
-    # If not found, defaults below apply.
-
-    pg_user: str = "my_user"
-    pg_password: str = "my_pwd"
-    pg_host: str = "127.0.0.1"
-    pg_port: int = 5432
-    pg_db: str = "my_db"
 
     # -------------------------
     # Embedding server
@@ -72,28 +36,6 @@ class RagSettings(BaseSettings):
     # Score = 1 / (1 + cosine_distance).  A value of ~0.40 filters out near-noise results.
     # Set via env var SAGE_RAG_MIN_SCORE or .env file.
     min_score: float = 0.0
-
-    # -------------------------
-    # Derived DSN (built dynamically)
-    # -------------------------
-    @property
-    def pg_dsn(self) -> str:
-        """
-        This builds the DSN using values populated above.
-
-        IMPORTANT:
-        self.pg_user and self.pg_password are already populated
-        by pydantic from:
-            - .env
-            - OR environment variables
-            - OR defaults
-
-        Nothing manual is required here.
-        """
-        return (
-            f"postgresql://{self.pg_user}:{self.pg_password}"
-            f"@{self.pg_host}:{self.pg_port}/{self.pg_db}"
-        )
 
 
 

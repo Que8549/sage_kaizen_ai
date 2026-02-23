@@ -6,6 +6,9 @@ python -m streamlit run ui_streamlit_server.py
 python.exe -m rag_v1.ingest.folder_ingest
 
 
+Claude
+`/clear`
+
 cd /d F:\Projects\sage_kaizen_ai
 set SAGE_RAG_INGEST_DIR=F:\Projects\sage_kaizen_ai\docs
 set SAGE_RAG_COMMIT_EVERY=500

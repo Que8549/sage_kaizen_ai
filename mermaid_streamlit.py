@@ -304,7 +304,7 @@ def render_mermaid_with_exports(
         // when the SVG is drawn via <img>, blocking toBlob() with a SecurityError.
         // Strip them so the canvas stays clean; the PNG renders with fallback fonts.
         return svg.replace(
-          /@font-face\s*\{{[^}}]*url\s*\(['"]?https?:\/\/[^'")\s]+['"]?\)[^}}]*\}}/gi,
+          /@font-face\\s*\\{{[^}}]*url\\s*\\(['"]?https?:\\/\\/[^'")\\s]+['"]?\\)[^}}]*\\}}/gi,
           ""
         );
       }}

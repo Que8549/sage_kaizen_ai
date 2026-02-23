@@ -152,14 +152,26 @@ def stream_chat_completions(
         # which garbles multi-byte UTF-8 characters (e.g. box-drawing, em-dash).
         r.encoding = "utf-8"
 
+        _in_reasoning = False
         for data in _iter_sse_data_lines(r):
             if data == "[DONE]":
+                if _in_reasoning:
+                    yield "</think>"
                 return
             try:
                 obj = json.loads(data)
                 delta = obj["choices"][0].get("delta", {})
-                piece = delta.get("content")
-                if isinstance(piece, str) and piece:
-                    yield piece
+                reasoning = delta.get("reasoning_content")
+                content = delta.get("content")
+                if isinstance(reasoning, str) and reasoning:
+                    if not _in_reasoning:
+                        yield "<think>"
+                        _in_reasoning = True
+                    yield reasoning
+                if isinstance(content, str) and content:
+                    if _in_reasoning:
+                        yield "</think>"
+                        _in_reasoning = False
+                    yield content
             except Exception:
                 continue

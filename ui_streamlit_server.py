@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import List
+from uuid import uuid4
 
 import streamlit as st
 
@@ -22,6 +24,24 @@ def _normalize_base_url(url: str) -> str:
     if u.endswith("/v1"):
         u = u[:-3].rstrip("/")
     return u
+
+
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+_OUTPUT_TAG_RE = re.compile(r"</?Final\s*Output>", re.IGNORECASE)
+
+
+def _parse_response(text: str) -> tuple[str | None, str]:
+    """Split model output into (thinking, clean_response).
+
+    Extracts all <think>...</think> blocks as collapsible reasoning content.
+    Strips <Final Output> / </Final Output> wrapper tags from the response.
+    Returns (thinking, clean_text) where thinking is None if no <think> block.
+    """
+    blocks = _THINK_RE.findall(text)
+    thinking = "\n\n".join(b.strip() for b in blocks if b.strip()) or None
+    clean = _THINK_RE.sub("", text)
+    clean = _OUTPUT_TAG_RE.sub("", clean)
+    return thinking, clean.strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -48,6 +68,24 @@ if "q6_model_id" not in st.session_state:
     st.session_state.q6_model_id = CONFIG.q6_model_id
 if "last_route" not in st.session_state:
     st.session_state.last_route = None
+if "fb_rated_ids" not in st.session_state:
+    st.session_state.fb_rated_ids = set()
+if "fb_stats_dirty" not in st.session_state:
+    st.session_state.fb_stats_dirty = True
+
+# ── Feedback DB: one-time schema init + reload rated IDs after page refresh ──
+try:
+    from feedback.db import ensure_schema, get_conn as _fb_get_conn
+    from feedback.settings import FeedbackSettings as _FeedbackSettings
+    _fb_cfg = _FeedbackSettings()
+    ensure_schema(_fb_cfg.pg_dsn)
+    if not st.session_state.fb_rated_ids:
+        with _fb_get_conn(_fb_cfg.pg_dsn) as _fb_conn:
+            with _fb_conn.cursor() as _cur:
+                _rows = _cur.execute("SELECT id::text FROM public.ratings").fetchall()
+        st.session_state.fb_rated_ids = {r["id"] for r in _rows}
+except Exception:
+    pass   # graceful degradation — chat works normally if DB is unavailable
 
 # ─────────────────────────────────────────────────────────────────────────── #
 # Sidebar                                                                      #
@@ -139,6 +177,26 @@ with st.sidebar:
     if st.session_state.last_thinking_time is not None:
         st.caption(f"\u23F1\uFE0F Last thinking time: {st.session_state.last_thinking_time:.2f}s")
 
+    st.subheader("Feedback Dataset")
+    if st.session_state.fb_stats_dirty:
+        try:
+            from feedback.db import fetch_stats, get_conn as _fb_get_conn
+            from feedback.settings import FeedbackSettings as _FeedbackSettings
+            _fb_cfg = _FeedbackSettings()
+            with _fb_get_conn(_fb_cfg.pg_dsn) as _fb_conn:
+                st.session_state.fb_stats = fetch_stats(_fb_conn)
+            st.session_state.fb_stats_dirty = False
+        except Exception:
+            st.session_state.fb_stats = {}
+    _s = st.session_state.get("fb_stats", {})
+    if _s:
+        st.caption(
+            f"\U0001F44D {_s.get('thumbs_up', 0)} / \U0001F44E {_s.get('thumbs_down', 0)}"
+            f" \u2022 FAST: {_s.get('fast_up', 0)}\u2191 {_s.get('fast_down', 0)}\u2193"
+            f" \u2022 ARCH: {_s.get('arch_up', 0)}\u2191 {_s.get('arch_down', 0)}\u2193"
+        )
+    st.caption("`python -m feedback --stats` \u2022 `--out kto.jsonl`")
+
     if st.button("New chat"):
         st.session_state.messages = []
         st.session_state.last_thinking_time = None
@@ -153,8 +211,64 @@ with st.sidebar:
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
+        DiagramHandler.render_if_present(m["content"])
+        if m.get("thinking"):
+            with st.expander("Developer Mode Reasoning", expanded=False):
+                st.markdown(m["thinking"])
 
-user_text = st.chat_input("Ask Sage Kaizen\u2026")
+        if m["role"] == "assistant" and m.get("id"):
+            msg_id: str = m["id"]
+
+            if m.get("thumb") is not None or msg_id in st.session_state.fb_rated_ids:
+                icon = "\U0001F44D" if m.get("thumb", 0) == 1 else "\U0001F44E"
+                st.caption(f"{icon} Rated  \u2022  {m.get('model_used', '')}")
+
+            else:
+                note_val = st.text_input(
+                    "Note",
+                    key=f"note_{msg_id}",
+                    placeholder="Wrong facts, too verbose, etc. (optional)",
+                    label_visibility="collapsed",
+                )
+                tb_c1, tb_c2, tb_c3 = st.columns([1, 1, 10])
+                with tb_c1:
+                    thumb_up = st.button("\U0001F44D", key=f"up_{msg_id}")
+                with tb_c2:
+                    thumb_down = st.button("\U0001F44E", key=f"dn_{msg_id}")
+
+                if thumb_up or thumb_down:
+                    _thumb = 1 if thumb_up else -1
+                    _saved = False
+                    try:
+                        from feedback.db import insert_rating, get_conn as _fb_get_conn
+                        from feedback.settings import FeedbackSettings as _FeedbackSettings
+                        _meta = m.get("meta", {})
+                        _fb_cfg = _FeedbackSettings()
+                        with _fb_get_conn(_fb_cfg.pg_dsn) as _fb_conn:
+                            insert_rating(
+                                _fb_conn,
+                                id=msg_id,
+                                brain=_meta.get("brain", "FAST"),
+                                model_id=_meta.get("model_id", ""),
+                                endpoint=_meta.get("endpoint", ""),
+                                route_score=float(_meta.get("route_score", 0)),
+                                route_reasons=list(_meta.get("route_reasons", [])),
+                                templates=list(_meta.get("templates", [])),
+                                prompt_messages=list(_meta.get("prompt_messages", [])),
+                                assistant_text=m["content"],
+                                thumb=_thumb,
+                                notes=note_val or "",
+                            )
+                        _saved = True
+                    except Exception as _e:
+                        st.warning(f"Feedback not saved: {_e}")
+                    if _saved:
+                        m["thumb"] = _thumb
+                        st.session_state.fb_rated_ids.add(msg_id)
+                        st.session_state.fb_stats_dirty = True
+                        st.rerun()
+
+user_text = st.chat_input("Ask Sage Kaizen\u2026", key="chat_input")
 
 if user_text:
     st.session_state.messages.append({"role": "user", "content": user_text})
@@ -237,13 +351,78 @@ if user_text:
         elapsed = time.time() - start
         st.session_state.last_thinking_time = elapsed
         final = "".join(acc).strip()
+        _thinking, _clean = _parse_response(final)
 
         if final:
-            live.markdown(final)
-            DiagramHandler.render_if_present(final)
-            endpoint = session.url_for_brain(decision.brain)
+            live.markdown(_clean)
+            DiagramHandler.render_if_present(_clean)
+            if _thinking:
+                with st.expander("Developer Mode Reasoning", expanded=False):
+                    st.markdown(_thinking)
+            _endpoint = session.url_for_brain(decision.brain)
+            _model_id = session.model_id_for_brain(decision.brain)
+            _new_msg_id = str(uuid4())
             st.caption(
                 f"\u23F1\uFE0F {elapsed:.2f}s \u2022 Brain: {brain_label} \u2022 "
-                f"Endpoint: {endpoint}"
+                f"Endpoint: {_endpoint}"
             )
-            st.session_state.messages.append({"role": "assistant", "content": final})
+            st.session_state.messages.append({
+                "id":         _new_msg_id,
+                "role":       "assistant",
+                "content":    _clean,
+                "thinking":   _thinking or "",
+                "model_used": f"{_model_id} ({decision.brain})",
+                "meta": {
+                    "brain":           decision.brain,
+                    "endpoint":        _endpoint,
+                    "route_score":     decision.score,
+                    "route_reasons":   list(decision.reasons),
+                    "templates":       [t.value for t in templates],
+                    "prompt_messages": messages,
+                    "model_id":        _model_id,
+                    "ts":              time.time(),
+                },
+                "thumb": None,
+            })
+            # ── Inline feedback thumbs (visible immediately, same render as response) ──
+            _note_live = st.text_input(
+                "Note",
+                key=f"note_{_new_msg_id}",
+                placeholder="Wrong facts, too verbose, etc. (optional)",
+                label_visibility="collapsed",
+            )
+            _tb1, _tb2, _ = st.columns([1, 1, 10])
+            with _tb1:
+                _up_live = st.button("\U0001F44D", key=f"up_{_new_msg_id}")
+            with _tb2:
+                _dn_live = st.button("\U0001F44E", key=f"dn_{_new_msg_id}")
+            if _up_live or _dn_live:
+                _thumb_live = 1 if _up_live else -1
+                _saved_live = False
+                try:
+                    from feedback.db import insert_rating, get_conn as _fb_get_conn
+                    from feedback.settings import FeedbackSettings as _FeedbackSettings
+                    _fb_cfg = _FeedbackSettings()
+                    with _fb_get_conn(_fb_cfg.pg_dsn) as _fb_conn:
+                        insert_rating(
+                            _fb_conn,
+                            id=_new_msg_id,
+                            brain=decision.brain,
+                            model_id=_model_id,
+                            endpoint=_endpoint,
+                            route_score=float(decision.score),
+                            route_reasons=list(decision.reasons),
+                            templates=[t.value for t in templates],
+                            prompt_messages=list(messages),
+                            assistant_text=_clean,
+                            thumb=_thumb_live,
+                            notes=_note_live or "",
+                        )
+                    _saved_live = True
+                except Exception as _e:
+                    st.warning(f"Feedback not saved: {_e}")
+                if _saved_live:
+                    st.session_state.messages[-1]["thumb"] = _thumb_live
+                    st.session_state.fb_rated_ids.add(_new_msg_id)
+                    st.session_state.fb_stats_dirty = True
+                    st.rerun()
