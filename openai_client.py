@@ -147,6 +147,11 @@ def stream_chat_completions(
                 body = "<unreadable>"
             raise LlamaServerError(f"{url} returned HTTP {r.status_code}: {body[:500]}")
 
+        # llama-server sends text/event-stream without a charset declaration;
+        # requests defaults to ISO-8859-1 for text/* types per the HTTP spec,
+        # which garbles multi-byte UTF-8 characters (e.g. box-drawing, em-dash).
+        r.encoding = "utf-8"
+
         for data in _iter_sse_data_lines(r):
             if data == "[DONE]":
                 return

@@ -274,10 +274,8 @@ def apply_rag(
             user_text=user_text,
             brain=decision.brain,
             enabled=True,
+            top_k=top_k,
         )
-        # NOTE: current RagInjector decides its own top_k (FAST=4 / ARCH=10).
-        # If you want ENV-driven top_k, update RagInjector to accept top_k,
-        # or add a second method. For now, keep behavior stable and simple.
         return out
     except Exception:
         _LOG.exception("RAG injection failed; continuing without RAG")

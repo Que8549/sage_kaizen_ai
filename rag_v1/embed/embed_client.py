@@ -8,6 +8,14 @@ class EmbedClient:
         self.model = model
         self._client = httpx.Client(timeout=timeout_s)
 
+    def ping(self, timeout_s: float = 5.0) -> bool:
+        """Return True if the embedding server is reachable, False otherwise."""
+        try:
+            r = self._client.get(f"{self.base_url}/health", timeout=timeout_s)
+            return r.status_code < 500
+        except Exception:
+            return False
+
     def embed(self, texts: List[str]) -> List[List[float]]:
         payload = {
             "model": self.model, 

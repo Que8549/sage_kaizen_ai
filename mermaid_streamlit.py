@@ -148,23 +148,33 @@ def _mm_safe(s: str) -> str:
 def _preprocess_mermaid(src: str) -> str:
     """Sanitize Mermaid source to fix parse errors common in AI-generated diagrams.
 
-    Mermaid v10 tokenizes '(' inside an unquoted '[...]' label as PS
-    (parenthesis-start), which the parser rejects.  Converting those labels
-    to quoted form — ["text (with parens)"] — is the canonical fix.
+    Two classes of fixes applied:
 
-    Only targets labels that are *not* already quoted and contain '(' or ')'.
-    Leaves quoted labels, sub-graph syntax, and shape variants untouched.
+    1. Node labels — Mermaid v10 tokenizes '(' inside an unquoted '[...]' label
+       as PS (parenthesis-start), which the parser rejects.  Converting those
+       labels to quoted form — ["text (with parens)"] — is the canonical fix.
+       Only targets labels not already quoted; leaves [[subroutine]] etc. alone.
+
+    2. Edge labels — '(' inside a pipe-delimited edge label |...|  triggers the
+       same PS token error.  Replacing '(' with '[' and ')' with ']' inside edge
+       labels is safe because square brackets are inert there.
     """
-    def _quote_if_needed(m: re.Match) -> str:
+    def _quote_node_label(m: re.Match) -> str:
         inner = m.group(1)
         escaped = inner.replace('"', '\\"')
         return f'["{escaped}"]'
 
-    # Match [text] where text:
-    #   - does not start with " or ' (already quoted)
-    #   - does not contain [ or ] (avoids [[subroutine]] and nested shapes)
-    #   - contains at least one ( or )
-    return re.sub(r'\[([^"\'\[\]]*[()][^"\'\[\]]*)\]', _quote_if_needed, src)
+    # Fix 1: unquoted node labels containing parens → ["..."]
+    src = re.sub(r'\[([^"\'\[\]]*[()][^"\'\[\]]*)\]', _quote_node_label, src)
+
+    # Fix 2: edge labels containing parens → replace ( ) with [ ]
+    src = re.sub(
+        r'\|([^|]*[()][^|]*)\|',
+        lambda m: '|' + m.group(1).replace('(', '[').replace(')', ']') + '|',
+        src,
+    )
+
+    return src
 
 
 def build_sage_kaizen_mermaid(q5: Optional[LlamaServerInfo], q6: Optional[LlamaServerInfo]) -> str:

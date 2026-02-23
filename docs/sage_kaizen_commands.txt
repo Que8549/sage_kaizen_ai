@@ -3,7 +3,7 @@ python -m streamlit run ui_streamlit.py
 python -m streamlit run ui_streamlit_server.py
 
 
-.\.venv\Scripts\python.exe -m rag_v1.ingest.run_ingest_folder
+python.exe -m rag_v1.ingest.folder_ingest
 
 
 cd /d F:\Projects\sage_kaizen_ai

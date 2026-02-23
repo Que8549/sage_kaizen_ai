@@ -68,6 +68,10 @@ class RagSettings(BaseSettings):
     top_k: int = 6
     chunk_chars: int = 1200
     chunk_overlap: int = 200
+    # Minimum relevance score to inject a chunk (0.0 = no filter, 1.0 = exact match only).
+    # Score = 1 / (1 + cosine_distance).  A value of ~0.40 filters out near-noise results.
+    # Set via env var SAGE_RAG_MIN_SCORE or .env file.
+    min_score: float = 0.0
 
     # -------------------------
     # Derived DSN (built dynamically)

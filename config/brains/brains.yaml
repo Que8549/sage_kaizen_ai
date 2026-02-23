@@ -133,8 +133,8 @@ architect:
     no_cont_batching: true
 
     flash_attn: true
-    cache_type_k: "q8_0"  # "f16"
-    cache_type_v: "q8_0"     # quantized V cache — saves VRAM on the larger model
+    cache_type_k: "f16"  # "f16" # key (K) cache
+    cache_type_v: "q8_0"     # quantized value (V) cache — saves VRAM on the larger model
 
     fit: true
     fit_target: 1024          # leave more headroom on the 32 GB card
