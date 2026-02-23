@@ -299,9 +299,20 @@ def render_mermaid_with_exports(
         URL.revokeObjectURL(url);
       }}
 
+      function sanitizeSvgForCanvas(svg) {{
+        // @font-face rules that load external http/https resources taint the canvas
+        // when the SVG is drawn via <img>, blocking toBlob() with a SecurityError.
+        // Strip them so the canvas stays clean; the PNG renders with fallback fonts.
+        return svg.replace(
+          /@font-face\s*\{{[^}}]*url\s*\(['"]?https?:\/\/[^'")\s]+['"]?\)[^}}]*\}}/gi,
+          ""
+        );
+      }}
+
       function svgToPng(svgText, scale=2) {{
         return new Promise((resolve, reject) => {{
-          const svgBlob = new Blob([svgText], {{type: \"image/svg+xml;charset=utf-8\"}});
+          const cleanSvg = sanitizeSvgForCanvas(svgText);
+          const svgBlob = new Blob([cleanSvg], {{type: \"image/svg+xml;charset=utf-8\"}});
           const url = URL.createObjectURL(svgBlob);
           const img = new Image();
           img.onload = () => {{
