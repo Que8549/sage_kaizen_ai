@@ -6,6 +6,10 @@ python -m streamlit run ui_streamlit_server.py
 python.exe -m rag_v1.ingest.folder_ingest
 
 
+python rag_diagnostics.py
+
+
+
 Claude
 `/clear`
 
