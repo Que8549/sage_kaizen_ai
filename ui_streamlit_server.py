@@ -8,6 +8,7 @@ from uuid import uuid4
 import streamlit as st
 
 from chat_service import ChatService, TurnConfig
+from rag_v1.retrieve.citations import format_sources_markdown
 from inference_session import InferenceSession
 from mermaid_streamlit import DiagramHandler
 from openai_client import HttpTimeouts, LlamaServerError
@@ -322,7 +323,7 @@ if user_text:
 
     templates = chat_svc.select_templates(user_text, cfg)
     history: List[dict] = st.session_state.messages[-CONFIG.max_history_messages:]
-    messages = chat_svc.prepare_messages(user_text, history, decision, templates)
+    messages, rag_sources = chat_svc.prepare_messages(user_text, history, decision, templates)
 
     brain_label = "Architect (Q6)" if use_q6 else "Fast (Q5)"
     with st.chat_message("assistant"):
@@ -352,6 +353,9 @@ if user_text:
         st.session_state.last_thinking_time = elapsed
         final = "".join(acc).strip()
         _thinking, _clean = _parse_response(final)
+        _sources_md = format_sources_markdown(rag_sources)
+        if _sources_md:
+            _clean = _clean + "\n\n" + _sources_md
 
         if final:
             live.markdown(_clean)

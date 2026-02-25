@@ -51,6 +51,7 @@ Write a short story titled “Last Night in Atlanta.”
 
 Requirements:
 - Blend jazz music and urban atmosphere
+- Include zombies
 - Use sensory imagery
 - Include one recurring symbolic motif
 - Tone: reflective, not sentimental

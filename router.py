@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from openai_client import HttpTimeouts, stream_chat_completions
 from sk_logging import get_logger
@@ -233,35 +233,31 @@ def apply_rag(
     user_text: str,
     decision: RouteDecision,
     rag_enabled: bool | None = None,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], list]:
     """
-    Drop-in RAG enrichment:
-      - Call this AFTER you build messages (prompt library + templates),
-        but BEFORE you send to llama-server.
+    Drop-in RAG enrichment.  Call AFTER building messages, BEFORE sending to llama-server.
 
-    Example usage in UI/server code:
-        decision = router.route(user_text)
-        messages = build_messages(...)
-        messages = router.apply_rag(messages, user_text, decision)
-        resp = call_llama_server(decision.brain, messages)
+    Returns:
+        (messages, rag_sources) — messages has RAG context injected into the last
+        user turn; rag_sources is a list[RetrievedChunk] for citation rendering.
+        Both early-exit paths return (original_messages, []).
 
     Controls:
       - rag_enabled: if None, reads env SAGE_RAG_ENABLED (default True)
       - top_k: FAST uses SAGE_RAG_FAST_TOPK (default 4)
                ARCHITECT uses SAGE_RAG_ARCH_TOPK (default 10)
     """
-    
     if not user_text:
-        return messages
+        return messages, []
 
     enabled = _env_bool("SAGE_RAG_ENABLED", default=True) if rag_enabled is None else rag_enabled
     if not enabled:
-        return messages
+        return messages, []
 
-    # Optionally, skip RAG for ultra-short inputs (reduces needless calls)
+    # Skip RAG for ultra-short inputs (reduces needless embedding calls)
     min_chars = _env_int("SAGE_RAG_MIN_CHARS", default=12)
     if len(user_text.strip()) < min_chars:
-        return messages
+        return messages, []
 
     fast_k = _env_int("SAGE_RAG_FAST_TOPK", default=4)
     arch_k = _env_int("SAGE_RAG_ARCH_TOPK", default=10)
@@ -269,14 +265,14 @@ def apply_rag(
     top_k = fast_k if decision.brain == "FAST" else arch_k
 
     try:
-        out = rag_injector.maybe_inject(
+        out, sources = rag_injector.maybe_inject(
             messages=messages,
             user_text=user_text,
             brain=decision.brain,
             enabled=True,
             top_k=top_k,
         )
-        return out
+        return out, sources
     except Exception:
         _LOG.exception("RAG injection failed; continuing without RAG")
-        return messages
+        return messages, []

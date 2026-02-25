@@ -36,6 +36,10 @@ class RagSettings(PgSettings):
     # Score = 1 / (1 + cosine_distance).  A value of ~0.40 filters out near-noise results.
     # Set via env var SAGE_RAG_MIN_SCORE or .env file.
     min_score: float = 0.0
+    # Maximum cosine distance allowed in the SQL WHERE clause (pre-filters before Python).
+    # Cosine distance range: 0.0 (identical) → 2.0 (opposite).  0.5 ≈ score > 0.67.
+    # Set via env var SAGE_RAG_MAX_DISTANCE or .env file.
+    max_distance: float = 0.5
 
 
 

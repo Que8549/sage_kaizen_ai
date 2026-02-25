@@ -1,29 +1,65 @@
+from __future__ import annotations
+
+from typing import List, Tuple
+
+from rag_v1.config.rag_settings import RetrievedChunk
 from rag_v1.runtime.rag_pipeline import RagPipeline
+
 
 class RagInjector:
 
     def __init__(self, cfg):
         self.pipeline = RagPipeline(cfg)
 
-    def maybe_inject(self, messages, user_text, brain, enabled=True, top_k: int | None = None):
+    def maybe_inject(
+        self,
+        messages: List[dict],
+        user_text: str,
+        brain: str,
+        enabled: bool = True,
+        top_k: int | None = None,
+    ) -> Tuple[List[dict], List[RetrievedChunk]]:
+        """Inject retrieved context into the last user message and return sources.
 
+        RAG context belongs in the user turn, not the system message.  The system
+        message is reserved for persona and instructions; injecting data there
+        confuses the model about what is an instruction vs. ephemeral context.
+
+        The augmented user message looks like:
+
+            <context>
+            [source_id#chunk3 | score=0.912]
+            ...retrieved text...
+
+            ---
+
+            [source_id#chunk7 | score=0.843]
+            ...retrieved text...
+            </context>
+
+            {original user question}
+
+        Returns:
+            (messages, kept_chunks) — messages is a new list (originals untouched);
+            kept_chunks is empty when RAG is disabled or no chunks pass the filter.
+        """
         if not enabled:
-            return messages
+            return list(messages), []
 
         k = top_k if top_k is not None else (4 if brain == "FAST" else 10)
-        ctx = self.pipeline.build_context(user_text, k).strip()
+        ctx, chunks = self.pipeline.build_context(user_text, k)
+        ctx = ctx.strip()
 
         if not ctx:
-            return messages
-
-        rag_block = f"Retrieved context (RAG):\n{ctx}"
+            return list(messages), []
 
         out = list(messages)
 
-        if out and out[0].get("role") == "system":
-            # Copy the dict to avoid mutating the original message object.
-            out[0] = {**out[0], "content": out[0]["content"] + "\n\n" + rag_block}
-        else:
-            out.insert(0, {"role": "system", "content": rag_block})
+        # Find the last user-role message and prepend the context block to it.
+        for i in reversed(range(len(out))):
+            if out[i].get("role") == "user":
+                augmented = f"<context>\n{ctx}\n</context>\n\n{out[i]['content']}"
+                out[i] = {**out[i], "content": augmented}
+                break
 
-        return out
+        return out, chunks

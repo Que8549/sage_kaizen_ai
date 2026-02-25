@@ -178,13 +178,20 @@ class ChatService:
         history: List[dict],
         decision: RouteDecision,
         templates: Tuple[TemplateKey, ...],
-    ) -> List[dict]:
+    ) -> Tuple[List[dict], list]:
         """
         Build the full OpenAI-style messages list for this turn:
             [system + core + templates] + prior_history + [current user turn]
 
         History is inserted BEFORE the current user message so the last message
         is always role=user — required by Qwen3 (enable_thinking rejects assistant prefill).
+
+        RAG context is injected into the user turn (not the system message) so
+        the model treats it as ephemeral data rather than a persistent instruction.
+
+        Returns:
+            (messages, rag_sources) — rag_sources is a list[RetrievedChunk] that
+            the caller uses to render inline citations after the response.
         """
         core = sage_architect_core if decision.brain == "ARCHITECT" else sage_fast_core
         system_content = build_system_only(
@@ -204,8 +211,8 @@ class ChatService:
 
         messages.append({"role": "user", "content": user_text.strip()})
 
-        messages = _router.apply_rag(messages, user_text, decision)
-        return messages
+        messages, rag_sources = _router.apply_rag(messages, user_text, decision)
+        return messages, rag_sources
 
     # ------------------------------------------------------------------ #
     # Streaming                                                            #
