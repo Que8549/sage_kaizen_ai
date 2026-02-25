@@ -59,6 +59,17 @@ def read_file_text(path: Path) -> str:
     return "\n".join(parts)
 
 
+def exclude_file(path: Path) -> bool:
+    ignore_files = {"baseline_benchmark_prompts.txt", "raspberry pi commands.txt"}
+
+    for file_name in ignore_files:
+        if file_name in str(path):
+            print(f"Skipping {file_name}...")
+            return True
+        
+    return False
+
+
 def main() -> None:
     cfg = RagSettings()
 
@@ -84,6 +95,9 @@ def main() -> None:
     with psycopg.connect(cfg.pg_dsn, row_factory=dict_row) as conn:  # type: ignore[arg-type]
         for path in iter_text_files(root):
             try:
+                if exclude_file(path):
+                    continue
+
                 text = read_file_text(path)
             except Exception:
                 continue

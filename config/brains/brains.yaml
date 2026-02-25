@@ -169,6 +169,7 @@ embed:
     # Embedding-specific flags
     embeddings: true          # enable the /embeddings endpoint
     pooling: "mean"           # mean pooling over token embeddings (BGE-M3 standard)
+    use_fp16: true            # Explicit use_fp16=True flag in the official API for faster inference with slight quality drop
 
     device: "CUDA0"
     n_gpu_layers: "all"

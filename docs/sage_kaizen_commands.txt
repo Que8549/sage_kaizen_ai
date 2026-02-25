@@ -35,4 +35,15 @@ st.title("🧠 Sage Kaizen (Dual-Brain Chat) 🧠")
   
   
 
+Export Zim Files Command
+
+# All 4 configured ZIM jobs:
+python -m rag_v1.ingest.zim_dump
+
+# Single ZIM file:
+python -m rag_v1.ingest.zim_dump --zim "C:\path\to\file.zim" --out "I:\llm_data\output_dir"
+
+python -m rag_v1.ingest.zim_dump --zim "C:\Users\Alquin\AppData\Roaming\kiwix-desktop\wikisource_en_all_maxi_2026-02.zim" --out "I:\llm_data\wikisource_maxi_2026_02"
+
+
   
