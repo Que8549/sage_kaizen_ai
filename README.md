@@ -1,46 +1,42 @@
-# Sage Kaizen AI
+# 🌌 Sage Kaizen AI
 
-🌌 Sage Kaizen
-
-A Dual-Brain, Local-First AI System for Thinking, Creating, and Controlling the Physical World
+> A Dual-Brain, Local-First AI System for Thinking, Creating, and Controlling the Physical World
 
 Sage Kaizen is a modular, production-oriented local AI architecture designed to run powerful large language models on consumer hardware — while integrating voice interaction, device orchestration (Raspberry Pi agents), retrieval-augmented generation (RAG), and immersive LED visualizations.
 
 It is built around one principle:
 
-Continuous improvement (Kaizen) guided by wisdom (Sage).
+> Continuous improvement (Kaizen) guided by wisdom (Sage).
+
+---
 
 🚀 What Is Sage Kaizen?
 
 Sage Kaizen is:
 
-🧠 A Dual-Mode AI Stack (Fast Brain + Architect Brain)
-
-🎙 A Voice-Driven Assistant
-
-🖥 A Local AI Architect & Code Generator
-
-🔦 A Physical World Controller (LED matrices, Pi devices)
-
-📚 A Research System with RAG
-
-✍️ A Creative Writing Engine
-
-🎓 A K–12 Tutor
-
-📊 A Self-Documenting Codebase Generator
+- 🧠 A Dual-Mode AI Stack (Fast Brain + Architect Brain) 🧠
+- 🎙 A Voice-Driven Assistant
+- 🖥 A Local AI Architect & Code Generator
+- 🔦 A Physical World Controller (LED matrices, Pi devices)
+- 📚 A Research System with RAG
+- ✍️ A Creative Writing Engine
+- 🎓 A K–12 Tutor
+- 📊 A Self-Documenting Codebase Generator
 
 All running locally, powered by modern GPUs and llama.cpp.
 
 No cloud required.
 
+---
+
 🧠 Dual-Brain Architecture 🧠
 
 Sage Kaizen uses two coordinated model servers:
 
-Brain	Purpose	Default Use
-⚡ Fast Brain (Q5_K_M)	Responsive chat, voice loop, orchestration	Default
-🏗 Architect Brain (Q6_K)	Deep reasoning, research, code generation	On demand
+| Brain  | Purpose  | Default Use |
+| ----------- | ----------- | ----------- |
+| ⚡ Fast Brain (Q5_K_M) | Responsive chat, voice loop, orchestration | Default |
+| 🏗 Architect Brain (Q6_K) | Deep reasoning, research, code generation | On demand |
 
 Both run via llama-server from llama.cpp (CUDA-enabled build).
 
