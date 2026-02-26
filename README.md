@@ -8,6 +8,8 @@ It is built around one principle:
 
 > Continuous improvement (Kaizen) guided by wisdom (Sage).
 
+![Continuous improvement (Kaizen) guided by wisdom (Sage)](images/sage_kaizen_mystic.png "Sage Kaizen")
+
 ---
 
 🚀 What Is Sage Kaizen?
