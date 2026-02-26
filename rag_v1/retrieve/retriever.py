@@ -23,9 +23,6 @@ class PgvectorRetriever:
         LIMIT %s;
         """
 
-        # DEBUG
-        print(f"retrieve q_emb: {q_emb} max_dist: {max_dist} k: {k} sql:\n\n{sql}")
-
         with get_conn(self.cfg.pg_dsn) as conn:
             rows = conn.execute(sql, (q_emb, q_emb, max_dist, q_emb, k)).fetchall()
 
