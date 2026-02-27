@@ -38,7 +38,9 @@ Usage
 """
 
 import argparse
+import os
 import re
+import sys
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -86,20 +88,20 @@ ZIM_JOBS: list[ZimJob] = [
         ),
         out_dir=Path(r"I:\llm_data\wikipedia_nopic_2025_12"),
     ),
-    # ZimJob(
-    #     zim_path=Path(
-    #         r"C:\Users\Alquin\AppData\Roaming\kiwix-desktop"
-    #         r"\wikisource_en_all_maxi_2026-02.zim"
-    #     ),
-    #     out_dir=Path(r"I:\llm_data\wikisource_maxi_2026_02"),
-    # ),
-    # ZimJob(
-    #     zim_path=Path(
-    #         r"C:\Users\Alquin\AppData\Roaming\kiwix-desktop"
-    #         r"\wikisource_en_all_nopic_2026-02.zim"
-    #     ),
-    #     out_dir=Path(r"I:\llm_data\wikisource_nopic_2026_02"),
-    # ),
+    ZimJob(
+        zim_path=Path(
+            r"C:\Users\Alquin\AppData\Roaming\kiwix-desktop"
+            r"\wikisource_en_all_maxi_2026-02.zim"
+        ),
+        out_dir=Path(r"I:\llm_data\wikisource_maxi_2026_02"),
+    ),
+    ZimJob(
+        zim_path=Path(
+            r"C:\Users\Alquin\AppData\Roaming\kiwix-desktop"
+            r"\wikisource_en_all_nopic_2026-02.zim"
+        ),
+        out_dir=Path(r"I:\llm_data\wikisource_nopic_2026_02"),
+    ),
 ]
 
 
@@ -109,7 +111,7 @@ ZIM_JOBS: list[ZimJob] = [
 
 _INVALID_WIN = re.compile(r'[\\/:*?"<>|]')
 _MULTI_UNDERSCORE = re.compile(r"_+")
-_MAX_SLUG_LEN = 180  # keep full path well under Windows MAX_PATH (260)
+_MAX_SLUG_LEN = 180  # slug length; long paths handled via \\?\ prefix (see _win_abs)
 
 
 def slugify(title: str) -> str:
@@ -141,14 +143,47 @@ def article_folder(out_dir: Path, title: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Windows long-path helpers
+# ---------------------------------------------------------------------------
+# Windows MAX_PATH is 260 chars.  With _MAX_SLUG_LEN=180, the output path
+# (out_dir + \A\ + \alb\ + \slug\ + \slug_date.md) can reach ~413 chars,
+# which silently causes OSError on write even though mkdir succeeds.
+# The \\?\ extended-path prefix raises the Windows limit to ~32 767 chars.
+
+def _win_abs(p: Path) -> str:
+    """Return an absolute path string with the \\?\\ extended prefix on Windows."""
+    s = os.path.abspath(str(p))
+    return "\\\\?\\" + s if sys.platform == "win32" and not s.startswith("\\\\") else s
+
+
+def _mkdir_safe(p: Path) -> None:
+    """Create directory tree using extended-length paths on Windows."""
+    os.makedirs(_win_abs(p), exist_ok=True)
+
+
+def _exists_safe(p: Path) -> bool:
+    """os.path.exists using extended-length paths on Windows."""
+    return os.path.exists(_win_abs(p))
+
+
+def _write_text_safe(p: Path, text: str, encoding: str = "utf-8") -> None:
+    """Write *text* to *p* using extended-length paths on Windows."""
+    with open(_win_abs(p), "w", encoding=encoding) as fh:
+        fh.write(text)
+
+
+def _write_bytes_safe(p: Path, data: bytes) -> None:
+    """Write *data* to *p* using extended-length paths on Windows."""
+    with open(_win_abs(p), "wb") as fh:
+        fh.write(data)
+
+
+# ---------------------------------------------------------------------------
 # ZIM archive helpers
 # ---------------------------------------------------------------------------
 
 # Metadata path candidates across old and new ZIM formats
 _DATE_PATHS = ("M/Date", "Date")
-
-# MIME types we treat as article content
-_HTML_MIME = {"text/html"}
 
 # MIME types we save as image files
 _IMAGE_MIME = {
@@ -194,7 +229,7 @@ def iter_article_entries(archive: Archive) -> Iterator[object]:
             mime = entry.get_item().mimetype
         except Exception:
             continue
-        if mime in _HTML_MIME:
+        if mime.startswith("text/html"):
             yield entry
 
 
@@ -251,7 +286,16 @@ def html_to_markdown(html_bytes: bytes) -> str:
         html = html_bytes.decode("utf-8", errors="replace")
     except Exception:
         return ""
-    return _converter.handle(html)
+    try:
+        return _converter.handle(html)
+    except Exception:
+        # Converter may have raised RecursionError on deeply-nested Wikipedia
+        # HTML (infoboxes, nested tables).  Retry with a fresh instance so
+        # state corruption on the module-level singleton doesn't cascade.
+        try:
+            return _make_converter().handle(html)
+        except Exception:
+            return ""
 
 
 def extract_image_zim_paths(html_bytes: bytes, article_zim_path: str) -> list[str]:
@@ -317,7 +361,7 @@ def extract_article(
     folder = article_folder(out_dir, title)
 
     # Resume: if the folder already exists, skip entirely
-    if folder.exists():
+    if _exists_safe(folder):
         return False
 
     try:
@@ -334,11 +378,11 @@ def extract_article(
     if not markdown.strip():
         return False
 
-    folder.mkdir(parents=True, exist_ok=True)
+    _mkdir_safe(folder)
 
     slug = slugify(title)
     md_filename = f"{slug}_{date_tag}.md"
-    (folder / md_filename).write_text(markdown, encoding="utf-8")
+    _write_text_safe(folder / md_filename, markdown)
 
     # Save images referenced in the article HTML
     article_path: str = getattr(entry, "path", "")  # type: ignore[assignment]
@@ -355,7 +399,7 @@ def extract_article(
             if not img_bytes:
                 continue
             img_filename = Path(img_zim_path).name
-            (folder / img_filename).write_bytes(img_bytes)
+            _write_bytes_safe(folder / img_filename, img_bytes)
         except Exception:
             pass  # missing / inaccessible image — skip silently
 
@@ -385,6 +429,7 @@ def dump_zim(job: ZimJob) -> None:
 
     written = skipped = errors = 0
     t0 = time.monotonic()
+    error_log_path = job.out_dir / "_dump_errors.log"
 
     for i, entry in enumerate(iter_article_entries(archive)):
         try:
@@ -395,9 +440,11 @@ def dump_zim(job: ZimJob) -> None:
                 skipped += 1
         except Exception as exc:
             errors += 1
-            if errors <= 20:
-                label = getattr(entry, "path", str(i))
-                print(f"  ERROR [{label}]: {exc}")
+            label = getattr(entry, "path", str(i))
+            if errors <= 100:
+                print(f"  ERROR [{label}]: {type(exc).__name__}: {exc}")
+            with open(_win_abs(error_log_path), "a", encoding="utf-8") as ef:
+                ef.write(f"{label}\t{type(exc).__name__}\t{exc}\n")
 
         if (i + 1) % 10_000 == 0:
             elapsed = time.monotonic() - t0
