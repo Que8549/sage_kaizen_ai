@@ -172,7 +172,7 @@ cython_debug/
 *.wav
 *.mp3
 *.docx
-# *.bat # add for now
+*.bat # add for now
 *.log
 .dockerignore
 .docker-compose.override.yml
@@ -187,7 +187,7 @@ info/
 logs/
 output.txt
 output_old.txt
-
+wiki_samples/
 
 *.cpp
 /sage_kaizen/llama-cpp-python

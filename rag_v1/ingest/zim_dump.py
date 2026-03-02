@@ -43,6 +43,9 @@ import re
 import sys
 import time
 import unicodedata
+import datetime
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}")
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -202,7 +205,7 @@ def zim_date(archive: Archive) -> str:
         try:
             raw = bytes(archive.get_entry_by_path(candidate).get_item().content)
             date_str = raw.decode("utf-8", errors="ignore").strip()
-            if len(date_str) >= 7:
+            if _DATE_RE.match(date_str):
                 return date_str[:7]  # 'YYYY-MM' from 'YYYY-MM-DD'
         except Exception:
             continue
@@ -456,9 +459,11 @@ def dump_zim(job: ZimJob) -> None:
             )
 
     elapsed = time.monotonic() - t0
+    time_total = datetime.timedelta(seconds=elapsed)
+
     print(
-        f"\nDone — written={written:,}  skipped={skipped:,}  errors={errors}"
-        f"  elapsed={elapsed / 60:.1f}min"
+        f"\nDone — written={written:,}  skipped={skipped:,}  errors={errors:,}"
+        f"  elapsed=days: {time_total.days} hrs: {time_total.seconds // 3600} mins: {(time_total.seconds % 3600) // 60} secs: {time_total.seconds % 60}"   # {elapsed / 60:.1f}min
     )
 
 
