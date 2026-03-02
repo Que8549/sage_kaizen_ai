@@ -178,7 +178,8 @@ class ChatService:
         history: List[dict],
         decision: RouteDecision,
         templates: Tuple[TemplateKey, ...],
-    ) -> Tuple[List[dict], list]:
+        wiki_enabled: bool = True,
+    ) -> Tuple[List[dict], list, list]:
         """
         Build the full OpenAI-style messages list for this turn:
             [system + core + templates] + prior_history + [current user turn]
@@ -190,8 +191,9 @@ class ChatService:
         the model treats it as ephemeral data rather than a persistent instruction.
 
         Returns:
-            (messages, rag_sources) — rag_sources is a list[RetrievedChunk] that
-            the caller uses to render inline citations after the response.
+            (messages, rag_sources, wiki_images)
+            - rag_sources: list[RetrievedChunk] for inline citations
+            - wiki_images: list[WikiImage] for Streamlit image rendering
         """
         core = sage_architect_core if decision.brain == "ARCHITECT" else sage_fast_core
         system_content = build_system_only(
@@ -212,7 +214,8 @@ class ChatService:
         messages.append({"role": "user", "content": user_text.strip()})
 
         messages, rag_sources = _router.apply_rag(messages, user_text, decision)
-        return messages, rag_sources
+        messages, wiki_images = _router.apply_wiki_rag(messages, user_text, decision, wiki_enabled)
+        return messages, rag_sources, wiki_images
 
     # ------------------------------------------------------------------ #
     # Streaming                                                            #

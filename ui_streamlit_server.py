@@ -198,6 +198,14 @@ with st.sidebar:
         )
     st.caption("`python -m feedback --stats` \u2022 `--out kto.jsonl`")
 
+    st.subheader("Wikipedia")
+    wiki_enabled = st.checkbox(
+        "Include Wikipedia",
+        value=True,
+        key="wiki_enabled",
+        help="Retrieve relevant Wikipedia passages and images for each turn (requires wiki embed service on port 8031).",
+    )
+
     if st.button("New chat"):
         st.session_state.messages = []
         st.session_state.last_thinking_time = None
@@ -323,7 +331,10 @@ if user_text:
 
     templates = chat_svc.select_templates(user_text, cfg)
     history: List[dict] = st.session_state.messages[-CONFIG.max_history_messages:]
-    messages, rag_sources = chat_svc.prepare_messages(user_text, history, decision, templates)
+    messages, rag_sources, wiki_images = chat_svc.prepare_messages(
+        user_text, history, decision, templates,
+        wiki_enabled=st.session_state.get("wiki_enabled", True),
+    )
 
     brain_label = "Architect (Q6)" if use_q6 else "Fast (Q5)"
     with st.chat_message("assistant"):
@@ -360,6 +371,25 @@ if user_text:
         if final:
             live.markdown(_clean)
             DiagramHandler.render_if_present(_clean)
+
+            # ── Wikipedia images ────────────────────────────────────────── #
+            if wiki_images:
+                import os as _os
+                _valid_imgs = [
+                    img for img in wiki_images
+                    if _os.path.isfile(img.absolute_path)
+                ]
+                if _valid_imgs:
+                    st.markdown("**Wikipedia images**")
+                    _cols = st.columns(min(len(_valid_imgs), 3))
+                    for _col, _img in zip(_cols, _valid_imgs):
+                        with _col:
+                            st.image(
+                                _img.absolute_path,
+                                caption=_img.caption_text,
+                                use_column_width=True,
+                            )
+
             if _thinking:
                 with st.expander("Developer Mode Reasoning", expanded=False):
                     st.markdown(_thinking)
