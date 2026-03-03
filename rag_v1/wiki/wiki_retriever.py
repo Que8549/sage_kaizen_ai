@@ -7,10 +7,8 @@ Used by router.apply_wiki_rag() on every chat turn when wiki retrieval
 is enabled.  On first call, auto-starts the jina-clip-v2 embed service
 as a subprocess (if not already running) and registers atexit cleanup.
 
-Env vars:
-    SAGE_WIKI_ROOT         — path to extracted ZIM dump (for image paths)
-    SAGE_WIKI_EMBED_HOST   — embed service host (default 127.0.0.1)
-    SAGE_WIKI_EMBED_PORT   — embed service port (default 8031)
+Configuration (wiki root, embed host/port) is read from
+config/brains/brains.yaml (wiki_embed: section).
 """
 from __future__ import annotations
 
@@ -20,13 +18,13 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import psycopg
 from psycopg.rows import dict_row, DictRow
 
 from rag_v1.db.pg import get_conn
 from rag_v1.wiki.mm_embed_client import MmEmbedClient
+from rag_v1.wiki.wiki_embed_config import load_wiki_embed_config
 from sk_logging import get_logger
 
 _LOG = get_logger("sage_kaizen.wiki_retriever")
@@ -110,8 +108,11 @@ class WikiRetriever:
     """
     Retrieves Wikipedia chunks and images for a user query.
 
-    On first call to search(), auto-starts the embed service (port 8031)
-    if it is not already running, and registers atexit cleanup.
+    Wiki root, embed host, and embed port are loaded from
+    config/brains/brains.yaml (wiki_embed: section).
+
+    On first call to search(), auto-starts the embed service if it is not
+    already running, and registers atexit cleanup.
 
     Gracefully returns WikiSearchResult(empty=True) on any failure so the
     chat pipeline is never blocked by wiki retrieval issues.
@@ -120,24 +121,22 @@ class WikiRetriever:
     def __init__(
         self,
         pg_dsn: str,
-        wiki_root: str           = os.getenv("SAGE_WIKI_ROOT",
-                                              r"I:\llm_data\wikipedia_maxi_2025_08"),
-        embed_host: str          = os.getenv("SAGE_WIKI_EMBED_HOST", "127.0.0.1"),
-        embed_port: int          = int(os.getenv("SAGE_WIKI_EMBED_PORT", "8031")),
-        max_distance: float      = 0.40,
-        cluster_min_size: int    = 3,
+        max_distance: float       = 0.40,
+        cluster_min_size: int     = 3,
         cluster_max_spread: float = 0.030,
         cluster_top1_floor: float = 0.800,
     ) -> None:
+        wiki_cfg = load_wiki_embed_config()
+
         self._pg_dsn           = pg_dsn
-        self._wiki_root        = Path(wiki_root)
-        self._embed_host       = embed_host
-        self._embed_port       = embed_port
+        self._wiki_root        = wiki_cfg.wiki_root
+        self._embed_host       = wiki_cfg.host
+        self._embed_port       = wiki_cfg.port
         self._max_distance     = max_distance
         self._cluster_min      = cluster_min_size
         self._cluster_spread   = cluster_max_spread
         self._cluster_floor    = cluster_top1_floor
-        self._client           = MmEmbedClient(host=embed_host, port=embed_port)
+        self._client           = MmEmbedClient(host=wiki_cfg.host, port=wiki_cfg.port)
         self._embed_proc: subprocess.Popen | None = None
         self._atexit_registered: bool = False
 
@@ -163,9 +162,9 @@ class WikiRetriever:
             "Wiki embed service not detected — auto-starting on %s:%s …",
             self._embed_host, self._embed_port,
         )
+        # The service reads host/port from brains.yaml at startup — no CLI args needed.
         self._embed_proc = subprocess.Popen(
-            [sys.executable, "-m", "rag_v1.wiki.mm_embed_service.app",
-             "--host", self._embed_host, "--port", str(self._embed_port)],
+            [sys.executable, "-m", "rag_v1.wiki.mm_embed_service.app"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

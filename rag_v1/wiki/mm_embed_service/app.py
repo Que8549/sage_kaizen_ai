@@ -4,16 +4,11 @@ rag_v1/wiki/mm_embed_service/app.py
 FastAPI service that loads jina-clip-v2 once at startup from a local directory
 and exposes text and image embedding endpoints in a shared 1024-dim vector space.
 
-Run standalone:
-    python -m rag_v1.wiki.mm_embed_service.app --host 127.0.0.1 --port 8031
+Configuration is read from config/brains/brains.yaml (wiki_embed: section).
+No environment variables are required.
 
-Env vars:
-    SAGE_WIKI_MODEL_PATH     — local path to jina-clip-v2 (default: E:\\jinaai_jina-clip-v2)
-    SAGE_WIKI_EMBED_DEVICE   — PyTorch device string (default: cuda:0)
-    SAGE_WIKI_EMBED_HOST     — bind host (default: 127.0.0.1)
-    SAGE_WIKI_EMBED_PORT     — bind port (default: 8031)
-    SAGE_WIKI_TEXT_BATCH     — max texts per /embed/text call (default: 32)
-    SAGE_WIKI_IMAGE_BATCH    — max images per /embed/image call (default: 8)
+Run standalone:
+    python -m rag_v1.wiki.mm_embed_service.app
 """
 from __future__ import annotations
 
@@ -30,12 +25,13 @@ from PIL import Image
 from pydantic import BaseModel
 from transformers import AutoModel
 
+from rag_v1.wiki.wiki_embed_config import load_wiki_embed_config
+
 # ──────────────────────────────────────────────────────────────────────────── #
 # Globals (populated at startup)                                                #
 # ──────────────────────────────────────────────────────────────────────────── #
 
 _model: Any = None
-_model_path: str = r"E:\jinaai_jina-clip-v2"
 _device: str = "cuda:0"
 _text_batch: int = 32
 _image_batch: int = 8
@@ -47,16 +43,17 @@ _image_batch: int = 8
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _model, _model_path, _device, _text_batch, _image_batch
+    global _model, _device, _text_batch, _image_batch
 
-    _model_path  = os.getenv("SAGE_WIKI_MODEL_PATH", r"E:\jinaai_jina-clip-v2")
-    _device      = os.getenv("SAGE_WIKI_EMBED_DEVICE", "cuda:0")
-    _text_batch  = int(os.getenv("SAGE_WIKI_TEXT_BATCH", "32"))
-    _image_batch = int(os.getenv("SAGE_WIKI_IMAGE_BATCH", "8"))
+    cfg = load_wiki_embed_config()
+    model_path  = str(cfg.model)
+    _device      = os.environ.get("WIKI_EMBED_DEVICE") or cfg.device
+    _text_batch  = cfg.text_batch
+    _image_batch = cfg.image_batch
 
-    print(f"[mm_embed_service] Loading jina-clip-v2 from {_model_path!r} on {_device} …", flush=True)
+    print(f"[mm_embed_service] Loading jina-clip-v2 from {model_path!r} on {_device} …", flush=True)
     _model = AutoModel.from_pretrained(
-        _model_path,
+        model_path,
         trust_remote_code=True,
         local_files_only=True,
         low_cpu_mem_usage=False,
@@ -129,6 +126,7 @@ def embed_text(req: TextRequest) -> EmbedResponse:
         embs = torch.tensor(raw, dtype=torch.float32) if not isinstance(raw, torch.Tensor) else raw.float()
         if req.normalize:
             embs = _normalize(embs)
+        embs = torch.nan_to_num(embs, nan=0.0)
         return EmbedResponse(embeddings=embs.cpu().tolist())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Embedding failed: {exc}") from exc
@@ -156,6 +154,7 @@ def embed_image(req: ImageRequest) -> EmbedResponse:
         embs = torch.tensor(raw, dtype=torch.float32) if not isinstance(raw, torch.Tensor) else raw.float()
         if req.normalize:
             embs = _normalize(embs)
+        embs = torch.nan_to_num(embs, nan=0.0)
         return EmbedResponse(embeddings=embs.cpu().tolist())
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Image embedding failed: {exc}") from exc
@@ -166,26 +165,13 @@ def embed_image(req: ImageRequest) -> EmbedResponse:
 # ──────────────────────────────────────────────────────────────────────────── #
 
 if __name__ == "__main__":
-    import argparse
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="Sage Kaizen Wiki Multimodal Embed Service")
-    parser.add_argument(
-        "--host",
-        default=os.getenv("SAGE_WIKI_EMBED_HOST", "127.0.0.1"),
-        help="Bind host (default: 127.0.0.1)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.getenv("SAGE_WIKI_EMBED_PORT", "8031")),
-        help="Bind port (default: 8031)",
-    )
-    args = parser.parse_args()
-
+    cfg  = load_wiki_embed_config()
+    port = int(os.environ.get("WIKI_EMBED_PORT") or cfg.port)
     uvicorn.run(
         "rag_v1.wiki.mm_embed_service.app:app",
-        host=args.host,
-        port=args.port,
+        host=cfg.host,
+        port=port,
         log_level="info",
     )

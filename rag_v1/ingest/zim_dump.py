@@ -200,7 +200,22 @@ _IMAGE_MIME = {
 
 
 def zim_date(archive: Archive) -> str:
-    """Return 'YYYY-MM' from ZIM metadata, or 'unknown' if unavailable."""
+    """Return 'YYYY-MM' from ZIM metadata, or 'unknown' if unavailable.
+
+    Tries the modern get_metadata() API first (new-namespace ZIM files like
+    wikipedia_en_all_maxi_2025-08.zim), then falls back to get_entry_by_path()
+    for older ZIM formats.
+    """
+    # Modern API: archive.get_metadata("Date") returns bytes directly.
+    try:
+        raw = archive.get_metadata("Date")
+        date_str = raw.decode("utf-8", errors="ignore").strip()
+        if _DATE_RE.match(date_str):
+            return date_str[:7]
+    except Exception:
+        pass
+
+    # Legacy fallback: old-namespace ZIM files store metadata as entries.
     for candidate in _DATE_PATHS:
         try:
             raw = bytes(archive.get_entry_by_path(candidate).get_item().content)

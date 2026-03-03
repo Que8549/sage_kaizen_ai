@@ -189,3 +189,50 @@ embed:
     log_timestamps: true
     log_prefix: true
     log_verbosity: 3
+
+
+# -----------------------------------------------------------------------------
+# Wiki Multimodal Embed — jinaai/jina-clip-v2 — port 8031
+# GPU: RTX 5090 (CUDA0, 32 GB VRAM)
+# Used by both mm_embed_service/app.py (FastAPI) and wiki_ingest.py (batch job)
+# -----------------------------------------------------------------------------
+wiki_embed:
+  # Local directory containing the jina-clip-v2 model weights
+  model: "E:/jinaai_jina-clip-v2"
+
+  # Shared log file — wiki_ingest.py Python logger AND the embed service
+  # subprocess both append here (one unified pipeline log)
+  log: "F:/Projects/sage_kaizen_ai/logs/sage_wiki_embed.log"
+
+  # How long wiki_ingest.py waits for app.py to become healthy on startup.
+  # jina-clip-v2 on GPU loads in ~30-90 s; 300 s gives plenty of headroom.
+  startup_timeout_s: 300
+
+  # ── Embed service settings (read by app.py / FastAPI) ──────────────────
+  service:
+    host: "127.0.0.1"
+    port: 8031
+
+    # PyTorch device for the model (CUDA0 = RTX 5090)
+    device: "cuda:0"
+
+    # Maximum batch sizes enforced by the service endpoints.
+    # wiki_ingest.py uses the same values as its per-call batch size so that
+    # ingest calls always stay within the service limits.
+    text_batch: 128
+    image_batch: 32
+
+  # ── Ingest job settings (read by wiki_ingest.py) ───────────────────────
+  ingest:
+    # Root directory of the extracted Wikipedia ZIM dump (from zim_dump.py)
+    root: "I:/llm_data/wikipedia_maxi_2025_08"
+
+    # Text chunking parameters
+    chunk_chars: 1200   # target chunk size in characters
+    overlap: 200        # overlap between consecutive chunks
+
+    # Heading names to exclude from chunking (exact match, case-sensitive)
+    exclude_sections: "References,External links,Further reading,Authority control"
+
+    # Progress logging: emit a stats line every N pages
+    log_every_pages: 10000
