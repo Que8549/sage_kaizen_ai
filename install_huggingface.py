@@ -11,13 +11,15 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 # still relies on the globally configured token or environment variable.
 
 snapshot_download(
-    repo_id = "unsloth/Qwen3.5-27B-GGUF",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
-    local_dir ="E:/Qwen3.5-27B-GGUF",     
-    allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*"],  # , "*Q8_0*", "*UD-IQ1_M*", "*UD-IQ1_S*", "*UD-Q6_K_XL*"
+    repo_id = "unsloth/Qwen2.5-Omni-7B-GGUF",
+    local_dir = "E:/Qwen2.5-Omni-7B-GGUF",
+    # mmproj-*.gguf is the combined audio+vision encoder — required for multimodal inference.
+    # Only F16/BF16 mmproj files exist; no quantized mmproj is published by Unsloth.
+    allow_patterns = ["*mmproj*F16*"],
     max_workers=16,  # 8 = default
 )
 
-# allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*",  "*UD-IQ1_M*",  "*UD-IQ1_S*", "*UD-Q6_K_XL*",] 
+# allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*",  "*UD-IQ1_M*",  "*UD-IQ1_S*", "*UD-Q6_K_XL*", "*mmproj*F16*"] 
 
 # NousResearch/Hermes-4.3-36B-GGUF  https://huggingface.co/NousResearch/Hermes-4.3-36B-GGUF
 # ACE-Step 1.5 https://huggingface.co/ACE-Step/Ace-Step1.5

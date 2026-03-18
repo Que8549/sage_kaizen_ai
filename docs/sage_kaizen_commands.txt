@@ -8,35 +8,15 @@ python.exe -m rag_v1.ingest.folder_ingest
 
 python rag_diagnostics.py
 
+#Ingest local media files
+# Run ingest (from project root):
+python -m rag_v1.media.media_ingest --root "F:/path/to/your/media"
 
+# For GPU-accelerated ingest (faster):
+python -m rag_v1.media.media_ingest --root "F:/path/to/your/media" --device cuda:0
 
-Claude
-`/clear`
-
-cd /d F:\Projects\sage_kaizen_ai
-set SAGE_RAG_INGEST_DIR=F:\Projects\sage_kaizen_ai\docs
-set SAGE_RAG_COMMIT_EVERY=500
-.\.venv\Scripts\python.exe -m rag_v1.ingest.folder_ingest
-
-
-
-If you want next steps, we can:
-add per-turn token counters in the UI
-show which layers are on which GPU
-persist chats to disk
-add a “promote this turn to Q6” button inline per message
-
-
-load_tensors: offloading output layer to GPU
-load_tensors: offloading 7 repeating layers to GPU
-load_tensors: offloaded 8/62 layers to GPU
-
-
- Thinking time: 499.92s • Brain: Q6 
-  
-  
-st.title("🧠 Sage Kaizen (Dual-Brain Chat) 🧠")
-  
+# Re-runs are safe — already-ingested files are skipped:
+python -m rag_v1.media.media_ingest --root "F:/path/to/your/media"
   
 
 Export Zim Files Command

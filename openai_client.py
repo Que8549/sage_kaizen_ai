@@ -121,7 +121,7 @@ def stream_chat_completions(
     base_url: str,
     *,
     model: str,
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],  # Any: content may be str or multimodal list
     temperature: float,
     top_p: float,
     max_tokens: int,

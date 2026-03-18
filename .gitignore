@@ -188,6 +188,7 @@ logs/
 output.txt
 output_old.txt
 wiki_samples/
+media_samples/
 
 *.cpp
 /sage_kaizen/llama-cpp-python

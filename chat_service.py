@@ -7,10 +7,18 @@ Encapsulates the full single-turn lifecycle:
 The UI layer (ui_streamlit_server.py) calls this class and renders the
 yielded chunks.  It has no direct knowledge of routing internals, prompt
 assembly, or RAG.
+
+Multimodal support (Qwen2.5-Omni FAST brain):
+    Attach MediaAttachment objects to a turn via TurnConfig.media_attachments.
+    Images and audio are serialised as OpenAI-compatible content-part arrays
+    and sent to llama-server's /v1/chat/completions endpoint.
+    Video is handled client-side (frame extraction) and arrives here as
+    multiple image attachments.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import base64
+from dataclasses import dataclass, field
 from typing import Iterator, List, Tuple
 
 import router as _router
@@ -18,7 +26,6 @@ from inference_session import InferenceSession
 from openai_client import HttpTimeouts, LlamaServerError, stream_chat_completions
 from prompt_library import (
     TemplateKey,
-    build_messages,
     build_system_only,
     sage_architect_core,
     sage_fast_core,
@@ -28,14 +35,57 @@ from sk_logging import get_logger
 
 _LOG = get_logger("sage_kaizen.chat_service")
 
-# Keyword lists for auto-template selection (kept here; UI no longer needs them)
-_TEACH_HINTS = ("teach", "tutor", "explain like", "for a 3rd grader", "for a 10th grader")
-_KNOWLEDGE_HINTS = ("history", "civilization", "ancient", "timeline", "religion", "religious")
+# Keyword lists for auto-template selection
+_TEACH_HINTS      = ("teach", "tutor", "explain like", "for a 3rd grader", "for a 10th grader")
+_KNOWLEDGE_HINTS  = ("history", "civilization", "ancient", "timeline", "religion", "religious")
 _PHILOSOPHY_HINTS = ("philosophy", "theology", "ethics", "meaning", "debate")
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
-# Data classes                                                                 #
+# MediaAttachment                                                              #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+@dataclass(frozen=True)
+class MediaAttachment:
+    """
+    A single piece of media to include in the user turn.
+
+    Attributes
+    ----------
+    kind       : "image" | "audio" | "video_frame"
+                 video_frame is a still extracted from a video file and treated
+                 identically to "image" when building the content array.
+    data_b64   : Base64-encoded raw bytes of the file.
+    mime_type  : MIME type string, e.g. "image/jpeg", "audio/wav".
+    label      : Short human-readable label shown in the UI (filename, etc.).
+    frame_index: For video_frame attachments, the 0-based frame number.
+    """
+    kind: str               # "image" | "audio" | "video_frame"
+    data_b64: str           # base64-encoded bytes
+    mime_type: str          # e.g. "image/jpeg", "audio/wav"
+    label: str = ""
+    frame_index: int = 0    # only meaningful for kind="video_frame"
+
+    @classmethod
+    def from_bytes(
+        cls,
+        raw: bytes,
+        kind: str,
+        mime_type: str,
+        label: str = "",
+        frame_index: int = 0,
+    ) -> "MediaAttachment":
+        return cls(
+            kind=kind,
+            data_b64=base64.b64encode(raw).decode("ascii"),
+            mime_type=mime_type,
+            label=label,
+            frame_index=frame_index,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+# TurnConfig                                                                  #
 # ─────────────────────────────────────────────────────────────────────────── #
 
 @dataclass(frozen=True)
@@ -54,6 +104,8 @@ class TurnConfig:
     top_p_q6: float
     max_tokens_q5: int
     max_tokens_q6: int
+    # Multimodal attachments for this turn (empty tuple = text-only)
+    media_attachments: Tuple[MediaAttachment, ...] = field(default_factory=tuple)
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -70,11 +122,13 @@ class ChatService:
 
         decision  = service.decide_route(user_text, cfg)
         templates = service.select_templates(user_text, cfg)
-        messages  = service.prepare_messages(user_text, history, decision, templates)
+        messages, rag_sources, wiki_images = service.prepare_messages(
+            user_text, history, decision, templates,
+            media_attachments=cfg.media_attachments,
+        )
 
         for chunk in service.stream_response(messages, decision, cfg):
             accumulated += chunk
-            live.markdown(accumulated)
     """
 
     def __init__(
@@ -86,7 +140,6 @@ class ChatService:
         self._session = session
         self._system_prompt = system_prompt
         self._timeouts = timeouts
-        # Short timeouts used for health checks and LLM routing (non-blocking)
         self._status_timeouts = HttpTimeouts(connect_s=2.0, read_s=5.0)
 
     # ------------------------------------------------------------------ #
@@ -99,13 +152,24 @@ class ChatService:
 
         Priority order:
           1. Empty input → FAST
-          2. auto_escalate disabled → respect deep_mode toggle only
-          3. deep_mode on → ARCHITECT (unconditional)
-          4. Q5 is live → ask FAST brain to classify (LLM routing)
-          5. Q5 not live → keyword-scoring heuristic (no server needed)
+          2. Media attachments present → FAST (only Qwen2.5-Omni handles media)
+          3. auto_escalate disabled → respect deep_mode toggle only
+          4. deep_mode on → ARCHITECT (unconditional, text analysis only)
+          5. Q5 is live → ask FAST brain to classify (LLM routing)
+          6. Q5 not live → keyword-scoring heuristic (no server needed)
         """
-        if not user_text:
+        if not user_text and not cfg.media_attachments:
             return RouteDecision(brain="FAST", reasons=["empty_input"], score=0)
+
+        # Multimodal turns always go to FAST (Qwen2.5-Omni).
+        # ARCHITECT (Qwen3.5-27B) has no vision/audio encoder.
+        if cfg.media_attachments:
+            kinds = sorted({a.kind for a in cfg.media_attachments})
+            return RouteDecision(
+                brain="FAST",
+                reasons=[f"multimodal:{','.join(kinds)}"],
+                score=0,
+            )
 
         if not cfg.auto_escalate:
             return self._manual_decision(cfg.deep_mode)
@@ -141,12 +205,6 @@ class ChatService:
     def select_templates(
         self, user_text: str, cfg: TurnConfig
     ) -> Tuple[TemplateKey, ...]:
-        """
-        Return the template tuple for this turn.
-
-        If the user has selected override_templates in the sidebar, those
-        are used as-is and auto-selection is skipped entirely.
-        """
         if cfg.override_templates:
             return cfg.override_templates
         if not cfg.auto_templates:
@@ -179,21 +237,18 @@ class ChatService:
         decision: RouteDecision,
         templates: Tuple[TemplateKey, ...],
         wiki_enabled: bool = True,
+        media_attachments: Tuple[MediaAttachment, ...] = (),
     ) -> Tuple[List[dict], list, list]:
         """
-        Build the full OpenAI-style messages list for this turn:
-            [system + core + templates] + prior_history + [current user turn]
+        Build the full OpenAI-style messages list for this turn.
 
-        History is inserted BEFORE the current user message so the last message
-        is always role=user — required by Qwen3 (enable_thinking rejects assistant prefill).
-
-        RAG context is injected into the user turn (not the system message) so
-        the model treats it as ephemeral data rather than a persistent instruction.
+        When media_attachments is non-empty the user message content is a
+        list of content-part dicts (OpenAI vision / audio format) instead of
+        a plain string.  llama-server (with --mmproj) routes these to the
+        Qwen2.5-Omni encoders.
 
         Returns:
             (messages, rag_sources, wiki_images)
-            - rag_sources: list[RetrievedChunk] for inline citations
-            - wiki_images: list[WikiImage] for Streamlit image rendering
         """
         core = sage_architect_core if decision.brain == "ARCHITECT" else sage_fast_core
         system_content = build_system_only(
@@ -206,15 +261,23 @@ class ChatService:
         if system_content:
             messages.append({"role": "system", "content": system_content})
 
-        # Prior turns go BEFORE the current user message.
-        # history[-1] is the current user turn (already captured in user_text).
         if history:
             messages.extend(history[:-1])
 
-        messages.append({"role": "user", "content": user_text.strip()})
+        # Build user content — plain string or multimodal content-part list
+        if media_attachments:
+            user_content = _build_multimodal_content(user_text, media_attachments)
+        else:
+            user_content = user_text.strip()
 
+        messages.append({"role": "user", "content": user_content})
+
+        # RAG injection operates on the text query regardless of modality.
+        # It appends context to the last user turn's text portion.
         messages, rag_sources = _router.apply_rag(messages, user_text, decision)
-        messages, wiki_images = _router.apply_wiki_rag(messages, user_text, decision, wiki_enabled)
+        messages, wiki_images = _router.apply_wiki_rag(
+            messages, user_text, decision, wiki_enabled
+        )
         return messages, rag_sources, wiki_images
 
     # ------------------------------------------------------------------ #
@@ -231,7 +294,6 @@ class ChatService:
         Yield text chunks from the selected llama-server.
 
         Raises LlamaServerError if the server returns an HTTP error.
-        The caller is responsible for catching and displaying the error.
         """
         base_url = self._session.url_for_brain(decision.brain)
         model_id = self._session.model_id_for_brain(decision.brain)
@@ -246,3 +308,53 @@ class ChatService:
             max_tokens=int(cfg.max_tokens_q6 if is_arch else cfg.max_tokens_q5),
             timeouts=self._timeouts,
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
+# Multimodal content builder                                                   #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+def _build_multimodal_content(
+    user_text: str,
+    attachments: Tuple[MediaAttachment, ...],
+) -> list:
+    """
+    Build an OpenAI-compatible multimodal content-part list.
+
+    Images / video frames → image_url data URI (base64 JPEG/PNG).
+    Audio → input_audio with base64 data and format string.
+    Text → text part appended last so the model sees media first.
+
+    llama-server (with --mmproj) parses these parts and routes each to
+    the appropriate encoder inside the mmproj GGUF.
+    """
+    parts: list = []
+
+    for att in attachments:
+        if att.kind in ("image", "video_frame"):
+            parts.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{att.mime_type};base64,{att.data_b64}",
+                },
+            })
+        elif att.kind == "audio":
+            # Extract format from mime_type: "audio/wav" → "wav"
+            fmt = att.mime_type.split("/")[-1].lower()
+            if fmt == "mpeg":
+                fmt = "mp3"
+            parts.append({
+                "type": "input_audio",
+                "input_audio": {
+                    "data": att.data_b64,
+                    "format": fmt,
+                },
+            })
+        else:
+            _LOG.warning("Unknown attachment kind %r — skipped", att.kind)
+
+    # Text always goes last so the model receives media context before the query
+    if user_text.strip():
+        parts.append({"type": "text", "text": user_text.strip()})
+
+    return parts

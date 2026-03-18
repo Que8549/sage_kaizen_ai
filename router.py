@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import re
-from typing import Any, Dict, List, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple
 
 from openai_client import HttpTimeouts, stream_chat_completions
 from sk_logging import get_logger
@@ -18,6 +18,9 @@ try:
     _WIKI_AVAILABLE = True
 except ImportError:
     _WIKI_AVAILABLE = False
+
+if TYPE_CHECKING:
+    from rag_v1.wiki.wiki_retriever import WikiRetriever
 
 DEPTH_HINTS = (
     "explain", "analyze", "compare", "why", "how", "history", "philosophy", "theology",
