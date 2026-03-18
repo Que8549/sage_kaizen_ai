@@ -387,7 +387,7 @@ if user_text:
                             st.image(
                                 _img.absolute_path,
                                 caption=_img.caption_text,
-                                use_column_width=True,
+                                width="content",
                             )
 
             if _thinking:

@@ -11,9 +11,9 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 # still relies on the globally configured token or environment variable.
 
 snapshot_download(
-    repo_id = "jinaai/jina-clip-v2",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
-    local_dir ="E:/jinaai_jina-clip-v2",     
-    # allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*", "*UD-IQ1_M*", "*UD-IQ1_S*", "*UD-Q6_K_XL*"],  
+    repo_id = "unsloth/Qwen3.5-27B-GGUF",  # "unsloth/DeepSeek-V3.2-GGUF",   "leafspark/Llama-3.2-11B-Vision-Instruct-GGUF"
+    local_dir ="E:/Qwen3.5-27B-GGUF",     
+    allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*"],  # , "*Q8_0*", "*UD-IQ1_M*", "*UD-IQ1_S*", "*UD-Q6_K_XL*"
     max_workers=16,  # 8 = default
 )
 
