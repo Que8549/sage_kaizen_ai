@@ -196,7 +196,7 @@ def _render_attachments_preview(attachments: List[MediaAttachment]) -> None:
         for col, att in zip(cols, imgs[:4]):
             with col:
                 raw = base64.b64decode(att.data_b64)
-                st.image(raw, caption=att.label, use_container_width=True)
+                st.image(raw, caption=att.label, width='stretch')
         if len(imgs) > 4:
             st.caption(f"… and {len(imgs) - 4} more image(s)/frame(s)")
 
@@ -612,7 +612,7 @@ if user_text:
                     _cols = st.columns(min(len(_valid_imgs), 3))
                     for _col, _img in zip(_cols, _valid_imgs):
                         with _col:
-                            st.image(_img.absolute_path, caption=_img.caption_text, use_container_width=True)
+                            st.image(_img.absolute_path, caption=_img.caption_text, width='stretch')
 
             if _thinking:
                 with st.expander("Developer Mode Reasoning", expanded=False):
