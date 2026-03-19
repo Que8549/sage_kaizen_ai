@@ -47,26 +47,26 @@
 # Video input: client-side frame extraction → sent as individual images.
 # -----------------------------------------------------------------------------
 fast:
-  exe: “F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe”
-  model: “E:/Qwen2.5-Omni-7B-GGUF/Qwen2.5-Omni-7B-Q8_0.gguf”
-  log: “F:/Projects/sage_kaizen_ai/logs/q5_server.log”
+  exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
+  model: "E:/Qwen2.5-Omni-7B-GGUF/Qwen2.5-Omni-7B-Q8_0.gguf"
+  log: "F:/Projects/sage_kaizen_ai/logs/q5_server.log"
   startup_timeout_s: 300    # 5 minutes — 7B model loads quickly on CUDA1
 
   server:
-    host: “127.0.0.1”
+    host: "127.0.0.1"
     port: 8011
 
-    alias: “Qwen2.5-Omni-7B-Q8_0”
+    alias: "Qwen2.5-Omni-7B-Q8_0"
 
-    device: “CUDA1”
-    n_gpu_layers: “all”
-    split_mode: “none”
+    device: "CUDA1"
+    n_gpu_layers: "all"
+    split_mode: "none"
 
     # Combined audio+vision encoder.  Single GGUF holds both the Whisper-style
     # conformer (audio) and the vision transformer (images), identified by the
     # KEY_HAS_AUDIO_ENC and KEY_HAS_VISION_ENC metadata flags.
     # Run install_huggingface.py with the *mmproj*F16* pattern to download it.
-    mmproj: “E:/Qwen2.5-Omni-7B-GGUF/mmproj-F16.gguf”
+    mmproj: "E:/Qwen2.5-Omni-7B-GGUF/mmproj-F16.gguf"
 
     # 16K context: 1 image ≈ 1280 tokens, leaving 15104 for conversation.
     ctx_size: 16384
@@ -82,8 +82,8 @@ fast:
     no_cont_batching: true
 
     flash_attn: true
-    cache_type_k: “q8_0”
-    cache_type_v: “q8_0”
+    cache_type_k: "q8_0"
+    cache_type_v: "q8_0"
 
     fit: true
     fit_ctx: 16384

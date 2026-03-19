@@ -354,7 +354,15 @@ def apply_wiki_rag(
         out = list(messages)
         for i in reversed(range(len(out))):
             if out[i].get("role") == "user":
-                augmented = f"<wiki_context>\n{ctx}\n</wiki_context>\n\n{out[i]['content']}"
+                content = out[i]["content"]
+                prefix = f"<wiki_context>\n{ctx}\n</wiki_context>\n\n"
+                if isinstance(content, list):
+                    # Multimodal content: prepend context as a text part so the
+                    # base64 audio/image data is never string-formatted into the
+                    # message (which would tokenise the raw bytes as ~4M tokens).
+                    augmented = [{"type": "text", "text": prefix}] + list(content)
+                else:
+                    augmented = prefix + content
                 out[i] = {**out[i], "content": augmented}
                 break
 

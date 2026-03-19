@@ -58,7 +58,15 @@ class RagInjector:
         # Find the last user-role message and prepend the context block to it.
         for i in reversed(range(len(out))):
             if out[i].get("role") == "user":
-                augmented = f"<context>\n{ctx}\n</context>\n\n{out[i]['content']}"
+                content = out[i]["content"]
+                prefix = f"<context>\n{ctx}\n</context>\n\n"
+                if isinstance(content, list):
+                    # Multimodal content: prepend context as a text part so the
+                    # base64 audio/image data is never string-formatted into the
+                    # message (which would tokenise the raw bytes as ~4M tokens).
+                    augmented = [{"type": "text", "text": prefix}] + list(content)
+                else:
+                    augmented = prefix + content
                 out[i] = {**out[i], "content": augmented}
                 break
 
