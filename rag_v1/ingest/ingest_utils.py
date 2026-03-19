@@ -17,6 +17,10 @@ from psycopg.rows import dict_row
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()
 
+def sha256_bytes(data: bytes) -> bytes:
+    """Return the raw 32-byte SHA-256 digest of arbitrary bytes."""
+    return hashlib.sha256(data).digest()
+
 def sha1_text(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()
 

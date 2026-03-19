@@ -1,42 +1,44 @@
 """
 rag_v1/media/media_ingest.py
 
-Batch ingest job: walk a directory of media files, embed them with
-LanguageBind (image + audio), and store 768-dim vectors in PostgreSQL.
+Batch ingest job: walk a directory of media files, embed them, and store
+vectors in PostgreSQL.
 
-Supported:  images (.png .jpg .jpeg .webp .gif .bmp .tiff)
+  Images  → jina-clip-v2 (port 8031, wiki embed service) → image_embeddings (1024-dim)
+  Audio   → CLAP clap-htsat-unfused (port 8040)          → audio_embeddings  (512-dim)
+
+Supported:  images (.png .jpg .jpeg .webp .gif .bmp .tiff .heic)
             audio  (.wav .mp3 .flac .ogg .m4a .aac)
-Deferred:   video  (.mp4 .mov .avi .mkv .webm) — logged and skipped
+Deferred:   video  (.mp4 .mov .avi .mkv .webm .3gp) — logged and skipped
 
-Resume-safe: files already in media_files (matched by path + SHA-256)
-are skipped automatically.  Re-running is fully idempotent.
+Resume-safe: files already in media_files (matched by path + SHA-256) and
+already embedded are skipped automatically.  Re-running is fully idempotent.
 
 Prerequisites:
   1. Apply the DB schema once:
        psql -U sage -d sage_kaizen -f rag_v1/db/media_schema.sql
-  2. Clone LanguageBind and install soundfile:
-       git clone https://github.com/PKU-YuanGroup/LanguageBind F:/Projects/sage_kaizen_ai/languagebind_repo
-       pip install soundfile
-  3. Set PG_USER / PG_PASSWORD / PG_DB in .env (or as env vars)
+  2. Ensure the wiki embed service is running on port 8031 (for images).
+  3. Ensure the CLAP embed service is running on port 8040 (for audio).
+       python -m rag_v1.media.clap_embed_service.app
+  4. Set PG_USER / PG_PASSWORD / PG_DB in .env (or as env vars).
 
 Run:
     python -m rag_v1.media.media_ingest --root /path/to/media/directory
 
 CLI flags:
     --root          Root directory to scan recursively (required)
-    --device        Override MEDIA_EMBED_DEVICE (e.g. "cuda:0")
     --image-batch   Images per embed call  (default: from brains.yaml)
     --audio-batch   Audio clips per embed call  (default: from brains.yaml)
     --log-every     Print progress every N files scanned (default: 50)
-    --no-service    Skip auto-starting the embed service (assumes port 8040 is up)
+    --no-service    Skip auto-starting the CLAP embed service
 """
 from __future__ import annotations
 
 import argparse
 import atexit
-import hashlib
 import io
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import subprocess
 import sys
@@ -46,36 +48,31 @@ from pathlib import Path
 from typing import Iterator
 
 import psycopg
-import yaml
-from psycopg.rows import dict_row, DictRow
+from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
 from pg_settings import PgSettings
-from rag_v1.db.pg import get_conn
-from rag_v1.media.languagebind_embed_client import MediaEmbedClient
+from rag_v1.db.pg import conn_ctx
+from rag_v1.ingest.ingest_utils import sha256_bytes
+from rag_v1.media.media_embed_client import AudioEmbedClient, ImageEmbedClient
+from rag_v1.media.media_embed_config import load_media_embed_config
 
 _LOG = logging.getLogger("sage_kaizen.media_ingest")
+
+# Register pillow-heif so PIL.Image.open() can decode .heic files
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    _LOG.warning("pillow-heif not installed — .heic files will fail metadata extraction")
 
 # ──────────────────────────────────────────────────────────────────────────── #
 # File type sets                                                                 #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"})
+_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".heic"})
 _AUDIO_EXTS = frozenset({".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"})
-_VIDEO_EXTS = frozenset({".mp4", ".mov", ".avi", ".mkv", ".webm"})
-
-
-# ──────────────────────────────────────────────────────────────────────────── #
-# Config                                                                         #
-# ──────────────────────────────────────────────────────────────────────────── #
-
-def _load_cfg() -> dict:
-    """Return the media_embed section from brains.yaml."""
-    root = Path(__file__).resolve().parents[2]   # rag_v1/media → rag_v1 → project root
-    data = yaml.safe_load(
-        (root / "config" / "brains" / "brains.yaml").read_text(encoding="utf-8")
-    )
-    return data["media_embed"]
+_VIDEO_EXTS = frozenset({".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"})
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -112,10 +109,8 @@ def _iter_media(root: Path) -> Iterator[tuple[Path, str]]:
             yield p, "audio"
         elif ext in _VIDEO_EXTS:
             yield p, "video"
-
-
-def _sha256(data: bytes) -> bytes:
-    return hashlib.sha256(data).digest()
+        elif ext:
+            _LOG.debug("Skipping unrecognized extension %s: %s", ext, p)
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -159,15 +154,27 @@ SELECT media_id::text FROM media_files
 WHERE file_path = %s AND content_hash = %s
 """
 
-_SQL_CHECK_EMBED = """
-SELECT 1 FROM media_embeddings me
-JOIN media_files mf ON mf.media_id = me.media_id
+_SQL_CHECK_IMAGE_EMBED = """
+SELECT 1 FROM image_embeddings ie
+JOIN media_files mf ON mf.media_id = ie.media_id
 WHERE mf.file_path = %s AND mf.content_hash = %s
 LIMIT 1
 """
 
-_SQL_INSERT_EMBED = """
-INSERT INTO media_embeddings (media_id, embedding)
+_SQL_CHECK_AUDIO_EMBED = """
+SELECT 1 FROM audio_embeddings ae
+JOIN media_files mf ON mf.media_id = ae.media_id
+WHERE mf.file_path = %s AND mf.content_hash = %s
+LIMIT 1
+"""
+
+_SQL_INSERT_IMAGE_EMBED = """
+INSERT INTO image_embeddings (media_id, embedding)
+VALUES (%s, %s::vector)
+"""
+
+_SQL_INSERT_AUDIO_EMBED = """
+INSERT INTO audio_embeddings (media_id, embedding)
 VALUES (%s, %s::vector)
 """
 
@@ -190,8 +197,8 @@ def _upsert_file(
     Insert a media_files row.
 
     Returns (media_id, is_new):
-        is_new=True  → row was just inserted; caller should write embedding.
-        is_new=False → row already existed; caller should check embedding.
+        is_new=True  -> row was just inserted; caller should write embedding.
+        is_new=False -> row already existed; caller should check embedding.
     """
     rows = cur.execute(
         _SQL_INSERT_FILE,
@@ -210,38 +217,49 @@ def _upsert_file(
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
-# Embed service lifecycle                                                        #
+# CLAP service lifecycle (audio service only)                                    #
+# Images use the always-running wiki embed service on port 8031.                 #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def _ensure_service(
-    client: MediaEmbedClient,
+def _ensure_clap_service(
+    client: AudioEmbedClient,
     timeout_s: int,
     device: str | None,
+    service_log: Path,
 ) -> bool:
     if client.ping(timeout_s=3.0):
         return True
 
-    _LOG.info("Media embed service not running — auto-starting …")
+    _LOG.info("CLAP embed service not running — auto-starting ...")
+    _LOG.info("Service stdout/stderr -> %s", service_log)
     env = os.environ.copy()
     if device:
-        env["MEDIA_EMBED_DEVICE"] = device
+        env["CLAP_DEVICE"] = device
 
+    svc_log_fh = open(service_log, "ab")  # append; multiple runs accumulate
     proc = subprocess.Popen(
-        [sys.executable, "-m", "rag_v1.media.languagebind_embed_service.app"],
+        [sys.executable, "-m", "rag_v1.media.clap_embed_service.app"],
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=svc_log_fh,
+        stderr=svc_log_fh,
     )
     atexit.register(_terminate, proc)
+    atexit.register(svc_log_fh.close)
 
     deadline = time.monotonic() + timeout_s
+    next_log = time.monotonic() + 15.0
     while time.monotonic() < deadline:
         if client.ping(timeout_s=2.0):
-            _LOG.info("Media embed service ready.")
+            _LOG.info("CLAP embed service ready.")
             return True
+        now = time.monotonic()
+        if now >= next_log:
+            remaining = int(deadline - now)
+            _LOG.info("Waiting for CLAP model to load ... (%d s remaining)", remaining)
+            next_log = now + 15.0
         time.sleep(2.0)
 
-    _LOG.error("Embed service did not become healthy within %d s.", timeout_s)
+    _LOG.error("CLAP embed service did not become healthy within %d s.", timeout_s)
     return False
 
 
@@ -273,39 +291,31 @@ class _FileJob:
 # Batch processing                                                               #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def _process_batch(
+def _process_image_batch(
     jobs: list[_FileJob],
-    client: MediaEmbedClient,
+    client: ImageEmbedClient,
     conn: psycopg.Connection[DictRow],
     stats: IngestStats,
 ) -> None:
-    """Embed a same-modality batch and write results to the DB."""
     if not jobs:
         return
 
-    modality = jobs[0].modality
-
-    # ── Embed ─────────────────────────────────────────────────────────────── #
     try:
-        if modality == "image":
-            vecs = client.embed_image_bytes([j.raw for j in jobs])
-        else:
-            vecs = client.embed_audio_bytes([j.raw for j in jobs])
+        vecs = client.embed_image_bytes([j.raw for j in jobs])
     except Exception:
-        _LOG.exception("Embed call failed for %d %s file(s).", len(jobs), modality)
+        _LOG.exception("Image embed call failed for %d file(s).", len(jobs))
         stats.errors += len(jobs)
         return
 
     if len(vecs) != len(jobs):
         _LOG.error(
-            "Embed returned %d vectors for %d inputs — dropping batch.",
+            "Image embed returned %d vectors for %d inputs — dropping batch.",
             len(vecs), len(jobs),
         )
         stats.errors += len(jobs)
         return
 
-    # ── Write to DB ───────────────────────────────────────────────────────── #
-    with conn.cursor(row_factory=dict_row) as cur:
+    with conn.cursor() as cur:
         for job, vec in zip(jobs, vecs):
             try:
                 media_id, is_new = _upsert_file(
@@ -324,17 +334,76 @@ def _process_batch(
                     continue
 
                 if not is_new:
-                    # File row existed — check if embedding also exists
                     existing = cur.execute(
-                        _SQL_CHECK_EMBED, (str(job.path), job.content_hash)
+                        _SQL_CHECK_IMAGE_EMBED, (str(job.path), job.content_hash)
                     ).fetchone()
                     if existing:
                         stats.skipped += 1
                         continue
-                    # File exists but embedding is missing — write it
-                    _LOG.info("Backfilling missing embedding for %s", job.path)
+                    _LOG.info("Backfilling missing image embedding for %s", job.path)
 
-                cur.execute(_SQL_INSERT_EMBED, (media_id, vec))
+                cur.execute(_SQL_INSERT_IMAGE_EMBED, (media_id, vec))
+                stats.written += 1
+
+            except Exception:
+                _LOG.exception("DB write failed for %s", job.path)
+                stats.errors += 1
+
+    conn.commit()
+
+
+def _process_audio_batch(
+    jobs: list[_FileJob],
+    client: AudioEmbedClient,
+    conn: psycopg.Connection[DictRow],
+    stats: IngestStats,
+) -> None:
+    if not jobs:
+        return
+
+    try:
+        vecs = client.embed_audio_bytes([j.raw for j in jobs])
+    except Exception:
+        _LOG.exception("Audio embed call failed for %d file(s).", len(jobs))
+        stats.errors += len(jobs)
+        return
+
+    if len(vecs) != len(jobs):
+        _LOG.error(
+            "Audio embed returned %d vectors for %d inputs — dropping batch.",
+            len(vecs), len(jobs),
+        )
+        stats.errors += len(jobs)
+        return
+
+    with conn.cursor() as cur:
+        for job, vec in zip(jobs, vecs):
+            try:
+                media_id, is_new = _upsert_file(
+                    cur,
+                    path=job.path,
+                    modality=job.modality,
+                    content_hash=job.content_hash,
+                    file_size=len(job.raw),
+                    width=job.width,
+                    height=job.height,
+                    duration_s=job.duration_s,
+                )
+                if media_id is None:
+                    _LOG.error("Could not resolve media_id for %s", job.path)
+                    stats.errors += 1
+                    continue
+
+                if not is_new:
+                    existing = cur.execute(
+                        _SQL_CHECK_AUDIO_EMBED, (str(job.path), job.content_hash)
+                    ).fetchone()
+                    if existing:
+                        stats.skipped += 1
+                        continue
+                    _LOG.info("Backfilling missing audio embedding for %s", job.path)
+
+                cur.execute(_SQL_INSERT_AUDIO_EMBED, (media_id, vec))
                 stats.written += 1
 
             except Exception:
@@ -351,70 +420,86 @@ def _process_batch(
 def run_ingest(
     root: Path,
     dsn: str,
-    host: str,
-    port: int,
+    image_host: str,
+    image_port: int,
+    audio_host: str,
+    audio_port: int,
     image_batch: int,
     audio_batch: int,
     startup_timeout: int,
-    device: str | None,
+    audio_device: str | None,
     log_every: int,
     auto_service: bool,
+    service_log: Path | None = None,
 ) -> IngestStats:
-    client = MediaEmbedClient(host=host, port=port)
+    img_client = ImageEmbedClient(host=image_host, port=image_port)
+    aud_client = AudioEmbedClient(host=audio_host, port=audio_port)
     stats = IngestStats()
 
-    if auto_service and not _ensure_service(client, startup_timeout, device):
-        _LOG.error("Cannot proceed without the embed service.")
-        return stats
+    _svc_log = service_log or (
+        Path(__file__).resolve().parents[2] / "logs" / "clap_embed_service.log"
+    )
 
-    conn = get_conn(dsn)
+    # Check image service (wiki embed) — must already be running; we do not auto-start it
+    if not img_client.ping(timeout_s=5.0):
+        _LOG.warning(
+            "Wiki embed service (port %d) is not responding. "
+            "Image ingest will fail until it is started.",
+            image_port,
+        )
+
+    # Auto-start CLAP service for audio if needed
+    if auto_service and not _ensure_clap_service(aud_client, startup_timeout, audio_device, _svc_log):
+        _LOG.error("Cannot proceed with audio ingest without the CLAP embed service.")
+        # Continue anyway — images will still be ingested
+
     img_buf: list[_FileJob] = []
     aud_buf: list[_FileJob] = []
     total = 0
 
-    for path, modality in _iter_media(root):
-        total += 1
+    with conn_ctx(dsn) as conn:
+        for path, modality in _iter_media(root):
+            total += 1
 
-        if modality == "video":
-            _LOG.debug("Skipping video (deferred): %s", path)
-            stats.skipped_video += 1
+            if modality == "video":
+                _LOG.info("Skipping video (deferred): %s", path)
+                stats.skipped_video += 1
+                if total % log_every == 0:
+                    _print_progress(total, stats)
+                continue
+
+            try:
+                raw = path.read_bytes()
+            except OSError:
+                _LOG.exception("Cannot read %s — skipping.", path)
+                stats.errors += 1
+                continue
+
+            job = _FileJob(
+                path=path,
+                modality=modality,
+                raw=raw,
+                content_hash=sha256_bytes(raw),
+            )
+            if modality == "image":
+                job.width, job.height = _image_meta(raw)
+                img_buf.append(job)
+                if len(img_buf) >= image_batch:
+                    _process_image_batch(img_buf, img_client, conn, stats)
+                    img_buf = []
+            else:  # audio
+                job.duration_s = _audio_duration(path)
+                aud_buf.append(job)
+                if len(aud_buf) >= audio_batch:
+                    _process_audio_batch(aud_buf, aud_client, conn, stats)
+                    aud_buf = []
+
             if total % log_every == 0:
                 _print_progress(total, stats)
-            continue
 
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            _LOG.exception("Cannot read %s — skipping.", path)
-            stats.errors += 1
-            continue
-
-        job = _FileJob(
-            path=path,
-            modality=modality,
-            raw=raw,
-            content_hash=_sha256(raw),
-        )
-        if modality == "image":
-            job.width, job.height = _image_meta(raw)
-            img_buf.append(job)
-            if len(img_buf) >= image_batch:
-                _process_batch(img_buf, client, conn, stats)
-                img_buf = []
-        else:
-            job.duration_s = _audio_duration(path)
-            aud_buf.append(job)
-            if len(aud_buf) >= audio_batch:
-                _process_batch(aud_buf, client, conn, stats)
-                aud_buf = []
-
-        if total % log_every == 0:
-            _print_progress(total, stats)
-
-    # Flush partial batches
-    _process_batch(img_buf, client, conn, stats)
-    _process_batch(aud_buf, client, conn, stats)
-    conn.close()
+        # Flush partial batches
+        _process_image_batch(img_buf, img_client, conn, stats)
+        _process_audio_batch(aud_buf, aud_client, conn, stats)
 
     return stats
 
@@ -435,19 +520,37 @@ def main() -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    cfg = _load_cfg()
-    svc = cfg["service"]
+    cfg = load_media_embed_config()
+
+    _log_dir = Path(__file__).resolve().parents[2] / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _fh = RotatingFileHandler(
+        filename=str(_log_dir / "media_ingest.log"),
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    _fh.setFormatter(logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logging.getLogger().addHandler(_fh)
 
     parser = argparse.ArgumentParser(
-        description="Ingest media files into media_files + media_embeddings tables."
+        description=(
+            "Ingest media files into media_files + image_embeddings / audio_embeddings tables.\n"
+            "Images use the wiki embed service (port 8031).\n"
+            "Audio uses the CLAP embed service (port 8040)."
+        )
     )
-    parser.add_argument("--root",        required=True,  help="Root directory to scan recursively")
-    parser.add_argument("--device",      default=None,   help="Override MEDIA_EMBED_DEVICE (e.g. cuda:0)")
-    parser.add_argument("--image-batch", type=int,       default=int(svc.get("image_batch", 8)))
-    parser.add_argument("--audio-batch", type=int,       default=int(svc.get("audio_batch", 4)))
-    parser.add_argument("--log-every",   type=int,       default=50,  help="Print stats every N files")
-    parser.add_argument("--no-service",  action="store_true",         help="Skip auto-starting embed service")
+    parser.add_argument("--root",          required=True, help="Root directory to scan recursively")
+    parser.add_argument("--audio-device",  default=None,  help="Override CLAP_DEVICE (e.g. cuda:1)")
+    parser.add_argument("--image-batch",   type=int,      default=cfg.image_batch)
+    parser.add_argument("--audio-batch",   type=int,      default=cfg.audio_batch)
+    parser.add_argument("--log-every",     type=int,      default=50,  help="Print stats every N files")
+    parser.add_argument("--no-service",    action="store_true",        help="Skip auto-starting CLAP service")
     args = parser.parse_args()
 
     root = Path(args.root).expanduser().resolve()
@@ -459,12 +562,14 @@ def main() -> None:
     stats = run_ingest(
         root=root,
         dsn=pg.pg_dsn,
-        host=svc.get("host", "127.0.0.1"),
-        port=int(svc.get("port", 8040)),
+        image_host=cfg.image_host,
+        image_port=cfg.image_port,
+        audio_host=cfg.audio_host,
+        audio_port=cfg.audio_port,
         image_batch=args.image_batch,
         audio_batch=args.audio_batch,
-        startup_timeout=int(cfg.get("startup_timeout_s", 180)),
-        device=args.device,
+        startup_timeout=int(cfg.startup_timeout_s),
+        audio_device=args.audio_device,
         log_every=args.log_every,
         auto_service=not args.no_service,
     )

@@ -1,18 +1,20 @@
 -- rag_v1/db/media_schema.sql
 --
--- Cross-modal media embedding schema for Sage Kaizen.
--- Uses pgvector for 768-dim LanguageBind cosine similarity search.
+-- CLIP + CLAP dual-modal media embedding schema for Sage Kaizen.
+--
+--   image_embeddings: 1024-dim jinaai/jina-clip-v2 vectors (cosine)
+--   audio_embeddings:  512-dim laion/clap-htsat-unfused vectors (cosine)
 --
 -- Run once against your PostgreSQL database:
 --   psql -U sage -d sage_kaizen -f rag_v1/db/media_schema.sql
 --
 -- Prerequisites:
---   CREATE EXTENSION IF NOT EXISTS vector;  (pgvector)
+--   CREATE EXTENSION IF NOT EXISTS vector;       (pgvector)
 --   CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- ─────────────────────────────────────────────────────────────────────────── --
--- media_files: one row per ingested file                                       --
--- ─────────────────────────────────────────────────────────────────────────── --
+-- --------------------------------------------------------------------------- --
+-- media_files: one row per ingested file                                        --
+-- --------------------------------------------------------------------------- --
 
 CREATE TABLE IF NOT EXISTS media_files (
     media_id     uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -20,8 +22,8 @@ CREATE TABLE IF NOT EXISTS media_files (
     modality     text        NOT NULL CHECK (modality IN ('image', 'audio', 'video')),
     content_hash bytea       NOT NULL,       -- SHA-256 of raw file bytes; used for dedup
     file_size_b  bigint,                     -- file size in bytes
-    duration_s   float,                      -- for audio / video (seconds)
-    width        int,                        -- for image / video (pixels)
+    duration_s   float,                      -- for audio (seconds)
+    width        int,                        -- for image (pixels)
     height       int,
     ingested_at  timestamptz NOT NULL DEFAULT now(),
     metadata     jsonb       NOT NULL DEFAULT '{}'
@@ -32,56 +34,79 @@ CREATE TABLE IF NOT EXISTS media_files (
 CREATE UNIQUE INDEX IF NOT EXISTS media_files_path_hash
     ON media_files (file_path, content_hash);
 
--- Fast lookup by modality for modality-filtered searches
 CREATE INDEX IF NOT EXISTS media_files_modality
     ON media_files (modality);
 
 
--- ─────────────────────────────────────────────────────────────────────────── --
--- media_embeddings: one or more embeddings per file                            --
--- Images:  one row (frame_index = NULL)                                        --
--- Audio:   one row (frame_index = NULL)                                        --
--- Video:   one row per sampled frame (frame_index = 0, 1, 2, …)               --
--- ─────────────────────────────────────────────────────────────────────────── --
+-- --------------------------------------------------------------------------- --
+-- image_embeddings: one row per image file                                      --
+-- Populated by jina-clip-v2 (port 8031, reuses wiki embed service).            --
+-- --------------------------------------------------------------------------- --
 
-CREATE TABLE IF NOT EXISTS media_embeddings (
-    embed_id     bigserial   PRIMARY KEY,
-    media_id     uuid        NOT NULL REFERENCES media_files (media_id) ON DELETE CASCADE,
-    frame_index  int,                        -- NULL for images and audio
-    time_s       float,                      -- timestamp in source video (seconds)
-    embedding    vector(768) NOT NULL,       -- LanguageBind 768-dim L2-normalized vector
-    created_at   timestamptz NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS image_embeddings (
+    embed_id   bigserial    PRIMARY KEY,
+    media_id   uuid         NOT NULL REFERENCES media_files (media_id) ON DELETE CASCADE,
+    embedding  vector(1024) NOT NULL,        -- jina-clip-v2 1024-dim L2-normalized
+    created_at timestamptz  NOT NULL DEFAULT now()
 );
 
 -- HNSW index for fast approximate cosine similarity search.
--- Covers all modalities in a single index; modality filter is pushed as a
--- WHERE clause on the joined media_files.modality column.
-CREATE INDEX IF NOT EXISTS media_embed_hnsw
-    ON media_embeddings
+CREATE INDEX IF NOT EXISTS image_embed_hnsw
+    ON image_embeddings
     USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
--- Lookup by source file (used for re-ingest dedup check and cascade deletes)
-CREATE INDEX IF NOT EXISTS media_embed_media_id
-    ON media_embeddings (media_id);
+CREATE INDEX IF NOT EXISTS image_embed_media_id
+    ON image_embeddings (media_id);
 
--- ─────────────────────────────────────────────────────────────────────────── --
--- Convenience view: join file metadata with each embedding row                 --
--- ─────────────────────────────────────────────────────────────────────────── --
 
-CREATE OR REPLACE VIEW media_embed_view AS
+-- --------------------------------------------------------------------------- --
+-- audio_embeddings: one row per audio file                                      --
+-- Populated by laion/clap-htsat-unfused (port 8040, CLAP embed service).       --
+-- --------------------------------------------------------------------------- --
+
+CREATE TABLE IF NOT EXISTS audio_embeddings (
+    embed_id   bigserial   PRIMARY KEY,
+    media_id   uuid        NOT NULL REFERENCES media_files (media_id) ON DELETE CASCADE,
+    embedding  vector(512) NOT NULL,         -- CLAP clap-htsat-unfused 512-dim L2-normalized
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- HNSW index for fast approximate cosine similarity search.
+CREATE INDEX IF NOT EXISTS audio_embed_hnsw
+    ON audio_embeddings
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+
+CREATE INDEX IF NOT EXISTS audio_embed_media_id
+    ON audio_embeddings (media_id);
+
+
+-- --------------------------------------------------------------------------- --
+-- Convenience views                                                              --
+-- --------------------------------------------------------------------------- --
+
+CREATE OR REPLACE VIEW image_embed_view AS
 SELECT
-    me.embed_id,
+    ie.embed_id,
     mf.media_id,
     mf.file_path,
-    mf.modality,
-    mf.duration_s,
     mf.width,
     mf.height,
-    me.frame_index,
-    me.time_s,
     mf.metadata,
-    me.embedding,
-    me.created_at
-FROM media_embeddings me
-JOIN media_files mf ON mf.media_id = me.media_id;
+    ie.embedding,
+    ie.created_at
+FROM image_embeddings ie
+JOIN media_files mf ON mf.media_id = ie.media_id;
+
+CREATE OR REPLACE VIEW audio_embed_view AS
+SELECT
+    ae.embed_id,
+    mf.media_id,
+    mf.file_path,
+    mf.duration_s,
+    mf.metadata,
+    ae.embedding,
+    ae.created_at
+FROM audio_embeddings ae
+JOIN media_files mf ON mf.media_id = ae.media_id;
