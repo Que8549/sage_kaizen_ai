@@ -557,29 +557,31 @@ if user_text:
 
         s.update(label="Servers ready \u2705", state="complete")
 
-    templates = chat_svc.select_templates(user_text, cfg)
-    history: List[dict] = st.session_state.messages[-CONFIG.max_history_messages:]
-    messages, rag_sources, wiki_images = chat_svc.prepare_messages(
-        user_text, history, decision, templates,
-        wiki_enabled=st.session_state.get("wiki_enabled", True),
-        media_attachments=turn_attachments,
-    )
-
     brain_label = "Architect (Q6)" if use_q6 else "Omni (Q5)"
     with st.chat_message("assistant"):
-        reasons_str   = ", ".join(decision.reasons[:6])
-        templates_str = ", ".join(t.value for t in templates) if templates else "(none)"
+        reasons_str = ", ".join(decision.reasons[:6])
         st.caption(
             f"\U0001F9ED Route: {decision.brain} \u2022 score={decision.score} \u2022 "
             f"reasons: {reasons_str}"
         )
-        st.caption(f"\U0001F9E9 Templates: {templates_str}")
+        templates_caption = st.empty()  # filled once select_templates returns
 
         live  = st.empty()
         acc: List[str] = []
         start = time.time()
 
         with st.spinner(f"Thinking\u2026 ({brain_label})"):
+            templates = chat_svc.select_templates(user_text, cfg)
+            templates_str = ", ".join(t.value for t in templates) if templates else "(none)"
+            templates_caption.caption(f"\U0001F9E9 Templates: {templates_str}")
+
+            history: List[dict] = st.session_state.messages[-CONFIG.max_history_messages:]
+            messages, rag_sources, wiki_images = chat_svc.prepare_messages(
+                user_text, history, decision, templates,
+                wiki_enabled=st.session_state.get("wiki_enabled", True),
+                media_attachments=turn_attachments,
+            )
+
             try:
                 for piece in chat_svc.stream_response(messages, decision, cfg):
                     acc.append(piece)
