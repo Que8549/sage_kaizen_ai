@@ -217,9 +217,46 @@ def _upsert_file(
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
-# CLAP service lifecycle (audio service only)                                    #
-# Images use the always-running wiki embed service on port 8031.                 #
+# Service lifecycle helpers                                                       #
 # ──────────────────────────────────────────────────────────────────────────── #
+
+def _ensure_wiki_service(
+    client: ImageEmbedClient,
+    timeout_s: int,
+    service_log: Path,
+) -> bool:
+    """Auto-start the wiki embed service (jina-clip-v2) if not already running."""
+    if client.ping(timeout_s=3.0):
+        return True
+
+    _LOG.info("Wiki embed service not running — auto-starting ...")
+    _LOG.info("Service stdout/stderr -> %s", service_log)
+
+    svc_log_fh = open(service_log, "ab")
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "rag_v1.wiki.mm_embed_service.app"],
+        stdout=svc_log_fh,
+        stderr=svc_log_fh,
+    )
+    atexit.register(_terminate, proc)
+    atexit.register(svc_log_fh.close)
+
+    deadline = time.monotonic() + timeout_s
+    next_log = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if client.ping(timeout_s=2.0):
+            _LOG.info("Wiki embed service ready.")
+            return True
+        now = time.monotonic()
+        if now >= next_log:
+            remaining = int(deadline - now)
+            _LOG.info("Waiting for jina-clip-v2 to load ... (%d s remaining)", remaining)
+            next_log = now + 15.0
+        time.sleep(2.0)
+
+    _LOG.error("Wiki embed service did not become healthy within %d s.", timeout_s)
+    return False
+
 
 def _ensure_clap_service(
     client: AudioEmbedClient,
@@ -317,6 +354,7 @@ def _process_image_batch(
 
     with conn.cursor() as cur:
         for job, vec in zip(jobs, vecs):
+            cur.execute("SAVEPOINT sp_img")
             try:
                 media_id, is_new = _upsert_file(
                     cur,
@@ -330,6 +368,7 @@ def _process_image_batch(
                 )
                 if media_id is None:
                     _LOG.error("Could not resolve media_id for %s", job.path)
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_img")
                     stats.errors += 1
                     continue
 
@@ -338,14 +377,17 @@ def _process_image_batch(
                         _SQL_CHECK_IMAGE_EMBED, (str(job.path), job.content_hash)
                     ).fetchone()
                     if existing:
+                        cur.execute("RELEASE SAVEPOINT sp_img")
                         stats.skipped += 1
                         continue
                     _LOG.info("Backfilling missing image embedding for %s", job.path)
 
                 cur.execute(_SQL_INSERT_IMAGE_EMBED, (media_id, vec))
+                cur.execute("RELEASE SAVEPOINT sp_img")
                 stats.written += 1
 
             except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_img")
                 _LOG.exception("DB write failed for %s", job.path)
                 stats.errors += 1
 
@@ -378,6 +420,7 @@ def _process_audio_batch(
 
     with conn.cursor() as cur:
         for job, vec in zip(jobs, vecs):
+            cur.execute("SAVEPOINT sp_aud")
             try:
                 media_id, is_new = _upsert_file(
                     cur,
@@ -391,6 +434,7 @@ def _process_audio_batch(
                 )
                 if media_id is None:
                     _LOG.error("Could not resolve media_id for %s", job.path)
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_aud")
                     stats.errors += 1
                     continue
 
@@ -399,14 +443,17 @@ def _process_audio_batch(
                         _SQL_CHECK_AUDIO_EMBED, (str(job.path), job.content_hash)
                     ).fetchone()
                     if existing:
+                        cur.execute("RELEASE SAVEPOINT sp_aud")
                         stats.skipped += 1
                         continue
                     _LOG.info("Backfilling missing audio embedding for %s", job.path)
 
                 cur.execute(_SQL_INSERT_AUDIO_EMBED, (media_id, vec))
+                cur.execute("RELEASE SAVEPOINT sp_aud")
                 stats.written += 1
 
             except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_aud")
                 _LOG.exception("DB write failed for %s", job.path)
                 stats.errors += 1
 
@@ -430,28 +477,27 @@ def run_ingest(
     audio_device: str | None,
     log_every: int,
     auto_service: bool,
-    service_log: Path | None = None,
+    clap_service_log: Path | None = None,
+    wiki_service_log: Path | None = None,
 ) -> IngestStats:
     img_client = ImageEmbedClient(host=image_host, port=image_port)
     aud_client = AudioEmbedClient(host=audio_host, port=audio_port)
     stats = IngestStats()
 
-    _svc_log = service_log or (
-        Path(__file__).resolve().parents[2] / "logs" / "clap_embed_service.log"
-    )
+    _logs_dir = Path(__file__).resolve().parents[2] / "logs"
+    _clap_log = clap_service_log or (_logs_dir / "clap_embed_service.log")
+    _wiki_log = wiki_service_log or (_logs_dir / "wiki_embed_service.log")
 
-    # Check image service (wiki embed) — must already be running; we do not auto-start it
-    if not img_client.ping(timeout_s=5.0):
-        _LOG.warning(
-            "Wiki embed service (port %d) is not responding. "
-            "Image ingest will fail until it is started.",
-            image_port,
-        )
+    if auto_service:
+        # Auto-start wiki embed service (jina-clip-v2) for image embedding
+        if not _ensure_wiki_service(img_client, startup_timeout, _wiki_log):
+            _LOG.error("Cannot proceed with image ingest without the wiki embed service.")
+            # Continue anyway — audio will still be ingested
 
-    # Auto-start CLAP service for audio if needed
-    if auto_service and not _ensure_clap_service(aud_client, startup_timeout, audio_device, _svc_log):
-        _LOG.error("Cannot proceed with audio ingest without the CLAP embed service.")
-        # Continue anyway — images will still be ingested
+        # Auto-start CLAP service for audio embedding
+        if not _ensure_clap_service(aud_client, startup_timeout, audio_device, _clap_log):
+            _LOG.error("Cannot proceed with audio ingest without the CLAP embed service.")
+            # Continue anyway — images will still be ingested
 
     img_buf: list[_FileJob] = []
     aud_buf: list[_FileJob] = []
@@ -572,6 +618,7 @@ def main() -> None:
         audio_device=args.audio_device,
         log_every=args.log_every,
         auto_service=not args.no_service,
+        # service log paths use defaults (logs/ directory)
     )
 
     print(f"\n=== Ingest complete === {stats.report()}", flush=True)

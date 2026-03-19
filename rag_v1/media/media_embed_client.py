@@ -38,7 +38,12 @@ class ImageEmbedClient:
     def ping(self, timeout_s: float = 3.0) -> bool:
         try:
             r = httpx.get(f"{self._base}/health", timeout=timeout_s)
-            return r.status_code == 200 and r.json().get("loaded", False)
+            if r.status_code != 200:
+                return False
+            data = r.json()
+            # Wiki embed service returns {"status": "ok"};
+            # any future service using the CLAP pattern returns {"loaded": true}.
+            return data.get("loaded", False) or data.get("status") == "ok"
         except Exception:
             return False
 
@@ -61,7 +66,12 @@ class ImageEmbedClient:
             json={"images_b64": [base64.b64encode(b).decode() for b in images]},
             timeout=_TIMEOUT,
         )
-        r.raise_for_status()
+        if not r.is_success:
+            raise httpx.HTTPStatusError(
+                f"{r.status_code} from {r.url}: {r.text[:500]}",
+                request=r.request,
+                response=r,
+            )
         return r.json()["embeddings"]
 
 
@@ -103,5 +113,10 @@ class AudioEmbedClient:
             json={"audios_b64": [base64.b64encode(b).decode() for b in audios]},
             timeout=_TIMEOUT,
         )
-        r.raise_for_status()
+        if not r.is_success:
+            raise httpx.HTTPStatusError(
+                f"{r.status_code} from {r.url}: {r.text[:500]}",
+                request=r.request,
+                response=r,
+            )
         return r.json()["embeddings"]

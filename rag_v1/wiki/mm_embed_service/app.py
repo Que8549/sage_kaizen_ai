@@ -22,6 +22,12 @@ import torch
 import torch.nn.functional as F
 from fastapi import FastAPI, HTTPException
 from PIL import Image
+
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass  # HEIC support unavailable; non-HEIC images unaffected
 from pydantic import BaseModel
 from transformers import AutoModel
 

@@ -40,7 +40,6 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -172,15 +171,16 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
     inputs = {k: v.to(_device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
 
     with torch.no_grad():
-        feats = _model.get_text_features(**inputs)   # (B, 512)
-        feats = F.normalize(feats, dim=-1)
+        # transformers >= 4.40: get_text_features returns BaseModelOutputWithPooling;
+        # .pooler_output is already L2-normalized inside the model.
+        feats = _model.get_text_features(**inputs).pooler_output  # (B, 512)
 
     return feats.cpu().float().tolist()
 
 
 def _embed_audios(arrays: list[np.ndarray]) -> list[list[float]]:
     inputs = _processor(
-        audios=arrays,
+        audio=arrays,
         return_tensors="pt",
         padding=True,
         sampling_rate=_TARGET_SR,
@@ -188,8 +188,9 @@ def _embed_audios(arrays: list[np.ndarray]) -> list[list[float]]:
     inputs = {k: v.to(_device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
 
     with torch.no_grad():
-        feats = _model.get_audio_features(**inputs)  # (B, 512)
-        feats = F.normalize(feats, dim=-1)
+        # transformers >= 4.40: get_audio_features returns BaseModelOutputWithPooling;
+        # .pooler_output is already L2-normalized inside the model.
+        feats = _model.get_audio_features(**inputs).pooler_output  # (B, 512)
 
     return feats.cpu().float().tolist()
 

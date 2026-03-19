@@ -10,7 +10,8 @@ python rag_diagnostics.py
 
 #Ingest local media files
 # Run ingest (from project root):
-python -m rag_v1.media.media_ingest --root "F:/Projects/sage_kaizen_ai/media_samples"
+python -m rag_v1.media.media_ingest --root "F:/Projects/sage_kaizen_ai/media_samples"     
+
 
 # For GPU-accelerated ingest (faster):
 python -m rag_v1.media.media_ingest --root "F:/path/to/your/media" --device cuda:0

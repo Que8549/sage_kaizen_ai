@@ -110,3 +110,17 @@ SELECT
     ae.created_at
 FROM audio_embeddings ae
 JOIN media_files mf ON mf.media_id = ae.media_id;
+
+
+-- --------------------------------------------------------------------------- --
+-- Grants                                                                        --
+-- Run these as a superuser if the tables were created by a different role.      --
+-- --------------------------------------------------------------------------- --
+
+GRANT ALL ON TABLE media_files      TO sage;
+GRANT ALL ON TABLE image_embeddings TO sage;
+GRANT ALL ON TABLE audio_embeddings TO sage;
+
+-- SERIAL/BIGSERIAL sequences are not covered by table grants — must be explicit.
+GRANT USAGE, SELECT ON SEQUENCE image_embeddings_embed_id_seq TO sage;
+GRANT USAGE, SELECT ON SEQUENCE audio_embeddings_embed_id_seq TO sage;
