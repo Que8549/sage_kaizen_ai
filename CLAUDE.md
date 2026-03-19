@@ -11,7 +11,7 @@ It uses **progressive disclosure**:
 ---
 
 ## 1) WHO (Stakeholders + Operating Context)
-### Primary user / operator
+### Primary user / operator / administrator / owner
 - **Alquin Cook** (project owner), building Sage Kaizen on a high-end Windows rig.
 
 ### Primary developer environment
@@ -19,6 +19,7 @@ It uses **progressive disclosure**:
 - Python 3.14.3
 - CUDA 13.1
 - Custom `llama.cpp` + custom `llama-cpp-python` linked to the custom build
+
 
 ### Target runtime environments
 - Windows host: runs llama-server brains, Streamlit UI, RAG ingestion, orchestration services
@@ -38,6 +39,7 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 - **Pi Agent Transport**: ZeroMQ messaging to Raspberry Pi agents (device orchestrator)
 - **RAG v1**: ingest (folder + RSS + web) into a vector store; query-time retrieval
 - **Docs Generator v1**: repo scan → README + Mermaid diagrams
+- Review config > brains > brains.yaml for latest AI models being used
 
 ### User-facing behaviors
 - Creative writing (stories, poems)

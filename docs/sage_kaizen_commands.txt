@@ -8,35 +8,16 @@ python.exe -m rag_v1.ingest.folder_ingest
 
 python rag_diagnostics.py
 
+#Ingest local media files
+# Run ingest (from project root):
+python -m rag_v1.media.media_ingest --root "F:/Projects/sage_kaizen_ai/media_samples"     
 
 
-Claude
-`/clear`
+# For GPU-accelerated ingest (faster):
+python -m rag_v1.media.media_ingest --root "F:/path/to/your/media" --device cuda:0
 
-cd /d F:\Projects\sage_kaizen_ai
-set SAGE_RAG_INGEST_DIR=F:\Projects\sage_kaizen_ai\docs
-set SAGE_RAG_COMMIT_EVERY=500
-.\.venv\Scripts\python.exe -m rag_v1.ingest.folder_ingest
-
-
-
-If you want next steps, we can:
-add per-turn token counters in the UI
-show which layers are on which GPU
-persist chats to disk
-add a “promote this turn to Q6” button inline per message
-
-
-load_tensors: offloading output layer to GPU
-load_tensors: offloading 7 repeating layers to GPU
-load_tensors: offloaded 8/62 layers to GPU
-
-
- Thinking time: 499.92s • Brain: Q6 
-  
-  
-st.title("🧠 Sage Kaizen (Dual-Brain Chat) 🧠")
-  
+# Re-runs are safe — already-ingested files are skipped:
+python -m rag_v1.media.media_ingest --root "F:/path/to/your/media"
   
 
 Export Zim Files Command
@@ -52,4 +33,35 @@ python -m rag_v1.ingest.zim_dump --zim "C:\Users\Alquin\AppData\Roaming\kiwix-de
 python -m rag_v1.ingest.zim_dump --zim "C:\Users\Alquin\AppData\Roaming\kiwix-desktop\wikipedia_en_all_maxi_2025-08.zim" --out "I:\llm_data\wikipedia_maxi_2025_08"
 
 python -m rag_v1.ingest.zim_dump --zim "C:\Users\Alquin\AppData\Roaming\kiwix-desktop\wikipedia_en_all_nopic_2025-12.zim" --out "I:\llm_data\wikipedia_nopic_2025_08"
+  
+  
+# Create Wikipedia Embeddings
+
+# Ingest wiki_samples 
+python -m rag_v1.wiki.wiki_ingest
+
+
+The --root flag still exists as an optional one-time override — useful if you want to test against a different dump without editing YAML:
+python -m rag_v1.wiki.wiki_ingest --root "F:\Projects\sage_kaizen_ai\wiki_samples"
+
+
+Verification commands
+
+# Config sanity
+python -c "from rag_v1.wiki.wiki_embed_config import load_wiki_embed_config; c = load_wiki_embed_config(); print(c.text_batch, c.image_batch)"
+# Expected: 128 32
+
+# Smoke test (single letter bucket — no embed service needed to check startup logic)
+python -m rag_v1.wiki.wiki_ingest --root "I:/llm_data/wikipedia_maxi_2025_08/A"
+# Expect: "Worker A started", "Worker B started", progress every 30s, "Ingest complete."
+
+# Resume safety test (run same root twice)
+# Second run: skipped=N  written=0  errors=0
+
+
+
+
+
+
+  
   

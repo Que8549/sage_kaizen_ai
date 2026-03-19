@@ -29,92 +29,103 @@
 #   - server: all llama-server CLI flags grouped by category
 
 # -----------------------------------------------------------------------------
-# FAST Brain — Qwen2.5-14B Q6_K — port 8011
+# FAST Brain — Qwen2.5-Omni-7B Q8_0 — port 8011
 # GPU: RTX 5080 (CUDA1, 16 GB VRAM)
+#
+# Replaces the former Qwen2.5-14B Q6_K.
+# Qwen2.5-Omni supports text, image, and audio input via the --mmproj file.
+#
+# VRAM budget on CUDA1 (16 GB):
+#   Model weights Q8_0:        ~8.10 GB
+#   mmproj encoder F16:        ~2.64 GB
+#   KV cache q8_0 @ ctx=16384: ~0.45 GB  (28 layers, 4 KV heads, head_dim=128)
+#   Compute buffer:            ~0.50 GB
+#   Total:                    ~11.7 GB  → ~4.3 GB headroom  ✓
+#
+# ARCHITECT (Qwen3.5-27B) on CUDA0 runs simultaneously — no GPU conflict.
+# Audio output (TTS) is NOT supported by llama.cpp; responses are text-only.
+# Video input: client-side frame extraction → sent as individual images.
 # -----------------------------------------------------------------------------
 fast:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
-  model: "E:/Qwen2.5-14B-Instruct-GGUF/Q6_K/qwen2.5-14b-instruct-q6_k-00001-of-00004.gguf"
+  model: "E:/Qwen2.5-Omni-7B-GGUF/Qwen2.5-Omni-7B-Q8_0.gguf"
   log: "F:/Projects/sage_kaizen_ai/logs/q5_server.log"
-  startup_timeout_s: 300 # 5 minutes #1800    # 30 minutes — 14B model cold load on 5080
+  startup_timeout_s: 300    # 5 minutes — 7B model loads quickly on CUDA1
 
   server:
-    # Network — which address and port to listen on
-    host: "127.0.0.1"       # localhost only; never expose to the network
-    port: 8011               # FAST brain lives on 8011
+    host: "127.0.0.1"
+    port: 8011
 
-    # Identity — shown in /v1/models and logs
-    alias: "Qwen2.5-14B-Q6_K"
+    alias: "Qwen2.5-Omni-7B-Q8_0"
 
-    # GPU assignment
-    # CUDA0 = RTX 5090 (32 GB), CUDA1 = RTX 5080 (16 GB)
-    # The 14B model fits comfortably on the 5080.
     device: "CUDA1"
-    n_gpu_layers: "all"      # offload every layer to GPU
-    split_mode: "none"       # single-GPU; no tensor split needed
+    n_gpu_layers: "all"
+    split_mode: "none"
 
-    # Context & batching
-    ctx_size: 16384 # 8192            # token context window
-    batch_size: 384 # 1024          # max tokens processed in one forward pass (prompt)
-    ubatch_size: 128 # 512          # micro-batch size for batched decoding
+    # Combined audio+vision encoder.  Single GGUF holds both the Whisper-style
+    # conformer (audio) and the vision transformer (images), identified by the
+    # KEY_HAS_AUDIO_ENC and KEY_HAS_VISION_ENC metadata flags.
+    # Run install_huggingface.py with the *mmproj*F16* pattern to download it.
+    mmproj: "E:/Qwen2.5-Omni-7B-GGUF/mmproj-F16.gguf"
 
-    # CPU threads
-    # Rule of thumb: threads ~ physical cores available to this process
+    # 16K context: 1 image ≈ 1280 tokens, leaving 15104 for conversation.
+    ctx_size: 16384
+    batch_size: 2048          # larger batch improves image-token prefill speed
+    ubatch_size: 512
+
     threads: 10
     threads_batch: 10
-    threads_http: 6           # HTTP worker threads (handles concurrent requests)
+    threads_http: 6
 
-    # “single request” slot behavior (lower overhead)
     parallel: 1
     no_kv_unified: true
     no_cont_batching: true
 
-    # Precision & performance
-    flash_attn: true          # Flash Attention 2 — reduces VRAM, speeds up long contexts
-    cache_type_k: "f16"       # KV cache key dtype (f16 = good balance)
-    cache_type_v: "q8_0" # "f16"       # KV cache value dtype
+    flash_attn: true
+    cache_type_k: "q8_0"
+    cache_type_v: "q8_0"
 
-    # Context fitting — auto-reduces ctx_size to fit in VRAM if needed
     fit: true
     fit_ctx: 16384
-    fit_target: 512           # target free VRAM (MB) to leave after loading
+    fit_target: 512
 
-    # Generation defaults (can be overridden per-request)
-    no_warmup: true           # skip warmup prompt on startup (faster cold start) whether to perform warmup with an empty run (default: enabled)
-    n_predict: 256            # default max tokens to generate if not specified
+    no_warmup: true
+    n_predict: -1             # unlimited — multimodal responses vary widely in length
 
-    # Logging — these flags are critical per the project invariants
-    log_colors: false         # no ANSI color codes in log file
-    log_timestamps: true      # prepend timestamp to every log line
-    log_prefix: true          # prepend log level prefix
-    log_verbosity: 3          # 0=error 1=warn 2=info 3=debug
+    log_colors: false
+    log_timestamps: true
+    log_prefix: true
+    log_verbosity: 3
 
 
 # -----------------------------------------------------------------------------
-# ARCHITECT Brain — Qwen2.5-32B Q6_K_L — port 8012
+# ARCHITECT Brain — Qwen3.5-27B Q6_K — port 8012
 # GPU: RTX 5090 (CUDA0, 32 GB VRAM)
 # -----------------------------------------------------------------------------
 architect:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
-  model: "E:/Qwen3-32B-GGUF/Qwen3-32B-Q6_K.gguf"
+  model: "E:/Qwen3.5-27B-GGUF/Qwen3.5-27B-Q6_K.gguf"
   log: "F:/Projects/sage_kaizen_ai/logs/q6_server.log"
-  startup_timeout_s: 300 # 5 minutes  # 2700    # 45 minutes — 32B model cold load on 5090
+  startup_timeout_s: 300 # 5 minutes
 
   server:
     host: "127.0.0.1"
     port: 8012               # ARCHITECT brain lives on 8012
 
-    alias: "Qwen3-32B-Q6_K"
+    alias: "Qwen3.5-27B-Q6_K"
 
-    # The 32B model needs the larger GPU
+    # The 27B model runs on the larger GPU
     device: "CUDA0"
     n_gpu_layers: "all"
     split_mode: "none"
 
-    # Larger context for deep reasoning tasks
-    ctx_size: 12288  # 12288 (12K)  # 8192
-    batch_size: 384 # 768           # smaller batch than FAST — 32B has higher per-token cost
-    ubatch_size: 128 # 192 # 256
+    # Context — Qwen3.5-27B is a hybrid DeltaNet+attention model (qwen35 arch):
+    # only 16 of 64 layers use KV cache; the other 48 use a fixed recurrent state.
+    # KV cache VRAM cost is ~75% lower than an equivalent pure-Transformer model.
+    # At ctx=65536 with q8_0 KV the cache costs ~2 GB; 5090 has ~9.7 GB headroom.
+    ctx_size: 65536           # 64K — well within VRAM budget; model trained to 262K
+    batch_size: 2048          # logical batch (llama.cpp default); better prefill throughput
+    ubatch_size: 512          # physical micro-batch; fewer GPU kernel dispatches per tile
 
     # More threads for the heavier model
     threads: 22
@@ -133,15 +144,22 @@ architect:
     no_cont_batching: true
 
     flash_attn: true
-    cache_type_k: "q8_0"  # "f16" # key (K) cache
-    cache_type_v: "q8_0"     # quantized value (V) cache — saves VRAM on the larger model
+    cache_type_k: "q8_0"     # near-lossless; halves KV memory vs f16
+    cache_type_v: "q8_0"     # only 16/64 layers use KV — pressure to go lower is minimal
 
     fit: true
-    fit_target: 1024          # leave more headroom on the 32 GB card
-    fit_ctx: 12288 # 8192
+    fit_target: 2048          # 2 GB buffer; extra headroom for 65K ctx window
+    fit_ctx: 65536
 
     no_warmup: true
-    n_predict: 512            # ARCHITECT generates longer responses by default
+    n_predict: -1             # unlimited — thinking mode can generate thousands of tokens;
+                              # model stops via EOS; clients should set their own max_tokens
+
+    # Thinking mode — Qwen3.5-27B always runs with <think> enabled on ARCHITECT.
+    # Non-thinking fast responses are routed to the FAST brain (Qwen2.5-14B) by router.py.
+    reasoning_budget: -1      # unrestricted thinking depth (--reasoning-budget -1)
+    reasoning_format: "deepseek"  # routes <think> tokens to reasoning_content in API
+                                  # response, keeping the content field clean for the UI
 
     log_colors: false
     log_timestamps: true
@@ -189,3 +207,91 @@ embed:
     log_timestamps: true
     log_prefix: true
     log_verbosity: 3
+
+
+# -----------------------------------------------------------------------------
+# Wiki Multimodal Embed — jinaai/jina-clip-v2 — port 8031
+# GPU: RTX 5090 (CUDA0, 32 GB VRAM)
+# Used by both mm_embed_service/app.py (FastAPI) and wiki_ingest.py (batch job)
+# -----------------------------------------------------------------------------
+wiki_embed:
+  # Local directory containing the jina-clip-v2 model weights
+  model: "E:/jinaai_jina-clip-v2"
+
+  # Shared log file — wiki_ingest.py Python logger AND the embed service
+  # subprocess both append here (one unified pipeline log)
+  log: "F:/Projects/sage_kaizen_ai/logs/sage_wiki_embed.log"
+
+  # How long wiki_ingest.py waits for app.py to become healthy on startup.
+  # jina-clip-v2 on GPU loads in ~30-90 s; 300 s gives plenty of headroom.
+  startup_timeout_s: 300
+
+  # ── Embed service settings (read by app.py / FastAPI) ──────────────────
+  service:
+    host: "127.0.0.1"
+    port: 8031
+
+    # PyTorch device for the model (CUDA0 = RTX 5090)
+    device: "cuda:0"
+
+    # Maximum batch sizes enforced by the service endpoints.
+    # wiki_ingest.py uses the same values as its per-call batch size so that
+    # ingest calls always stay within the service limits.
+    text_batch: 256
+    image_batch: 64
+
+  # ── Ingest job settings (read by wiki_ingest.py) ───────────────────────
+  ingest:
+    # Root directory of the extracted Wikipedia ZIM dump (from zim_dump.py)
+    root: "I:/llm_data/wikipedia_maxi_2025_08"
+
+    # Text chunking parameters
+    chunk_chars: 1200   # target chunk size in characters
+    overlap: 200        # overlap between consecutive chunks
+
+    # Heading names to exclude from chunking (exact match, case-sensitive)
+    exclude_sections: "References,External links,Further reading,Authority control"
+
+    # Progress logging: emit a stats line every N pages
+    log_every_pages: 10000
+
+
+# -----------------------------------------------------------------------------
+# Cross-Modal Embed — CLIP + CLAP — dual-modal pipeline
+#
+# Images → jinaai/jina-clip-v2 (port 8031, reuses wiki embed service)
+#            1024-dim cosine vectors → image_embeddings table
+#
+# Audio  → laion/clap-htsat-unfused (port 8040, CLAP embed service)
+#            512-dim cosine vectors → audio_embeddings table
+#
+# The wiki embed service (port 8031) must be running before image ingest.
+# The CLAP service (port 8040) is auto-started by media_ingest.py if needed.
+#
+# CLAP model: already downloaded to E:/clap-htsat-unfused (local_files_only).
+# No HuggingFace download required at service start.
+#
+# GPU assignment (ARCHITECT brain always on CUDA0/5090):
+#   CUDA0 (RTX 5090) — wiki embed service (jina-clip-v2) + ARCHITECT brain
+#   CUDA1 (RTX 5080) — CLAP embed service (audio, freed when FAST brain off)
+# -----------------------------------------------------------------------------
+media_embed:
+  # Local path to the downloaded laion/clap-htsat-unfused model weights.
+  # Download: huggingface-cli download laion/clap-htsat-unfused --local-dir E:/clap-htsat-unfused
+  clap_model_dir: "E:/clap-htsat-unfused"
+
+  log: "F:/Projects/sage_kaizen_ai/logs/clap_embed_service.log"
+  startup_timeout_s: 120    # CLAP loads in ~30-60 s on CUDA1
+
+  # Image embedding — delegates to the always-running wiki embed service.
+  image_service:
+    host: "127.0.0.1"
+    port: 8031              # wiki embed service (jinaai/jina-clip-v2, 1024-dim)
+    image_batch: 32         # images per /embed/image call
+
+  # Audio embedding — dedicated CLAP service.
+  audio_service:
+    host: "127.0.0.1"
+    port: 8040              # CLAP embed service (laion/clap-htsat-unfused, 512-dim)
+    device: "cuda:1"        # RTX 5080; override via CLAP_DEVICE env var
+    audio_batch: 32         # audio files per /embed/audio call
