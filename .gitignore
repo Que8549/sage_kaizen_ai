@@ -189,6 +189,7 @@ output.txt
 output_old.txt
 wiki_samples/
 media_samples/
+flash-attention/
 
 *.cpp
 /sage_kaizen/llama-cpp-python

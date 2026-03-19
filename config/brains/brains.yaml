@@ -237,8 +237,8 @@ wiki_embed:
     # Maximum batch sizes enforced by the service endpoints.
     # wiki_ingest.py uses the same values as its per-call batch size so that
     # ingest calls always stay within the service limits.
-    text_batch: 128
-    image_batch: 32
+    text_batch: 256
+    image_batch: 64
 
   # ── Ingest job settings (read by wiki_ingest.py) ───────────────────────
   ingest:
@@ -294,4 +294,4 @@ media_embed:
     host: "127.0.0.1"
     port: 8040              # CLAP embed service (laion/clap-htsat-unfused, 512-dim)
     device: "cuda:1"        # RTX 5080; override via CLAP_DEVICE env var
-    audio_batch: 8          # audio files per /embed/audio call
+    audio_batch: 32         # audio files per /embed/audio call

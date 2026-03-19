@@ -14,6 +14,7 @@ Audio requirements
   - Raw bytes of any format readable by soundfile (WAV, FLAC, OGG, MP3 via libsndfile)
   - The service resamples to 48 kHz mono before feeding CLAP
   - Do NOT pre-process audio; send raw file bytes encoded as base64
+  - Clips longer than 30 s are center-cropped to 30 s (most representative segment)
 
 Environment variables
 ---------------------
@@ -61,7 +62,7 @@ _PORT       = int(os.environ.get("CLAP_PORT",  "8040"))
 _HOST       = os.environ.get("CLAP_HOST",      "127.0.0.1")
 
 _TARGET_SR  = 48_000          # CLAP expects 48 kHz mono
-_MAX_DUR_S  = 10.0            # clip audio to 10 s to avoid OOM
+_MAX_DUR_S  = 30.0            # center-crop audio to 30 s (one CLAP window)
 
 # ──────────────────────────────────────────────────────────────────────────── #
 # Model globals (set in lifespan)                                                #
@@ -71,6 +72,7 @@ _model:     Any = None
 _processor: Any = None
 _device:    torch.device | None = None
 _loaded:    bool = False
+_dtype      = torch.float16   # FP16 for HTSAT Swin Transformer; safe on RTX 5080
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -84,13 +86,43 @@ async def lifespan(app: FastAPI):
     from transformers import ClapModel, ClapProcessor
 
     _device = torch.device(_DEVICE_STR if torch.cuda.is_available() else "cpu")
-    _LOG.info("[clap_embed] Loading CLAP model on %s", _device)
+
+    # cuDNN auto-tuner picks fastest conv kernels for stable batch shapes.
+    torch.backends.cudnn.benchmark = True
+
+    _LOG.info("[clap_embed] Loading CLAP model on %s (fp16)", _device)
     _LOG.info("[clap_embed] Model dir: %s", _MODEL_DIR)
 
     _processor = ClapProcessor.from_pretrained(_MODEL_DIR, local_files_only=True)
-    _model = ClapModel.from_pretrained(_MODEL_DIR, local_files_only=True)
+    _model = ClapModel.from_pretrained(
+        _MODEL_DIR,
+        local_files_only=True,
+        torch_dtype=_dtype,
+    )
     _model.eval()
     _model.to(_device)
+
+    # torch.compile with reduce-overhead lowers Python dispatch and kernel-launch
+    # overhead for repeated fixed-shape inference calls.
+    # First real call after startup triggers JIT compilation (~20–60 s).
+    _LOG.info("[clap_embed] Compiling model with torch.compile (reduce-overhead) …")
+    _model = torch.compile(_model, mode="reduce-overhead", fullgraph=False)
+
+    # Warmup: trigger JIT compilation before marking the service healthy so
+    # that the first real request is not delayed by compilation.
+    _LOG.info("[clap_embed] Running warmup inference (triggers JIT compilation) …")
+    _device_type = _device.type  # "cuda" or "cpu"
+    _warmup_audio = np.zeros(_TARGET_SR, dtype=np.float32)  # 1 s silence placeholder
+    with torch.inference_mode(), torch.autocast(_device_type, dtype=_dtype):
+        _w_text = _processor(text=["warmup"], return_tensors="pt", padding=True)
+        _w_text = {k: v.to(_device) for k, v in _w_text.items() if isinstance(v, torch.Tensor)}
+        _ = _model.get_text_features(**_w_text)
+
+        _w_audio = _processor(
+            audio=[_warmup_audio], return_tensors="pt", padding=True, sampling_rate=_TARGET_SR
+        )
+        _w_audio = {k: v.to(_device) for k, v in _w_audio.items() if isinstance(v, torch.Tensor)}
+        _ = _model.get_audio_features(**_w_audio)
 
     _loaded = True
     _LOG.info("[clap_embed] CLAP model ready on %s", _device)
@@ -129,7 +161,10 @@ def _decode_audio(raw: bytes) -> np.ndarray:
     Decode raw audio bytes to a float32 mono array at _TARGET_SR (48 kHz).
 
     Uses soundfile for decoding and torchaudio.functional.resample for SRC.
-    Returns a 1-D float32 numpy array clipped to _MAX_DUR_S.
+    For clips longer than _MAX_DUR_S, performs a center-crop to extract the
+    middle segment — avoiding silent intros/outros and capturing the most
+    representative content for recordings up to ~5 minutes.
+    Returns a 1-D float32 numpy array.
     """
     import soundfile as sf
 
@@ -149,10 +184,12 @@ def _decode_audio(raw: bytes) -> np.ndarray:
         t = taf.resample(t, orig_freq=sr, new_freq=_TARGET_SR)
         data = t.squeeze(0).numpy()
 
-    # Clip to max duration
+    # Center-crop to max duration: extract the middle _MAX_DUR_S seconds.
+    # Head-cropping biases toward intros; center-crop is more representative.
     max_samples = int(_TARGET_SR * _MAX_DUR_S)
     if len(data) > max_samples:
-        data = data[:max_samples]
+        start = (len(data) - max_samples) // 2
+        data = data[start : start + max_samples]
 
     return data.astype(np.float32)
 
@@ -170,9 +207,8 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
     )
     inputs = {k: v.to(_device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
 
-    with torch.no_grad():
-        # transformers >= 4.40: get_text_features returns BaseModelOutputWithPooling;
-        # .pooler_output is already L2-normalized inside the model.
+    _device_type = _device.type
+    with torch.inference_mode(), torch.autocast(_device_type, dtype=_dtype):
         feats = _model.get_text_features(**inputs).pooler_output  # (B, 512)
 
     return feats.cpu().float().tolist()
@@ -187,9 +223,8 @@ def _embed_audios(arrays: list[np.ndarray]) -> list[list[float]]:
     )
     inputs = {k: v.to(_device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
 
-    with torch.no_grad():
-        # transformers >= 4.40: get_audio_features returns BaseModelOutputWithPooling;
-        # .pooler_output is already L2-normalized inside the model.
+    _device_type = _device.type
+    with torch.inference_mode(), torch.autocast(_device_type, dtype=_dtype):
         feats = _model.get_audio_features(**inputs).pooler_output  # (B, 512)
 
     return feats.cpu().float().tolist()
