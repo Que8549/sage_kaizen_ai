@@ -30,6 +30,7 @@ from prompt_library import (
     sage_architect_core,
     sage_fast_core,
 )
+from rag_v1.runtime.context_injector import apply_rag, apply_wiki_rag
 from router import RouteDecision, route as heuristic_route
 from sk_logging import get_logger
 
@@ -274,8 +275,8 @@ class ChatService:
 
         # RAG injection operates on the text query regardless of modality.
         # It appends context to the last user turn's text portion.
-        messages, rag_sources = _router.apply_rag(messages, user_text, decision)
-        messages, wiki_images = _router.apply_wiki_rag(
+        messages, rag_sources = apply_rag(messages, user_text, decision)
+        messages, wiki_images = apply_wiki_rag(
             messages, user_text, decision, wiki_enabled
         )
         return messages, rag_sources, wiki_images

@@ -6,6 +6,20 @@ from rag_v1.config.rag_settings import RetrievedChunk
 from rag_v1.runtime.rag_pipeline import RagPipeline
 
 
+def _prepend_context(content: str | list, prefix: str) -> str | list:
+    """Prepend a text prefix to an OpenAI message content value.
+
+    For plain-string content the prefix is concatenated directly.
+    For multimodal content (a list of content parts) the prefix is inserted
+    as a leading text part so base64 audio/image data is never
+    string-formatted into the message (which would tokenise raw bytes as
+    millions of tokens).
+    """
+    if isinstance(content, list):
+        return [{"type": "text", "text": prefix}] + list(content)
+    return prefix + content
+
+
 class RagInjector:
 
     def __init__(self, cfg):
@@ -58,16 +72,8 @@ class RagInjector:
         # Find the last user-role message and prepend the context block to it.
         for i in reversed(range(len(out))):
             if out[i].get("role") == "user":
-                content = out[i]["content"]
                 prefix = f"<context>\n{ctx}\n</context>\n\n"
-                if isinstance(content, list):
-                    # Multimodal content: prepend context as a text part so the
-                    # base64 audio/image data is never string-formatted into the
-                    # message (which would tokenise the raw bytes as ~4M tokens).
-                    augmented = [{"type": "text", "text": prefix}] + list(content)
-                else:
-                    augmented = prefix + content
-                out[i] = {**out[i], "content": augmented}
+                out[i] = {**out[i], "content": _prepend_context(out[i]["content"], prefix)}
                 break
 
         return out, chunks

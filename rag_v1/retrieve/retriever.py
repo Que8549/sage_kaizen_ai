@@ -14,17 +14,18 @@ class PgvectorRetriever:
 
         max_dist = getattr(self.cfg, "max_distance", 0.5)
         sql = """
+        WITH q AS (SELECT %s::vector AS v)
         SELECT source_id, chunk_id, content, metadata,
-               (embedding <=> %s::vector) AS distance
-        FROM rag_chunks
+               (embedding <=> q.v) AS distance
+        FROM rag_chunks, q
         WHERE embedding IS NOT NULL
-          AND (embedding <=> %s::vector) < %s
-        ORDER BY embedding <=> %s::vector
+          AND (embedding <=> q.v) < %s
+        ORDER BY embedding <=> q.v
         LIMIT %s;
         """
 
         with get_conn(self.cfg.pg_dsn) as conn:
-            rows = conn.execute(sql, (q_emb, q_emb, max_dist, q_emb, k)).fetchall()
+            rows = conn.execute(sql, (q_emb, max_dist, k)).fetchall()
 
         results = []
         for r in rows:

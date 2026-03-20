@@ -16,7 +16,7 @@ from typing import Optional
 import typer
 
 from feedback.export import export_kto_jsonl, print_stats
-from feedback.settings import FeedbackSettings
+from pg_settings import PgSettings
 
 app = typer.Typer(add_completion=False, help="Sage Kaizen RLHF feedback export CLI")
 
@@ -49,7 +49,7 @@ def main(
         help="Skip responses shorter than N characters (default: 50).",
     ),
 ) -> None:
-    cfg = FeedbackSettings()
+    cfg = PgSettings()
 
     if stats:
         print_stats(cfg.pg_dsn)

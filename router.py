@@ -1,26 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 import re
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple
+from typing import List
 
 from openai_client import HttpTimeouts, stream_chat_completions
 from sk_logging import get_logger
-
-# RAG v1 integration
-from rag_v1.runtime.router_integration import RagInjector
-from rag_v1.config.rag_settings import RagSettings
-
-# Wiki multimodal RAG (lazy import — safe if jina-clip-v2 / fastapi not installed)
-try:
-    from rag_v1.wiki.wiki_retriever import WikiRetriever
-    _WIKI_AVAILABLE = True
-except ImportError:
-    _WIKI_AVAILABLE = False
-
-if TYPE_CHECKING:
-    from rag_v1.wiki.wiki_retriever import WikiRetriever
 
 DEPTH_HINTS = (
     "explain", "analyze", "compare", "why", "how", "history", "philosophy", "theology",
@@ -36,47 +21,6 @@ FAST_HINTS = ("summarize", "tl;dr", "quick", "brief", "short", "bullet", "one se
 _WORD = r"(?:^|[\s\W]){w}(?:$|[\s\W])"
 
 _LOG = get_logger("sage_kaizen.router")
-
-# ----------------------------
-# RAG globals (safe + simple)
-# ----------------------------
-# Uses env vars if you set them (recommended), otherwise defaults from RagSettings
-# Example:
-#   set SAGE_RAG_ENABLED=1
-#   set SAGE_RAG_FAST_TOPK=4
-#   set SAGE_RAG_ARCH_TOPK=10
-#
-# NOTE: RagSettings itself can also read env vars (pydantic settings), so you can centralize there too.
-rag_settings = RagSettings()
-rag_injector = RagInjector(rag_settings)
-
-# Wiki retriever — lazy-initialised on first apply_wiki_rag() call.
-# Safe to leave as None if wiki package is not installed.
-_wiki_retriever: "WikiRetriever | None" = None
-
-
-def _get_wiki_retriever() -> "WikiRetriever | None":
-    global _wiki_retriever
-    if not _WIKI_AVAILABLE:
-        return None
-    if _wiki_retriever is None:
-        _wiki_retriever = WikiRetriever(pg_dsn=rag_settings.pg_dsn)
-    return _wiki_retriever
-
-def _env_bool(name: str, default: bool = True) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "y", "on")
-
-def _env_int(name: str, default: int) -> int:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    try:
-        return int(v.strip())
-    except ValueError:
-        return default
 
 
 @dataclass(frozen=True)
@@ -247,131 +191,3 @@ def llm_route(
         _LOG.warning("llm_route failed; falling back to heuristic route()")
         return route(user_text, force_architect=False)
 
-
-# ---------------------------------------------------
-# RAG hook you call before llama-server request
-# ---------------------------------------------------
-def apply_rag(
-    messages: List[Dict[str, Any]],
-    user_text: str,
-    decision: RouteDecision,
-    rag_enabled: bool | None = None,
-) -> Tuple[List[Dict[str, Any]], list]:
-    """
-    Drop-in RAG enrichment.  Call AFTER building messages, BEFORE sending to llama-server.
-
-    Returns:
-        (messages, rag_sources) — messages has RAG context injected into the last
-        user turn; rag_sources is a list[RetrievedChunk] for citation rendering.
-        Both early-exit paths return (original_messages, []).
-
-    Controls:
-      - rag_enabled: if None, reads env SAGE_RAG_ENABLED (default True)
-      - top_k: FAST uses SAGE_RAG_FAST_TOPK (default 4)
-               ARCHITECT uses SAGE_RAG_ARCH_TOPK (default 10)
-    """
-    if not user_text:
-        return messages, []
-
-    enabled = _env_bool("SAGE_RAG_ENABLED", default=True) if rag_enabled is None else rag_enabled
-    if not enabled:
-        return messages, []
-
-    # Skip RAG for ultra-short inputs (reduces needless embedding calls)
-    min_chars = _env_int("SAGE_RAG_MIN_CHARS", default=12)
-    if len(user_text.strip()) < min_chars:
-        return messages, []
-
-    fast_k = _env_int("SAGE_RAG_FAST_TOPK", default=4)
-    arch_k = _env_int("SAGE_RAG_ARCH_TOPK", default=10)
-
-    top_k = fast_k if decision.brain == "FAST" else arch_k
-
-    try:
-        out, sources = rag_injector.maybe_inject(
-            messages=messages,
-            user_text=user_text,
-            brain=decision.brain,
-            enabled=True,
-            top_k=top_k,
-        )
-        return out, sources
-    except Exception:
-        _LOG.exception("RAG injection failed; continuing without RAG")
-        return messages, []
-
-
-# ---------------------------------------------------
-# Wiki multimodal RAG hook (always-on when enabled)
-# ---------------------------------------------------
-
-def apply_wiki_rag(
-    messages: List[Dict[str, Any]],
-    user_text: str,
-    decision: RouteDecision,
-    wiki_enabled: bool | None = None,
-) -> Tuple[List[Dict[str, Any]], list]:
-    """
-    Always-on Wikipedia RAG enrichment.  Call after apply_rag(), before
-    sending to llama-server.
-
-    Mirrors apply_rag() pattern:
-      - Injects a <wiki_context> block into the last user turn.
-      - Returns (messages, wiki_images) where wiki_images is a
-        list[WikiImage] for Streamlit image rendering.
-
-    Controls:
-      - wiki_enabled: if None, reads env SAGE_WIKI_RAG_ENABLED (default True)
-      - top_k:        same env vars as regular RAG (SAGE_RAG_FAST_TOPK / ARCH_TOPK)
-    """
-    enabled = _env_bool("SAGE_WIKI_RAG_ENABLED", default=True) if wiki_enabled is None else wiki_enabled
-    if not enabled or not user_text:
-        return messages, []
-
-    min_chars = _env_int("SAGE_RAG_MIN_CHARS", default=12)
-    if len(user_text.strip()) < min_chars:
-        return messages, []
-
-    retriever = _get_wiki_retriever()
-    if retriever is None:
-        return messages, []
-
-    fast_k = _env_int("SAGE_RAG_FAST_TOPK", default=4)
-    arch_k = _env_int("SAGE_RAG_ARCH_TOPK", default=10)
-    top_k  = fast_k if decision.brain == "FAST" else arch_k
-
-    try:
-        result = retriever.search(user_text, top_k_chunks=top_k, top_images=3)
-        if result.empty or not result.chunks:
-            return messages, []
-
-        lines: List[str] = []
-        for c in result.chunks:
-            section = " > ".join(c.section_path) if c.section_path else "Introduction"
-            lines.append(f"[{c.title} / {section} | score={c.score:.3f}]\n{c.text}")
-        ctx = "\n\n---\n\n".join(lines)
-
-        out = list(messages)
-        for i in reversed(range(len(out))):
-            if out[i].get("role") == "user":
-                content = out[i]["content"]
-                prefix = f"<wiki_context>\n{ctx}\n</wiki_context>\n\n"
-                if isinstance(content, list):
-                    # Multimodal content: prepend context as a text part so the
-                    # base64 audio/image data is never string-formatted into the
-                    # message (which would tokenise the raw bytes as ~4M tokens).
-                    augmented = [{"type": "text", "text": prefix}] + list(content)
-                else:
-                    augmented = prefix + content
-                out[i] = {**out[i], "content": augmented}
-                break
-
-        _LOG.info(
-            "wiki_rag | chunks=%d images=%d | query_chars=%d",
-            len(result.chunks), len(result.images), len(user_text),
-        )
-        return out, result.images
-
-    except Exception:
-        _LOG.exception("Wiki RAG injection failed; continuing without wiki context")
-        return messages, []

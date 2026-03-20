@@ -12,20 +12,14 @@ from chat_service import ChatService, MediaAttachment, TurnConfig
 from rag_v1.retrieve.citations import format_sources_markdown
 from inference_session import InferenceSession
 from mermaid_streamlit import DiagramHandler
-from openai_client import HttpTimeouts, LlamaServerError
+from openai_client import HttpTimeouts, LlamaServerError, _normalize_base_url
 from prompt_library import TemplateKey
 from settings import CONFIG
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
-# UI helpers                                                                   #
+# UI helpers                                                                  #
 # ─────────────────────────────────────────────────────────────────────────── #
-
-def _normalize_base_url(url: str) -> str:
-    u = (url or "").strip().rstrip("/")
-    if u.endswith("/v1"):
-        u = u[:-3].rstrip("/")
-    return u
 
 
 _THINK_RE      = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
@@ -42,7 +36,7 @@ def _parse_response(text: str) -> tuple[str | None, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
-# Media helpers                                                                #
+# Media helpers                                                               #
 # ─────────────────────────────────────────────────────────────────────────── #
 
 _IMAGE_MIMES = {
@@ -234,11 +228,18 @@ if "fb_stats_dirty"      not in st.session_state: st.session_state.fb_stats_dirt
 if "pending_attachments" not in st.session_state: st.session_state.pending_attachments = []
 
 # ── Feedback DB: one-time schema init ──────────────────────────────────────
+# Module-level flag: ensure_schema() only needs one DB round-trip per process.
+# st.session_state would re-run it for every new browser tab; a module-level
+# boolean persists for the entire Streamlit process lifetime.
+_fb_schema_initialized: bool = False
+
 try:
     from feedback.db import ensure_schema, get_conn as _fb_get_conn
-    from feedback.settings import FeedbackSettings as _FeedbackSettings
+    from pg_settings import PgSettings as _FeedbackSettings
     _fb_cfg = _FeedbackSettings()
-    ensure_schema(_fb_cfg.pg_dsn)
+    if not _fb_schema_initialized:
+        ensure_schema(_fb_cfg.pg_dsn)
+        _fb_schema_initialized = True
     if not st.session_state.fb_rated_ids:
         with _fb_get_conn(_fb_cfg.pg_dsn) as _fb_conn:
             with _fb_conn.cursor() as _cur:
@@ -337,7 +338,7 @@ with st.sidebar:
     if st.session_state.fb_stats_dirty:
         try:
             from feedback.db import fetch_stats, get_conn as _fb_get_conn
-            from feedback.settings import FeedbackSettings as _FeedbackSettings
+            from pg_settings import PgSettings as _FeedbackSettings
             _fb_cfg = _FeedbackSettings()
             with _fb_get_conn(_fb_cfg.pg_dsn) as _fb_conn:
                 st.session_state.fb_stats = fetch_stats(_fb_conn)
@@ -422,7 +423,7 @@ for m in st.session_state.messages:
                     _saved  = False
                     try:
                         from feedback.db import insert_rating, get_conn as _fb_get_conn
-                        from feedback.settings import FeedbackSettings as _FeedbackSettings
+                        from pg_settings import PgSettings as _FeedbackSettings
                         _meta   = m.get("meta", {})
                         _fb_cfg = _FeedbackSettings()
                         with _fb_get_conn(_fb_cfg.pg_dsn) as _fb_conn:
@@ -668,7 +669,7 @@ if user_text:
                 _saved_live  = False
                 try:
                     from feedback.db import insert_rating, get_conn as _fb_get_conn
-                    from feedback.settings import FeedbackSettings as _FeedbackSettings
+                    from pg_settings import PgSettings as _FeedbackSettings
                     _fb_cfg = _FeedbackSettings()
                     with _fb_get_conn(_fb_cfg.pg_dsn) as _fb_conn:
                         insert_rating(

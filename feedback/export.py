@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from feedback.db import fetch_kto_rows, fetch_stats, get_conn
-from feedback.settings import FeedbackSettings
 from sk_logging import get_logger
 
 _LOG = get_logger("sage_kaizen.feedback.export")

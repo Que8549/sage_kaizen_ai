@@ -259,15 +259,12 @@ class WikiRetriever:
     # ------------------------------------------------------------------ #
 
     def _get_chunks(self, qvec: list[float], top_k: int) -> list[WikiChunk]:
-        conn: psycopg.Connection[DictRow] = get_conn(self._pg_dsn)
-        try:
+        with get_conn(self._pg_dsn) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 rows = cur.execute(
                     _SQL_TOP_CHUNKS,
                     (qvec, qvec, self._max_distance, qvec, top_k),
                 ).fetchall()
-        finally:
-            conn.close()
 
         return [
             WikiChunk(
@@ -291,15 +288,12 @@ class WikiRetriever:
         if not bundle_ids:
             return []
 
-        conn: psycopg.Connection[DictRow] = get_conn(self._pg_dsn)
-        try:
+        with get_conn(self._pg_dsn) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 rows = cur.execute(
                     _SQL_TOP_IMAGES,
                     (qvec, qvec, bundle_ids, top_images),
                 ).fetchall()
-        finally:
-            conn.close()
 
         images: list[WikiImage] = []
         for row in rows:
