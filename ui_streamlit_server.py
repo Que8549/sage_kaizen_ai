@@ -324,12 +324,12 @@ with st.sidebar:
     )
 
     st.subheader("Generation")
-    temperature_q5  = st.slider("Q5 temperature",  0.0, 1.2, 0.7,  0.05)
-    temperature_q6  = st.slider("Q6 temperature",  0.0, 1.2, 0.6,  0.05)
+    temperature_q5  = st.slider("Q5 temperature",  0.0, 2.0, 0.7,  0.05)
+    temperature_q6  = st.slider("Q6 temperature",  0.0, 2.0, 0.6,  0.05)
     top_p_q5        = st.slider("Q5 top_p",        0.1, 1.0, 0.80, 0.01)
     top_p_q6        = st.slider("Q6 top_p",        0.1, 1.0, 0.95, 0.01)
-    max_tokens_q5   = st.selectbox("Q5 max_tokens", [1024, 2048, 4096, 8192], index=2)
-    max_tokens_q6   = st.selectbox("Q6 max_tokens", [2048, 4096, 8192, 12288], index=2)
+    max_tokens_q5   = st.selectbox("Q5 max_tokens", [1024, 2048, 4096, 8192, 16384], index=2)
+    max_tokens_q6   = st.selectbox("Q6 max_tokens", [4096, 8192, 16384, 32768, 65536], index=3)
 
     if st.session_state.last_thinking_time is not None:
         st.caption(f"\u23F1\uFE0F Last thinking time: {st.session_state.last_thinking_time:.2f}s")
