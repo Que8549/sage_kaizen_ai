@@ -1,12 +1,21 @@
-python -m streamlit run ui_streamlit.py
-
+# Launcg Sage Kaizen UI
+# python -m streamlit run ui_streamlit.py
 python -m streamlit run ui_streamlit_server.py
 
 
+# Ingest Docs folder
 python.exe -m rag_v1.ingest.folder_ingest
 
-
+# Diagnostics
 python rag_diagnostics.py
+
+
+#Voice pipeline
+python scripts/run_pipeline.py [--persona narrator|mentor|teacher|chat|quick]
+
+python scripts/run_pipeline.py --verbose --persona narrator
+
+
 
 #Ingest local media files
 # Run ingest (from project root):

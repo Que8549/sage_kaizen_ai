@@ -149,3 +149,10 @@ This section is the navigation hub. When uncertain, start with **01-ARCHITECTURE
 - When adding new features, prefer adding a module rather than tangling existing modules.
 - If a fact is uncertain (flags, versions, APIs), check local `--help` output or project docs.
 - For fine tuning AI models using llama-server refer to local `--help` or https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md.
+
+---
+
+## 10) Related and Associated Projects
+ - Integrate with Sage Kaizen Voice located at F:\Projects\sage_kaizen_ai_voice\
+
+ 

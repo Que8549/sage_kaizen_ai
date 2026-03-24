@@ -11,7 +11,7 @@ DEPTH_HINTS = (
     "explain", "analyze", "compare", "why", "how", "history", "philosophy", "theology",
     "deep", "in depth", "detailed", "step-by-step", "teach", "tutor", "architecture",
     "design", "tradeoff", "pros and cons", "evaluate", "optimize", "tune", "take time to think",
-    "double check your answer",
+    "double check your answer", "religious", "religion", "psychology", "philosophy", 
 )
 
 CODE_HINTS = ("code", "python", "c#", "typescript", "debug", "stack trace", "error", "traceback", "exception")

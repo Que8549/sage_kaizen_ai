@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import queue
 import re
 import time
 from typing import List, Tuple
@@ -15,6 +16,7 @@ from mermaid_streamlit import DiagramHandler
 from openai_client import HttpTimeouts, LlamaServerError, _normalize_base_url
 from prompt_library import TemplateKey
 from settings import CONFIG
+from voice_bridge import VoiceBridge
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -211,6 +213,15 @@ st.set_page_config(
 )
 st.title("\U0001F9E0 Sage Kaizen (Dual-Brain Chat) \U0001F9E0")
 
+
+@st.cache_resource
+def _get_voice_bridge() -> VoiceBridge:
+    """Create the ZMQ voice bridge once per Streamlit process lifetime."""
+    return VoiceBridge()
+
+
+_voice_bridge = _get_voice_bridge()
+
 timeouts        = HttpTimeouts(connect_s=CONFIG.connect_timeout_s, read_s=CONFIG.read_timeout_s)
 timeouts_status = HttpTimeouts(connect_s=2.0, read_s=2.0)
 
@@ -247,6 +258,26 @@ try:
         st.session_state.fb_rated_ids = {r["id"] for r in _rows}
 except Exception:
     pass
+
+# ─────────────────────────────────────────────────────────────────────────── #
+# Voice transcript poller                                                      #
+# ─────────────────────────────────────────────────────────────────────────── #
+# Runs every 500ms as an independent fragment.  When a voice transcript
+# arrives from the voice app, it is stored in session state and a full page
+# rerun is triggered so it is processed exactly like a keyboard chat input.
+
+@st.fragment(run_every=0.5)
+def _voice_input_poller() -> None:
+    try:
+        text = _voice_bridge.transcript_queue.get_nowait()
+        st.session_state["_voice_input"] = text
+        st.rerun()
+    except queue.Empty:
+        pass
+
+
+_voice_input_poller()
+
 
 # ─────────────────────────────────────────────────────────────────────────── #
 # Sidebar                                                                      #
@@ -294,6 +325,9 @@ with st.sidebar:
     ok6, d6 = session.health_q6(timeouts_status)
     st.caption(f"Q5 (Omni): {'✅' if ok5 else '❌'} {d5}")
     st.caption(f"Q6 (Architect): {'✅' if ok6 else '❌'} {d6}")
+    _v_icon = "🎙" if _voice_bridge.voice_ready else "🔄"
+    _v_label = "ready" if _voice_bridge.voice_ready else "loading models..."
+    st.caption(f"{_v_icon} Voice: {_v_label}")
 
     if st.button("Discover model IDs"):
         mid5, mid6 = session.discover_model_ids(timeouts_status)
@@ -490,7 +524,8 @@ with st.expander(
 # Chat input + turn execution                                                  #
 # ─────────────────────────────────────────────────────────────────────────── #
 
-user_text = st.chat_input("Ask Sage Kaizen\u2026", key="chat_input")
+_pending_voice = st.session_state.pop("_voice_input", None)
+user_text = _pending_voice or st.chat_input("Ask Sage Kaizen\u2026", key="chat_input")
 
 if user_text:
     # Snapshot attachments for this turn then clear the pending list
@@ -500,6 +535,8 @@ if user_text:
     st.session_state.pending_attachments = []
 
     media_labels = [a.label for a in turn_attachments if a.label]
+    if _pending_voice:
+        media_labels = ["\U0001f3a4 Voice"] + media_labels
 
     # Store user message (text only for display; attachments shown via labels)
     st.session_state.messages.append({
@@ -583,14 +620,22 @@ if user_text:
                 media_attachments=turn_attachments,
             )
 
+            voice_session_id = str(uuid4())
+            _voice_bridge.start_turn(voice_session_id, decision.brain)
             try:
                 for piece in chat_svc.stream_response(messages, decision, cfg):
+                    if _voice_bridge.barge_in_event.is_set():
+                        _voice_bridge.barge_in_event.clear()
+                        break
                     acc.append(piece)
                     live.markdown("".join(acc))
+                    _voice_bridge.publish_token(voice_session_id, piece)
             except LlamaServerError as e:
                 live.error(str(e))
             except Exception as e:
                 live.error(f"Unexpected error: {type(e).__name__}: {e}")
+            finally:
+                _voice_bridge.end_turn(voice_session_id)
 
         elapsed  = time.time() - start
         st.session_state.last_thinking_time = elapsed
