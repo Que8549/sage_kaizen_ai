@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import queue
 import re
 import time
@@ -8,6 +9,18 @@ from typing import List, Tuple
 from uuid import uuid4
 
 import streamlit as st
+
+# ── Suppress benign Tornado WebSocket error on Ctrl+C shutdown ───────────────
+# When Streamlit stops (RuntimeState.STOPPING), the browser WebSocket may
+# deliver one final message.  Tornado catches the resulting RuntimeStoppedError
+# and logs it as "Uncaught exception" — noisy but harmless; shutdown completes
+# successfully regardless.  Filter it out to keep the logs clean.
+class _StopRaceFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "RuntimeStoppedError" not in record.getMessage()
+
+logging.getLogger("tornado.application").addFilter(_StopRaceFilter())
+# ─────────────────────────────────────────────────────────────────────────────
 
 from chat_service import ChatService, MediaAttachment, TurnConfig
 from rag_v1.retrieve.citations import format_sources_markdown

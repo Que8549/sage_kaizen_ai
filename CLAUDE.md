@@ -101,7 +101,7 @@ These are **hard constraints**:
 ---
 
 ## 6) CURRENT HARDWARE (Authoritative)
-User rig:
+User rig also known as "my rig":
 - OS: Windows 11 Professional
 - CPU: AMD Ryzen 9 9950X3D
 - RAM: 192 GB DDR5
@@ -153,6 +153,7 @@ This section is the navigation hub. When uncertain, start with **01-ARCHITECTURE
 ---
 
 ## 10) Related and Associated Projects
- - Integrate with Sage Kaizen Voice located at F:\Projects\sage_kaizen_ai_voice\
+ - Integrate with Sage Kaizen Voice (voice app) located at F:\Projects\sage_kaizen_ai_voice\
+ - Sage Kaizen local-first AI assistant (main app) located at F:\Projects\sage_kaizen_ai\
 
  
