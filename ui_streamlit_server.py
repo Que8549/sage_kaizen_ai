@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import logging
 import queue
 import re
 import time
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from uuid import uuid4
 
 import streamlit as st
@@ -28,8 +29,19 @@ from inference_session import InferenceSession
 from mermaid_streamlit import DiagramHandler
 from openai_client import HttpTimeouts, LlamaServerError, _normalize_base_url
 from prompt_library import TemplateKey
+from router import route as _heuristic_route, llm_route as _llm_route
+from router import RouteDecision
 from settings import CONFIG
 from voice_bridge import VoiceBridge
+
+# ── Thread pool for parallel LLM routing on voice input ─────────────────────
+# Shared for the lifetime of the Streamlit process; max_workers=2 because we
+# only ever have one active voice routing future at a time.
+_ROUTE_EXECUTOR: concurrent.futures.ThreadPoolExecutor = (
+    concurrent.futures.ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="voice_route"
+    )
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -39,6 +51,25 @@ from voice_bridge import VoiceBridge
 
 _THINK_RE      = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
 _OUTPUT_TAG_RE = re.compile(r"</?Final\s*Output>", re.IGNORECASE)
+
+# ── Voice command: "new chat" ──────────────────────────────────────────────
+# Matches short utterances whose sole intent is to start a new conversation.
+# Allows optional polite prefixes ("hey Sage", "please") and punctuation.
+# Intentionally strict so longer queries that happen to contain "new chat"
+# are NOT silently swallowed as commands.
+_NEW_CHAT_RE = re.compile(
+    r"^\s*"
+    r"(?:hey\s+sage[,\s]+|ok(?:ay)?\s+sage[,\s]+|please\s+)?"
+    r"(?:"
+    r"(?:start\s+(?:a\s+)?)?new\s+chat"
+    r"|(?:start\s+(?:a\s+)?)?new\s+conversation"
+    r"|start\s+over"
+    r"|clear\s+(?:the\s+)?(?:chat|conversation|history)"
+    r"|reset\s+(?:the\s+)?(?:chat|conversation)"
+    r")"
+    r"\s*[.!?]?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _parse_response(text: str) -> tuple[str | None, str]:
@@ -236,7 +267,7 @@ def _get_voice_bridge() -> VoiceBridge:
 _voice_bridge = _get_voice_bridge()
 
 timeouts        = HttpTimeouts(connect_s=CONFIG.connect_timeout_s, read_s=CONFIG.read_timeout_s)
-timeouts_status = HttpTimeouts(connect_s=2.0, read_s=2.0)
+timeouts_status = HttpTimeouts(connect_s=0.5, read_s=1.0)
 
 # ─────────────────────────────────────────────────────────────────────────── #
 # Session state                                                                #
@@ -275,15 +306,20 @@ except Exception:
 # ─────────────────────────────────────────────────────────────────────────── #
 # Voice transcript poller                                                      #
 # ─────────────────────────────────────────────────────────────────────────── #
-# Runs every 500ms as an independent fragment.  When a voice transcript
-# arrives from the voice app, it is stored in session state and a full page
-# rerun is triggered so it is processed exactly like a keyboard chat input.
+# Runs every 100ms as an independent fragment.  When a voice transcript
+# arrives from the voice app it is inspected:
+#   - voice commands (e.g. "new chat") → set _voice_new_chat flag
+#   - all other text                   → set _voice_input for normal processing
+# A full-app rerun is triggered in both cases.
 
-@st.fragment(run_every=0.5)
+@st.fragment(run_every=0.1)
 def _voice_input_poller() -> None:
     try:
         text = _voice_bridge.transcript_queue.get_nowait()
-        st.session_state["_voice_input"] = text
+        if _NEW_CHAT_RE.match(text):
+            st.session_state["_voice_new_chat"] = True
+        else:
+            st.session_state["_voice_input"] = text
         st.rerun()
     except queue.Empty:
         pass
@@ -534,6 +570,20 @@ with st.expander(
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
+# Voice "new chat" command handler                                             #
+# ─────────────────────────────────────────────────────────────────────────── #
+# Processed before the normal chat input so the command is never forwarded
+# to the LLM.  Mirrors the "New chat" sidebar button exactly.
+
+if st.session_state.pop("_voice_new_chat", False):
+    st.session_state.messages            = []
+    st.session_state.last_thinking_time  = None
+    st.session_state.last_route          = None
+    st.session_state.pending_attachments = []
+    st.toast("\U0001F3A4 New chat started", icon="\U0001F5D1\uFE0F")
+    st.rerun()
+
+# ─────────────────────────────────────────────────────────────────────────── #
 # Chat input + turn execution                                                  #
 # ─────────────────────────────────────────────────────────────────────────── #
 
@@ -586,42 +636,88 @@ if user_text:
 
     chat_svc = ChatService(session, CONFIG.system_prompt, timeouts)
 
-    decision = chat_svc.decide_route(user_text, cfg)
+    # ── Routing ─────────────────────────────────────────────────────────────
+    # Voice path: instant keyword heuristic → spinner appears immediately,
+    #             LLM routing runs in a background thread in parallel.
+    # Keyboard path: existing sequential decide_route() (LLM routing included).
+    _route_future: Optional[concurrent.futures.Future] = None
+    if _pending_voice:
+        decision = _heuristic_route(user_text, voice_mode=True)
+        _route_future = _ROUTE_EXECUTOR.submit(
+            _llm_route,
+            user_text=user_text,
+            fast_base_url=session.q5_url,
+            model_id=session.q5_model_id,
+            timeouts=HttpTimeouts(connect_s=1.0, read_s=2.5),
+        )
+    else:
+        decision = chat_svc.decide_route(user_text, cfg)
+
     st.session_state.last_route = decision
     use_q6 = decision.brain == "ARCHITECT"
-
-    with st.status("Checking servers\u2026", expanded=False) as s:
-        ok, msg = session.ensure_q5_ready()
-        if not ok:
-            s.update(label="Q5 not ready \u274C", state="error")
-            st.error(msg)
-            st.stop()
-
-        if use_q6:
-            s.write("Starting **Architect Brain** (Q6)\u2026")
-            ok, msg = session.ensure_q6_ready()
-            if not ok:
-                s.update(label="Q6 not ready \u274C", state="error")
-                st.error(msg)
-                st.stop()
-            s.write("\u2705 **Architect Brain** ready.")
-
-        s.update(label="Servers ready \u2705", state="complete")
-
     brain_label = "Architect (Q6)" if use_q6 else "Omni (Q5)"
+
     with st.chat_message("assistant"):
         reasons_str = ", ".join(decision.reasons[:6])
         st.caption(
             f"\U0001F9ED Route: {decision.brain} \u2022 score={decision.score} \u2022 "
             f"reasons: {reasons_str}"
         )
-        templates_caption = st.empty()  # filled once select_templates returns
+        templates_caption  = st.empty()  # filled once select_templates returns
+        route_update_caption = st.empty()  # shows if parallel LLM route refines brain
 
         live  = st.empty()
         acc: List[str] = []
         start = time.time()
 
         with st.spinner(f"Thinking\u2026 ({brain_label})"):
+            # ── Server health check (inside spinner — doesn't delay label) ──
+            with st.status("Checking servers\u2026", expanded=False) as s:
+                ok, msg = session.ensure_q5_ready()
+                if not ok:
+                    s.update(label="Q5 not ready \u274C", state="error")
+                    st.error(msg)
+                    st.stop()
+
+                if use_q6:
+                    s.write("Starting **Architect Brain** (Q6)\u2026")
+                    ok, msg = session.ensure_q6_ready()
+                    if not ok:
+                        s.update(label="Q6 not ready \u274C", state="error")
+                        st.error(msg)
+                        st.stop()
+                    s.write("\u2705 **Architect Brain** ready.")
+
+                s.update(label="Servers ready \u2705", state="complete")
+
+            # ── Resolve parallel LLM routing result (voice path only) ───────
+            # By the time ensure_q5_ready() returns, the background thread has
+            # had ~20–50 ms head-start; most calls will already be done.
+            if _route_future is not None:
+                try:
+                    llm_decision: RouteDecision = _route_future.result(timeout=2.0)
+                    if llm_decision.brain != decision.brain:
+                        decision  = llm_decision
+                        use_q6    = decision.brain == "ARCHITECT"
+                        st.session_state.last_route = decision
+                        route_update_caption.caption(
+                            f"\U0001F504 Route refined: {decision.brain} \u2022 "
+                            f"score={decision.score}"
+                        )
+                        if use_q6:
+                            with st.status(
+                                "Starting Architect Brain\u2026", expanded=False
+                            ) as sq6:
+                                ok6, msg6 = session.ensure_q6_ready()
+                                if not ok6:
+                                    sq6.update(label="Q6 not ready \u274C", state="error")
+                                    st.error(msg6)
+                                    st.stop()
+                                sq6.update(
+                                    label="\u2705 Architect Brain ready.", state="complete"
+                                )
+                except Exception:
+                    pass  # LLM route timed out or failed — keep heuristic result
             templates = chat_svc.select_templates(user_text, cfg)
             templates_str = ", ".join(t.value for t in templates) if templates else "(none)"
             templates_caption.caption(f"\U0001F9E9 Templates: {templates_str}")

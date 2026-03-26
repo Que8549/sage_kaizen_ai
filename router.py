@@ -42,11 +42,20 @@ def _has_word(txt: str, word: str) -> bool:
     return re.search(_WORD.format(w=re.escape(word)), txt) is not None
 
 
-def route(user_text: str, force_architect: bool = False) -> RouteDecision:
+def route(
+    user_text: str,
+    force_architect: bool = False,
+    voice_mode: bool = False,
+) -> RouteDecision:
     """
     Returns a routing decision:
       - FAST      -> 5080 (Qwen2.5-14B Q6_K)
       - ARCHITECT -> 5090 (Qwen2.5-32B Q6_K_L)
+
+    voice_mode: when True, short queries (<150 chars) receive a -1 score bias
+                toward FAST, reflecting the conversational nature of voice input.
+                This prevents common depth-hint words like "explain" or "why"
+                from escalating brief voice questions to ARCHITECT.
 
     Also logs the decision to logs/sage_kaizen.log.
     """
@@ -72,6 +81,13 @@ def route(user_text: str, force_architect: bool = False) -> RouteDecision:
     elif n > 800:
         score += 2
         reasons.append("long_input")
+
+    # Voice-mode bias: short conversational queries lean FAST.
+    # Voice input is inherently more concise than typed text; a brief spoken
+    # question containing "explain" or "why" is typically FAST territory.
+    if voice_mode and n < 150:
+        score -= 1
+        reasons.append("voice_short_query")
 
     # Depth hints (moderate)
     for k in DEPTH_HINTS:
