@@ -15,6 +15,7 @@ Public API (unchanged from the bat-based version):
 """
 from __future__ import annotations
 
+import atexit
 import functools
 import os
 import re
@@ -51,6 +52,35 @@ _FATAL_MARKERS = (
     "EXE not found",
     "MODEL not found",
 )
+
+# ──────────────────────────────────────────────────────────────────────────── #
+# Spawned-process registry + atexit cleanup                                     #
+# ──────────────────────────────────────────────────────────────────────────── #
+# llama-server.exe is launched with CREATE_NEW_PROCESS_GROUP so the hidden
+# console window is never shown and Ctrl+C from the parent console is not
+# forwarded to the child (which is in its own process group).  As a result the
+# servers must be explicitly terminated when the Streamlit process exits.
+#
+# Strategy: track every Popen object returned by start_server_from_config() in
+# _spawned_procs and register a single atexit handler to terminate them all.
+# proc.poll() != None means the server already stopped (normal stop or restart),
+# so we skip it safely.
+
+_spawned_procs: list[subprocess.Popen] = []
+
+
+def _kill_spawned_servers() -> None:
+    """atexit handler — terminate all llama-server processes started this session."""
+    for proc in _spawned_procs:
+        try:
+            if proc.poll() is None:   # still running
+                proc.terminate()
+        except Exception:
+            pass
+
+
+atexit.register(_kill_spawned_servers)
+
 
 # ──────────────────────────────────────────────────────────────────────────── #
 # Flag-type tables for _build_argv()                                            #
@@ -384,10 +414,6 @@ def start_server_from_config(brain: BrainConfig) -> Tuple[bool, str]:
     ).encode("utf-8", errors="ignore")
 
     try:
-        with open(brain.log, "ab", buffering=0) as fh:
-            fh.write(header)
-            fh.flush()
-
         creationflags = 0
         if os.name == "nt":
             creationflags = (
@@ -395,15 +421,28 @@ def start_server_from_config(brain: BrainConfig) -> Tuple[bool, str]:
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             )
 
-        subprocess.Popen(
-            argv,
-            cwd=str(_PROJECT_ROOT),
-            stdout=subprocess.DEVNULL,   # server logs via --log-file
-            stderr=subprocess.DEVNULL,   # server logs via --log-file
-            stdin=subprocess.DEVNULL,
-            creationflags=creationflags,
-            close_fds=False,
-        )
+        # Open the log once: write the startup header, then keep it open so
+        # the child inherits the fd for stderr.  Early CUDA initialisation
+        # messages (ggml_cuda_init, cudaMalloc failures) are written to stderr
+        # before llama-server's own --log-file logger is ready; capturing them
+        # here makes startup failures diagnosable without --verbose flags.
+        log_fh = open(brain.log, "ab", buffering=0)
+        log_fh.write(header)
+        log_fh.flush()
+        try:
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(_PROJECT_ROOT),
+                stdout=subprocess.DEVNULL,  # server writes chat via --log-file
+                stderr=log_fh,              # capture early CUDA / arg errors
+                stdin=subprocess.DEVNULL,
+                creationflags=creationflags,
+                close_fds=False,
+            )
+        finally:
+            log_fh.close()  # parent closes its copy; child keeps its own fd
+
+        _spawned_procs.append(proc)
     except Exception as e:
         return False, f"Failed to spawn llama-server: {e}"
 

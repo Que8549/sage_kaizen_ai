@@ -48,7 +48,7 @@ class MmEmbedClient:
         """Return True if the embed service is reachable and healthy."""
         try:
             r = self._client.get(f"{self.base_url}/health", timeout=timeout_s)
-            return r.status_code < 500
+            return r.is_success
         except Exception:
             return False
 

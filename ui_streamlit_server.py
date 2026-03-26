@@ -16,11 +16,21 @@ import streamlit as st
 # deliver one final message.  Tornado catches the resulting RuntimeStoppedError
 # and logs it as "Uncaught exception" — noisy but harmless; shutdown completes
 # successfully regardless.  Filter it out to keep the logs clean.
+#
+# NOTE: record.getMessage() contains "Uncaught exception GET /_stcore/stream"
+# — it does NOT contain "RuntimeStoppedError".  The exception is in
+# record.exc_info, so we must inspect exc_info to suppress the right record.
 class _StopRaceFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info:
+            exc_type = record.exc_info[0]
+            if exc_type is not None and "RuntimeStoppedError" in exc_type.__name__:
+                return False  # suppress
         return "RuntimeStoppedError" not in record.getMessage()
 
-logging.getLogger("tornado.application").addFilter(_StopRaceFilter())
+_stop_race_filter = _StopRaceFilter()
+logging.getLogger("tornado.application").addFilter(_stop_race_filter)
+logging.getLogger("tornado.general").addFilter(_stop_race_filter)
 # ─────────────────────────────────────────────────────────────────────────────
 
 from chat_service import ChatService, MediaAttachment, TurnConfig
@@ -580,6 +590,7 @@ if st.session_state.pop("_voice_new_chat", False):
     st.session_state.last_thinking_time  = None
     st.session_state.last_route          = None
     st.session_state.pending_attachments = []
+    st.session_state.pop("_voice_input", None)  # discard any voice input queued before the reset
     st.toast("\U0001F3A4 New chat started", icon="\U0001F5D1\uFE0F")
     st.rerun()
 

@@ -92,7 +92,10 @@ class WikiEmbedConfig:
 
     @property
     def wiki_root(self) -> Path:
-        return Path(str(self.ingest.get("root", r"I:\llm_data\wikipedia_maxi_2025_08")))
+        root = self.ingest.get("root")
+        if not root:
+            raise KeyError("wiki_embed.ingest.root is not set in brains.yaml")
+        return Path(str(root))
 
     @property
     def chunk_chars(self) -> int:

@@ -18,6 +18,9 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 import psycopg
 from psycopg.rows import dict_row, DictRow
@@ -128,15 +131,17 @@ class WikiRetriever:
     ) -> None:
         wiki_cfg = load_wiki_embed_config()
 
-        self._pg_dsn           = pg_dsn
-        self._wiki_root        = wiki_cfg.wiki_root
-        self._embed_host       = wiki_cfg.host
-        self._embed_port       = wiki_cfg.port
-        self._max_distance     = max_distance
-        self._cluster_min      = cluster_min_size
-        self._cluster_spread   = cluster_max_spread
-        self._cluster_floor    = cluster_top1_floor
-        self._client           = MmEmbedClient(host=wiki_cfg.host, port=wiki_cfg.port)
+        self._pg_dsn              = pg_dsn
+        self._wiki_root           = wiki_cfg.wiki_root
+        self._embed_host          = wiki_cfg.host
+        self._embed_port          = wiki_cfg.port
+        self._startup_timeout_s   = wiki_cfg.startup_timeout_s   # from brains.yaml (300 s)
+        self._embed_log           = wiki_cfg.log                  # for subprocess stderr
+        self._max_distance        = max_distance
+        self._cluster_min         = cluster_min_size
+        self._cluster_spread      = cluster_max_spread
+        self._cluster_floor       = cluster_top1_floor
+        self._client              = MmEmbedClient(host=wiki_cfg.host, port=wiki_cfg.port)
         self._embed_proc: subprocess.Popen | None = None
         self._atexit_registered: bool = False
 
@@ -162,18 +167,29 @@ class WikiRetriever:
             "Wiki embed service not detected — auto-starting on %s:%s …",
             self._embed_host, self._embed_port,
         )
-        # The service reads host/port from brains.yaml at startup — no CLI args needed.
-        self._embed_proc = subprocess.Popen(
-            [sys.executable, "-m", "rag_v1.wiki.mm_embed_service.app"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # Redirect stdout+stderr to the wiki embed log so startup errors
+        # (model load failures, CUDA errors, import errors) are captured.
+        self._embed_log.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(self._embed_log, "ab", buffering=0)
+        try:
+            # The service reads host/port/device from brains.yaml at startup.
+            # cwd=_PROJECT_ROOT ensures rag_v1 is importable as a package.
+            self._embed_proc = subprocess.Popen(
+                [sys.executable, "-m", "rag_v1.wiki.mm_embed_service.app"],
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                cwd=str(_PROJECT_ROOT),
+            )
+        finally:
+            log_fh.close()  # parent closes its copy; child keeps its own fd
 
         if not self._atexit_registered:
             atexit.register(self._shutdown_service)
             self._atexit_registered = True
 
-        deadline = time.monotonic() + 60.0
+        # Use startup_timeout_s from brains.yaml (300 s) — the service needs
+        # model load + torch.compile warmup which can exceed 60 s on first run.
+        deadline = time.monotonic() + self._startup_timeout_s
         while time.monotonic() < deadline:
             if self._client.ping(timeout_s=2.0):
                 _LOG.info("Wiki embed service ready (port %s).", self._embed_port)
@@ -181,8 +197,9 @@ class WikiRetriever:
             time.sleep(1.0)
 
         _LOG.warning(
-            "Wiki embed service did not start within 60 s — "
-            "wiki retrieval disabled for this query."
+            "Wiki embed service did not start within %.0f s — "
+            "wiki retrieval disabled for this query.",
+            self._startup_timeout_s,
         )
         return False
 

@@ -39,10 +39,11 @@ from rag_v1.wiki.wiki_embed_config import load_wiki_embed_config
 
 _model: Any = None
 _device: str = "cuda:0"
+_device_type: str = "cuda"       # device family; derived from _device at startup
 _text_batch: int = 32
 _image_batch: int = 8
 _loaded: bool = False
-_dtype = torch.bfloat16   # BF16: recommended by jina-clip-v2 model card; native on Blackwell
+_dtype = torch.bfloat16          # BF16: native on Blackwell; recommended by jina-clip-v2
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -51,51 +52,71 @@ _dtype = torch.bfloat16   # BF16: recommended by jina-clip-v2 model card; native
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _model, _device, _text_batch, _image_batch, _loaded, _dtype
+    global _model, _device, _device_type, _text_batch, _image_batch, _loaded
 
     cfg = load_wiki_embed_config()
-    model_path  = str(cfg.model)
+    model_path   = str(cfg.model)
     _device      = os.environ.get("WIKI_EMBED_DEVICE") or cfg.device
+    _device_type = _device.split(":")[0]
     _text_batch  = cfg.text_batch
     _image_batch = cfg.image_batch
 
-    # cuDNN auto-tuner picks fastest conv kernel for stable embedding batch shapes.
-    torch.backends.cudnn.benchmark = True
+    # ── PyTorch backend tuning ──────────────────────────────────────────────
+    #
+    # cudnn.benchmark=False: transformer models receive variable sequence lengths
+    # per batch; re-benchmarking on every new shape causes net slowdowns.
+    torch.backends.cudnn.benchmark = False
 
-    # Prefer flash_attention_2 (lower memory, faster on Blackwell); fall back to
-    # PyTorch built-in SDPA which also benefits from SM_120 hardware support.
-    _attn_impl = "sdpa"
-    try:
-        import flash_attn  # noqa: F401
-        _attn_impl = "flash_attention_2"
-        print("[mm_embed_service] flash_attn detected — using flash_attention_2", flush=True)
-    except ImportError:
-        print("[mm_embed_service] flash_attn not installed — using sdpa", flush=True)
+    # TF32 for residual FP32 ops (matmuls outside autocast scope).
+    # Uses set_float32_matmul_precision — the forward-compatible API that replaces
+    # torch.backends.cuda.matmul.allow_tf32, which is deprecated in PyTorch 2.9+.
+    torch.set_float32_matmul_precision("high")
 
+    # SDPA backend priority for Blackwell (RTX 5090/5080, SM_120):
+    #   cuDNN attention > Flash SDP > Memory-Efficient SDP > (math disabled)
+    # cuDNN 9 (bundled with PyTorch 2.7+ cu128) is specifically optimised for
+    # Blackwell and provides ~10% E2E improvement over Flash SDP alone.
+    # PyTorch PR #145602 added native sm_120 support to Flash and Mem-Efficient
+    # backends, so the external flash-attn package is not needed.
+    torch.backends.cuda.enable_cudnn_sdp(True)
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_math_sdp(False)   # unoptimised fallback; never needed
+
+    # ── Model load ─────────────────────────────────────────────────────────
     print(
         f"[mm_embed_service] Loading jina-clip-v2 from {model_path!r} "
-        f"on {_device} (bf16, {_attn_impl}) …",
+        f"on {_device} (bf16, sdpa) …",
         flush=True,
     )
+    # device_map streams weights directly from disk to GPU — no CPU staging copy.
+    # This sets low_cpu_mem_usage automatically, halving the peak RAM footprint.
+    # use_safetensors prefers model.safetensors over pytorch_model.bin (faster,
+    # no pickle deserialization).
     _model = AutoModel.from_pretrained(
         model_path,
         trust_remote_code=True,
         local_files_only=True,
-        low_cpu_mem_usage=True,
-        torch_dtype=_dtype,
-        attn_implementation=_attn_impl,
+        use_safetensors=True,
+        dtype=_dtype,
+        device_map={"": _device},
     )
-    _model = _model.to(_device).eval()
+    _model = _model.eval()
 
-    # torch.compile with reduce-overhead lowers Python dispatch and kernel-launch
-    # overhead significantly for repeated fixed-shape embedding batches.
-    # The first inference call after startup triggers JIT compilation (~20–60 s).
-    print("[mm_embed_service] Compiling model with torch.compile (reduce-overhead) …", flush=True)
-    _model = torch.compile(_model, mode="reduce-overhead", fullgraph=False)
+    # ── torch.compile ──────────────────────────────────────────────────────
+    # max-autotune-no-cudagraphs: benchmarks Triton tile configs to find the
+    # fastest matmul/attention kernel for our exact batch shapes (one-time cost
+    # at startup; cache persists across restarts via TORCHINDUCTOR_CACHE_DIR).
+    # "no-cudagraphs" variant avoids pytorch/pytorch#171672 where CUDA graphs
+    # are re-instantiated on every iteration rather than replayed, causing
+    # reduce-overhead / max-autotune to be slower than default on affected builds.
+    # fullgraph=False: jina-clip-v2 uses trust_remote_code custom Python paths
+    # (LoRA adapters, task instructions) that contain graph breaks; False is safe.
+    print("[mm_embed_service] Compiling model with torch.compile (max-autotune-no-cudagraphs) …", flush=True)
+    _model = torch.compile(_model, mode="max-autotune-no-cudagraphs", fullgraph=False)
 
-    # Warmup: run a dummy forward pass to trigger JIT compilation before the
-    # service is marked healthy, so the first real request is not delayed.
-    _device_type = _device.split(":")[0]
+    # ── Warmup ─────────────────────────────────────────────────────────────
+    # Triggers JIT compilation so the first real request is not delayed.
     print("[mm_embed_service] Running warmup inference (triggers JIT compilation) …", flush=True)
     with torch.inference_mode(), torch.autocast(_device_type, dtype=_dtype):
         _ = _model.encode_text(["warmup"])
@@ -136,11 +157,17 @@ def _normalize(tensor: torch.Tensor) -> torch.Tensor:
     return F.normalize(tensor.float(), dim=-1)
 
 
-def _to_embeddings(raw) -> list[list[float]]:
-    """Convert model output (numpy / tensor) to list[list[float]]."""
-    if not isinstance(raw, torch.Tensor):
-        raw = torch.tensor(raw, dtype=torch.float32)
-    return raw.cpu().tolist()
+def _to_float_tensor(raw: Any) -> torch.Tensor:
+    """Coerce model output (numpy array or tensor) to a float32 CPU tensor."""
+    if isinstance(raw, torch.Tensor):
+        return raw.float()
+    return torch.tensor(raw, dtype=torch.float32)
+
+
+def _ready_or_503() -> None:
+    """Raise 503 if the model has not finished loading yet."""
+    if not _loaded:
+        raise HTTPException(status_code=503, detail="Model is still loading. Retry shortly.")
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -154,6 +181,7 @@ def health() -> dict:
 
 @app.post("/embed/text", response_model=EmbedResponse)
 def embed_text(req: TextRequest) -> EmbedResponse:
+    _ready_or_503()
     if not req.texts:
         return EmbedResponse(embeddings=[])
     if len(req.texts) > _text_batch:
@@ -163,10 +191,9 @@ def embed_text(req: TextRequest) -> EmbedResponse:
                    "Split into smaller batches.",
         )
     try:
-        _device_type = _device.split(":")[0]
         with torch.inference_mode(), torch.autocast(_device_type, dtype=_dtype):
             raw = _model.encode_text(req.texts)
-        embs = torch.tensor(raw, dtype=torch.float32) if not isinstance(raw, torch.Tensor) else raw.float()
+        embs = _to_float_tensor(raw)
         if req.normalize:
             embs = _normalize(embs)
         embs = torch.nan_to_num(embs, nan=0.0)
@@ -177,6 +204,7 @@ def embed_text(req: TextRequest) -> EmbedResponse:
 
 @app.post("/embed/image", response_model=EmbedResponse)
 def embed_image(req: ImageRequest) -> EmbedResponse:
+    _ready_or_503()
     if not req.images_b64:
         return EmbedResponse(embeddings=[])
     if len(req.images_b64) > _image_batch:
@@ -186,16 +214,13 @@ def embed_image(req: ImageRequest) -> EmbedResponse:
                    "Split into smaller batches.",
         )
     try:
-        pil_images: list[Image.Image] = []
-        for b64 in req.images_b64:
-            img_bytes = base64.b64decode(b64)
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            pil_images.append(img)
-
-        _device_type = _device.split(":")[0]
+        pil_images: list[Image.Image] = [
+            Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+            for b64 in req.images_b64
+        ]
         with torch.inference_mode(), torch.autocast(_device_type, dtype=_dtype):
             raw = _model.encode_image(pil_images)
-        embs = torch.tensor(raw, dtype=torch.float32) if not isinstance(raw, torch.Tensor) else raw.float()
+        embs = _to_float_tensor(raw)
         if req.normalize:
             embs = _normalize(embs)
         embs = torch.nan_to_num(embs, nan=0.0)
