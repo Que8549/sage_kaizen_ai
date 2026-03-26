@@ -3,6 +3,10 @@
 python -m streamlit run ui_streamlit_server.py
 
 
+
+Do a code review and look for any code smells, dead code, etc. Then search the internet to verify that the remaining code and packages are appropiate for my rig and are optimal for the Sage Kaizen project.
+
+
 # Ingest Docs folder
 python.exe -m rag_v1.ingest.folder_ingest
 
