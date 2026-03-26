@@ -197,8 +197,8 @@ def build_sage_kaizen_mermaid(q5: Optional[LlamaServerInfo], q6: Optional[LlamaS
                 lines.append(f"split={_fmt(info.split_mode)}")
         return _mm_safe("<br/>".join(lines))
 
-    q5_label = node_label("GPU0 - Deep Reasoning", q5)
-    q6_label = node_label("GPU1 - Low-Latency Responses", q6)
+    q5_label = node_label("GPU1 (RTX 5080) - Fast / Low-Latency", q5)
+    q6_label = node_label("GPU0 (RTX 5090) - Architect / Deep Reasoning", q6)
 
     # Use quoted node labels to tolerate spaces, punctuation, and <br/>
     return f"""graph TD
@@ -277,10 +277,17 @@ def render_mermaid_with_exports(
       #out svg {{ max-width: 100% !important; height: auto !important; }}
     </style>
 
-    <script type=\"module\">
-      import mermaid from \"https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs\";
-
+    <script>
+      (async () => {{
       const graphDef = {diagram_js};
+
+      // Streamlit serves all static files as text/plain, which browsers reject for <script src>.
+      // Workaround: fetch as text, inject as inline script — no MIME check for inline scripts.
+      const _resp = await fetch(\"/app/static/mermaid.min.js\");
+      const _src = await _resp.text();
+      const _s = document.createElement(\"script\");
+      _s.textContent = _src;
+      document.head.appendChild(_s);
 
       mermaid.initialize({{
         startOnLoad: false,
@@ -357,30 +364,29 @@ def render_mermaid_with_exports(
         }}
       }}
 
-      window.addEventListener(\"DOMContentLoaded\", () => {{
-        document.getElementById(\"btnSvg\").addEventListener(\"click\", () => {{
-          const svg = window.__LAST_SVG__;
-          if (!svg) return;
-          downloadBlob(new Blob([svg], {{type:\"image/svg+xml;charset=utf-8\"}}), \"sage_kaizen_arch.svg\");
-        }});
+      document.getElementById(\"btnSvg\").addEventListener(\"click\", () => {{
+        const svg = window.__LAST_SVG__;
+        if (!svg) return;
+        downloadBlob(new Blob([svg], {{type:\"image/svg+xml;charset=utf-8\"}}), \"sage_kaizen_arch.svg\");
+      }});
 
-        document.getElementById(\"btnPng\").addEventListener(\"click\", async () => {{
-          const svg = window.__LAST_SVG__;
-          if (!svg) return;
-          try {{
-            const pngBlob = await svgToPng(svg, 2);
-            downloadBlob(pngBlob, \"sage_kaizen_arch.png\");
-          }} catch (e) {{
-            alert(\"PNG export failed: \" + e);
-          }}
-        }});
+      document.getElementById(\"btnPng\").addEventListener(\"click\", async () => {{
+        const svg = window.__LAST_SVG__;
+        if (!svg) return;
+        try {{
+          const pngBlob = await svgToPng(svg, 2);
+          downloadBlob(pngBlob, \"sage_kaizen_arch.png\");
+        }} catch (e) {{
+          alert(\"PNG export failed: \" + e);
+        }}
+      }});
 
-        document.getElementById(\"btnRerender\").addEventListener(\"click\", () => {{
-          render();
-        }});
-
+      document.getElementById(\"btnRerender\").addEventListener(\"click\", () => {{
         render();
       }});
+
+      render();
+      }})();
     </script>
   </head>
 

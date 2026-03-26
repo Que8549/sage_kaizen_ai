@@ -3,7 +3,7 @@
 # nvidia-smi
 
 import os
-# from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
@@ -14,14 +14,17 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 # laion/clap-htsat-unfused — ALREADY DOWNLOADED to E:/clap-htsat-unfused
 # Used by: rag_v1/media/clap_embed_service/app.py (audio embedding, port 8040)
 # Re-download if needed:
-# snapshot_download(
-#     repo_id = "laion/clap-htsat-unfused",
-#     local_dir = "E:/clap-htsat-unfused",
-#     max_workers=16,
-# )
+snapshot_download(
+    repo_id = "onnx-community/Kokoro-82M-v1.0-ONNX",
+    local_dir = "E:/Kokoro-82M-v1.0-ONNX",
+    # allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*",  "*UD-IQ1_M*",  "*UD-IQ1_S*", "*UD-Q6_K_XL*", "*mmproj*F16*"] 
+    # mmproj-*.gguf is the combined audio+vision encoder — required for multimodal inference.
+    # Only F16/BF16 mmproj files exist; no quantized mmproj is published by Unsloth.
+    max_workers=16,  # 8 = default
+)
 
 
-# allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*",  "*UD-IQ1_M*",  "*UD-IQ1_S*", "*UD-Q6_K_XL*", "*mmproj*F16*"] 
+
 
 # NousResearch/Hermes-4.3-36B-GGUF  https://huggingface.co/NousResearch/Hermes-4.3-36B-GGUF
 # ACE-Step 1.5 https://huggingface.co/ACE-Step/Ace-Step1.5

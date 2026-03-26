@@ -8,6 +8,22 @@ class EmbedClient:
         self.model = model
         self._client = httpx.Client(timeout=timeout_s)
 
+    def close(self) -> None:
+        """Close the underlying httpx.Client and release its connections."""
+        self._client.close()
+
+    def __enter__(self) -> "EmbedClient":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self._client.close()
+        except Exception:
+            pass
+
     def ping(self, timeout_s: float = 5.0) -> bool:
         """Return True if the embedding server is reachable, False otherwise."""
         try:

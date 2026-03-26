@@ -15,6 +15,8 @@ Public API (unchanged from the bat-based version):
 """
 from __future__ import annotations
 
+import atexit
+import functools
 import os
 import re
 import subprocess
@@ -22,10 +24,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
-
 import yaml
+
+from openai_client import HttpTimeouts, health_check
 
 
 # ---------------------------
@@ -51,6 +52,35 @@ _FATAL_MARKERS = (
     "EXE not found",
     "MODEL not found",
 )
+
+# ──────────────────────────────────────────────────────────────────────────── #
+# Spawned-process registry + atexit cleanup                                     #
+# ──────────────────────────────────────────────────────────────────────────── #
+# llama-server.exe is launched with CREATE_NEW_PROCESS_GROUP so the hidden
+# console window is never shown and Ctrl+C from the parent console is not
+# forwarded to the child (which is in its own process group).  As a result the
+# servers must be explicitly terminated when the Streamlit process exits.
+#
+# Strategy: track every Popen object returned by start_server_from_config() in
+# _spawned_procs and register a single atexit handler to terminate them all.
+# proc.poll() != None means the server already stopped (normal stop or restart),
+# so we skip it safely.
+
+_spawned_procs: list[subprocess.Popen] = []
+
+
+def _kill_spawned_servers() -> None:
+    """atexit handler — terminate all llama-server processes started this session."""
+    for proc in _spawned_procs:
+        try:
+            if proc.poll() is None:   # still running
+                proc.terminate()
+        except Exception:
+            pass
+
+
+atexit.register(_kill_spawned_servers)
+
 
 # ──────────────────────────────────────────────────────────────────────────── #
 # Flag-type tables for _build_argv()                                            #
@@ -147,17 +177,8 @@ class ManagedServers:
 
     @classmethod
     def from_yaml(cls, path: Path = _BRAINS_YAML) -> "ManagedServers":
-        """Load all three brain configs from the YAML file."""
-        if not path.exists():
-            raise FileNotFoundError(
-                f"brains.yaml not found: {path}\n"
-                "Expected at config/brains/brains.yaml relative to project root."
-            )
-        return cls(
-            embed=_load_brain_config(path, "embed"),
-            fast=_load_brain_config(path, "fast"),
-            architect=_load_brain_config(path, "architect"),
-        )
+        """Load all three brain configs from YAML; result is cached for the process lifetime."""
+        return _load_managed_servers(path)
 
     # ── Convenience properties (keep call sites in ensure_* functions clean) ──
 
@@ -202,6 +223,26 @@ class ManagedServers:
         return self.architect.startup_timeout_s
 
 
+@functools.lru_cache(maxsize=None)
+def _load_managed_servers(path: Path) -> ManagedServers:
+    """Parse brains.yaml once and cache the result for the process lifetime.
+
+    Called exclusively by ManagedServers.from_yaml().  Using lru_cache here
+    means repeated calls (e.g. on every Streamlit rerun) skip the file read
+    and YAML parse entirely after the first call.
+    """
+    if not path.exists():
+        raise FileNotFoundError(
+            f"brains.yaml not found: {path}\n"
+            "Expected at config/brains/brains.yaml relative to project root."
+        )
+    return ManagedServers(
+        embed=_load_brain_config(path, "embed"),
+        fast=_load_brain_config(path, "fast"),
+        architect=_load_brain_config(path, "architect"),
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────── #
 # Windows process helpers                                                       #
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -244,23 +285,9 @@ def stop_server_on_port(port: int) -> bool:
 # HTTP readiness                                                                 #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def _http_get_status(url: str, timeout_s: float) -> int:
-    req = Request(url, method="GET")
-    try:
-        with urlopen(req, timeout=timeout_s) as resp:
-            return int(getattr(resp, "status", 0) or 0)
-    except HTTPError as e:
-        return int(getattr(e, "code", 0) or 0)
-    except (URLError, Exception):
-        return 0
-
-
 def _http_ready(base_url: str, timeout_s: float = 1.0) -> Tuple[bool, str]:
-    """Probe /health, /v1/health, /v1/models, /props in order."""
-    for ep in ("/health", "/v1/health", "/v1/models", "/props"):
-        if _http_get_status(base_url + ep, timeout_s=timeout_s) == 200:
-            return True, f"ready via {ep}"
-    return False, "not ready"
+    """Probe /health, /v1/health, /v1/models, /props — delegates to openai_client.health_check()."""
+    return health_check(base_url, timeouts=HttpTimeouts(connect_s=timeout_s, read_s=timeout_s))
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
@@ -387,10 +414,6 @@ def start_server_from_config(brain: BrainConfig) -> Tuple[bool, str]:
     ).encode("utf-8", errors="ignore")
 
     try:
-        with open(brain.log, "ab", buffering=0) as fh:
-            fh.write(header)
-            fh.flush()
-
         creationflags = 0
         if os.name == "nt":
             creationflags = (
@@ -398,15 +421,28 @@ def start_server_from_config(brain: BrainConfig) -> Tuple[bool, str]:
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             )
 
-        subprocess.Popen(
-            argv,
-            cwd=str(_PROJECT_ROOT),
-            stdout=subprocess.DEVNULL,   # server logs via --log-file
-            stderr=subprocess.DEVNULL,   # server logs via --log-file
-            stdin=subprocess.DEVNULL,
-            creationflags=creationflags,
-            close_fds=False,
-        )
+        # Open the log once: write the startup header, then keep it open so
+        # the child inherits the fd for stderr.  Early CUDA initialisation
+        # messages (ggml_cuda_init, cudaMalloc failures) are written to stderr
+        # before llama-server's own --log-file logger is ready; capturing them
+        # here makes startup failures diagnosable without --verbose flags.
+        log_fh = open(brain.log, "ab", buffering=0)
+        log_fh.write(header)
+        log_fh.flush()
+        try:
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(_PROJECT_ROOT),
+                stdout=subprocess.DEVNULL,  # server writes chat via --log-file
+                stderr=log_fh,              # capture early CUDA / arg errors
+                stdin=subprocess.DEVNULL,
+                creationflags=creationflags,
+                close_fds=False,
+            )
+        finally:
+            log_fh.close()  # parent closes its copy; child keeps its own fd
+
+        _spawned_procs.append(proc)
     except Exception as e:
         return False, f"Failed to spawn llama-server: {e}"
 

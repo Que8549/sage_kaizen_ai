@@ -1,3 +1,5 @@
+How could I build a continuously learning AI model that runs locally? ignore the necessary compute resources and focus on the software architecture. The AI model should be able to ask questions to learn and search the internet for new information
+
 🌌 Benchmark A — Historical Reasoning
 What is the earliest known civilization to systematically study the stars, and how did their astronomical observations influence their religious practices and political authority? Provide historical examples and explain causal relationships.
 
