@@ -74,7 +74,20 @@ python -m rag_v1.wiki.wiki_ingest --root "I:/llm_data/wikipedia_maxi_2025_08/A"
 
 
 
+Both projects are checkpointed. Here's the summary:
 
+Main app — F:\Projects\sage_kaizen_ai → tag stable-baseline-2026-03-26 at commit a969140
+Voice app — F:\Projects\sage_kaizen_ai_voice → tag stable-baseline-2026-03-26 at commit 7eac600
+
+To revert either project to this state at any time:
+
+
+# Full reset of current branch to baseline:
+git reset --hard stable-baseline-2026-03-26
+
+# Or inspect without changing anything:
+git checkout stable-baseline-2026-03-26
+The checkpoint and revert commands are saved to memory and will be recalled in future sessions if you ask to "revert to baseline."
 
   
   

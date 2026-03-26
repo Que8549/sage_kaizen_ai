@@ -5,6 +5,7 @@ import io
 import logging
 import queue
 import re
+import threading
 import time
 from typing import List, Optional, Tuple
 from uuid import uuid4
@@ -276,6 +277,30 @@ def _get_voice_bridge() -> VoiceBridge:
 
 _voice_bridge = _get_voice_bridge()
 
+
+@st.cache_resource
+def _auto_start_servers() -> None:
+    """
+    Start both brains (embed → Q5, Q6) in background threads at app load.
+
+    Uses @st.cache_resource so this runs exactly once per Streamlit process
+    regardless of how many browser tabs or reruns occur.  Both servers start
+    in parallel: Q5 waits for embed first (ensure_q5_running handles that),
+    while Q6 starts concurrently so the heavier ARCHITECT brain is ready as
+    soon as possible.
+    """
+    from server_manager import ManagedServers, ensure_q5_running, ensure_q6_running
+    servers = ManagedServers.from_yaml()
+    threading.Thread(
+        target=ensure_q5_running, args=(servers,), daemon=True, name="autostart_q5"
+    ).start()
+    threading.Thread(
+        target=ensure_q6_running, args=(servers,), daemon=True, name="autostart_q6"
+    ).start()
+
+
+_auto_start_servers()
+
 timeouts        = HttpTimeouts(connect_s=CONFIG.connect_timeout_s, read_s=CONFIG.read_timeout_s)
 timeouts_status = HttpTimeouts(connect_s=0.5, read_s=1.0)
 
@@ -357,28 +382,12 @@ with st.sidebar:
         q6_model_id=st.session_state.q6_model_id,
     )
 
-    colA, colB = st.columns(2)
-    with colA:
-        if st.button("Start servers"):
-            with st.status("Starting Embed \u2192 Q5 (Omni Brain)\u2026", expanded=True) as s:
-                s.write("Waiting for **Omni Brain** (watch logs/q5_server.log)\u2026")
-                ok, msg = session.ensure_q5_ready()
-                if ok:
-                    s.write("\u2705 **Omni Brain** loaded.")
-                    s.update(label="Q5 ready \u2705", state="complete")
-                    st.success(msg)
-                    st.info("Q6 (Architect) starts automatically when a turn escalates or Deep mode is on.")
-                else:
-                    s.update(label="Failed to start Q5 \u274C", state="error")
-                    st.error(msg)
-
-    with colB:
-        if st.button("Stop servers"):
-            ok5, ok6, ok_e = session.stop_all()
-            if ok5 and ok6 and ok_e:
-                st.success("Stopped (or already stopped).")
-            else:
-                st.warning("Tried to stop, but one or more servers may still be running.")
+    if st.button("Stop servers"):
+        ok5, ok6, ok_e = session.stop_all()
+        if ok5 and ok6 and ok_e:
+            st.success("Stopped (or already stopped).")
+        else:
+            st.warning("Tried to stop, but one or more servers may still be running.")
 
     ok5, d5 = session.health_q5(timeouts_status)
     ok6, d6 = session.health_q6(timeouts_status)
