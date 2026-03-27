@@ -243,7 +243,7 @@ wiki_embed:
   # ── Ingest job settings (read by wiki_ingest.py) ───────────────────────
   ingest:
     # Root directory of the extracted Wikipedia ZIM dump (from zim_dump.py)
-    root: "I:/llm_data/wikipedia_maxi_2025_08"
+    root: "H:/llm_wiki_data/wikipedia_maxi_2025_08"
 
     # Text chunking parameters
     chunk_chars: 1200   # target chunk size in characters

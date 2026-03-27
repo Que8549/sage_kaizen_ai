@@ -42,7 +42,7 @@ Thread-safety invariants:
 """
 from __future__ import annotations
 
-import json
+import msgspec.json as _json
 import queue
 import re
 import subprocess
@@ -305,7 +305,7 @@ class VoiceBridge:
         _LOG.info("VoiceBridge: PULL bound on %s", _ADDR_TRANSCRIPT)
         while True:
             try:
-                msg   = json.loads(sock.recv())
+                msg   = _json.decode(sock.recv())
                 mtype = msg.get("type")
                 if mtype == "voice_ready":
                     _LOG.info("Voice app reported ready")
@@ -326,7 +326,7 @@ class VoiceBridge:
         _LOG.info("VoiceBridge: PULL bound on %s", _ADDR_INTERRUPT)
         while True:
             try:
-                msg = json.loads(sock.recv())
+                msg = _json.decode(sock.recv())
                 if msg.get("type") == "interrupt":
                     _LOG.info(
                         "Barge-in signal (session=%.8s)",
@@ -356,7 +356,7 @@ class VoiceBridge:
             "persona":    persona,
         }
         try:
-            self._pub.send(json.dumps(msg).encode(), zmq.NOBLOCK)
+            self._pub.send(_json.encode(msg), zmq.NOBLOCK)
         except zmq.ZMQError:
             _LOG.warning("VoiceBridge: failed to send session_start (voice app down?)")
 
@@ -371,11 +371,11 @@ class VoiceBridge:
             return
         try:
             self._pub.send(
-                json.dumps({
+                _json.encode({
                     "type":       "token",
                     "session_id": session_id,
                     "text":       filtered,
-                }).encode(),
+                }),
                 zmq.NOBLOCK,
             )
         except zmq.ZMQError:
@@ -390,11 +390,11 @@ class VoiceBridge:
         if remaining:
             try:
                 self._pub.send(
-                    json.dumps({
+                    _json.encode({
                         "type":       "token",
                         "session_id": session_id,
                         "text":       remaining,
-                    }).encode(),
+                    }),
                     zmq.NOBLOCK,
                 )
             except zmq.ZMQError:
@@ -402,10 +402,10 @@ class VoiceBridge:
 
         try:
             self._pub.send(
-                json.dumps({
+                _json.encode({
                     "type":       "turn_done",
                     "session_id": session_id,
-                }).encode(),
+                }),
                 zmq.NOBLOCK,
             )
         except zmq.ZMQError:

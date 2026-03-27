@@ -18,7 +18,8 @@ CODE_HINTS = ("code", "python", "c#", "typescript", "debug", "stack trace", "err
 
 FAST_HINTS = ("summarize", "tl;dr", "quick", "brief", "short", "bullet", "one sentence", "in one paragraph")
 
-_WORD = r"(?:^|[\s\W]){w}(?:$|[\s\W])"
+_VS_RE     = re.compile(r"(?:^|[\s\W])vs(?:$|[\s\W])")
+_VERSUS_RE = re.compile(r"(?:^|[\s\W])versus(?:$|[\s\W])")
 
 _LOG = get_logger("sage_kaizen.router")
 
@@ -36,10 +37,6 @@ def _log_decision(decision: "RouteDecision", user_text: str) -> None:
         "route | brain=%s | score=%s | reasons=[%s] | input_chars=%s",
         decision.brain, decision.score, reasons, len(user_text)
     )
-
-
-def _has_word(txt: str, word: str) -> bool:
-    return re.search(_WORD.format(w=re.escape(word)), txt) is not None
 
 
 def route(
@@ -108,7 +105,7 @@ def route(
         score += 1
         reasons.append("multi_part_marker")
 
-    if _has_word(txt, "vs") or _has_word(txt, "versus"):
+    if _VS_RE.search(txt) or _VERSUS_RE.search(txt):
         score += 1
         reasons.append("comparison_marker")
 

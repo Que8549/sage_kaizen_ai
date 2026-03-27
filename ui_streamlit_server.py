@@ -304,6 +304,22 @@ _auto_start_servers()
 timeouts        = HttpTimeouts(connect_s=CONFIG.connect_timeout_s, read_s=CONFIG.read_timeout_s)
 timeouts_status = HttpTimeouts(connect_s=0.5, read_s=1.0)
 
+# ── Health-check TTL cache (2 s) ─────────────────────────────────────────── #
+# health_q5/q6 fire on every Streamlit rerun; gate with a 2 s module-level
+# cache to avoid hammering llama-server on every keystroke / widget click.
+_HEALTH_TTL = 2.0
+_health_cache: dict = {}  # key → (result_tuple, expiry_float)
+
+
+def _cached_health(key: str, fn) -> tuple:
+    entry = _health_cache.get(key)
+    now = time.monotonic()
+    if entry and now < entry[1]:
+        return entry[0]
+    result = fn()
+    _health_cache[key] = (result, now + _HEALTH_TTL)
+    return result
+
 # ─────────────────────────────────────────────────────────────────────────── #
 # Session state                                                                #
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -389,8 +405,8 @@ with st.sidebar:
         else:
             st.warning("Tried to stop, but one or more servers may still be running.")
 
-    ok5, d5 = session.health_q5(timeouts_status)
-    ok6, d6 = session.health_q6(timeouts_status)
+    ok5, d5 = _cached_health("q5", lambda: session.health_q5(timeouts_status))
+    ok6, d6 = _cached_health("q6", lambda: session.health_q6(timeouts_status))
     st.caption(f"Q5 (Omni): {'✅' if ok5 else '❌'} {d5}")
     st.caption(f"Q6 (Architect): {'✅' if ok6 else '❌'} {d6}")
     _v_icon = "🎙" if _voice_bridge.voice_ready else "🔄"
@@ -687,7 +703,6 @@ if user_text:
         route_update_caption = st.empty()  # shows if parallel LLM route refines brain
 
         live  = st.empty()
-        acc: List[str] = []
         start = time.time()
 
         with st.spinner(f"Thinking\u2026 ({brain_label})"):
@@ -751,14 +766,16 @@ if user_text:
 
             voice_session_id = str(uuid4())
             _voice_bridge.start_turn(voice_session_id, decision.brain)
+            full_streamed = ""
             try:
-                for piece in chat_svc.stream_response(messages, decision, cfg):
-                    if _voice_bridge.barge_in_event.is_set():
-                        _voice_bridge.barge_in_event.clear()
-                        break
-                    acc.append(piece)
-                    live.markdown("".join(acc))
-                    _voice_bridge.publish_token(voice_session_id, piece)
+                def _voice_stream():
+                    for piece in chat_svc.stream_response(messages, decision, cfg):
+                        if _voice_bridge.barge_in_event.is_set():
+                            _voice_bridge.barge_in_event.clear()
+                            return
+                        _voice_bridge.publish_token(voice_session_id, piece)
+                        yield piece
+                full_streamed = live.write_stream(_voice_stream()) or ""
             except LlamaServerError as e:
                 live.error(str(e))
             except Exception as e:
@@ -768,7 +785,7 @@ if user_text:
 
         elapsed  = time.time() - start
         st.session_state.last_thinking_time = elapsed
-        final    = "".join(acc).strip()
+        final    = full_streamed.strip()
         _thinking, _clean = _parse_response(final)
         _sources_md = format_sources_markdown(rag_sources)
         if _sources_md:

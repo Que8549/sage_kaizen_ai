@@ -25,7 +25,8 @@ never crashes the app at startup.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any, Dict, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from rag_v1.config.rag_settings import RagSettings
 from rag_v1.runtime.router_integration import RagInjector, _prepend_context
@@ -207,3 +208,91 @@ def apply_wiki_rag(
     except Exception:
         _LOG.exception("Wiki RAG injection failed; continuing without wiki context")
         return messages, []
+
+
+def _fetch_wiki_result(
+    user_text: str,
+    decision: Any,
+    wiki_enabled: bool | None = None,
+) -> tuple:
+    """
+    Run the wiki DB query and return (chunks_text, wiki_images) without injecting
+    into messages.  Designed to run concurrently with apply_rag().
+
+    Returns:
+        (ctx_block, wiki_images) where ctx_block is the formatted <wiki_context>
+        string (or "" if nothing found) and wiki_images is list[WikiImage].
+    """
+    enabled = env_bool("SAGE_WIKI_RAG_ENABLED", default=True) if wiki_enabled is None else wiki_enabled
+    if not enabled or not user_text:
+        return "", []
+
+    min_chars = env_int("SAGE_RAG_MIN_CHARS", default=12)
+    if len(user_text.strip()) < min_chars:
+        return "", []
+
+    retriever = _get_wiki_retriever()
+    if retriever is None:
+        return "", []
+
+    fast_k = env_int("SAGE_RAG_FAST_TOPK", default=4)
+    arch_k = env_int("SAGE_RAG_ARCH_TOPK", default=10)
+    top_k  = fast_k if decision.brain == "FAST" else arch_k
+
+    try:
+        result = retriever.search(user_text, top_k_chunks=top_k, top_images=3)
+        if result.empty or not result.chunks:
+            return "", []
+
+        lines: List[str] = []
+        for c in result.chunks:
+            section = " > ".join(c.section_path) if c.section_path else "Introduction"
+            lines.append(f"[{c.title} / {section} | score={c.score:.3f}]\n{c.text}")
+        ctx_block = "\n\n---\n\n".join(lines)
+
+        _LOG.info(
+            "wiki_rag | chunks=%d images=%d | query_chars=%d",
+            len(result.chunks), len(result.images), len(user_text),
+        )
+        return ctx_block, result.images
+
+    except Exception:
+        _LOG.exception("Wiki RAG fetch failed; continuing without wiki context")
+        return "", []
+
+
+def apply_rag_and_wiki_parallel(
+    messages: List[Dict[str, Any]],
+    user_text: str,
+    decision: Any,
+    wiki_enabled: bool | None = None,
+) -> Tuple[List[Dict[str, Any]], list, list]:
+    """
+    Run document RAG and wiki RAG concurrently, then inject both into messages.
+
+    apply_rag() and _fetch_wiki_result() both read from their respective DBs
+    independently — they can safely run in parallel.  Wiki injection is applied
+    after apply_rag() completes (it injects into the already-enriched messages).
+
+    Returns:
+        (messages, rag_sources, wiki_images)
+    """
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="rag_par") as pool:
+        rag_fut  = pool.submit(apply_rag, messages, user_text, decision)
+        wiki_fut = pool.submit(_fetch_wiki_result, user_text, decision, wiki_enabled)
+
+        rag_messages, rag_sources = rag_fut.result()
+        ctx_block, wiki_images    = wiki_fut.result()
+
+    if not ctx_block:
+        return rag_messages, rag_sources, []
+
+    # Inject wiki context into the already-RAG-enriched messages
+    out = list(rag_messages)
+    for i in reversed(range(len(out))):
+        if out[i].get("role") == "user":
+            prefix = f"<wiki_context>\n{ctx_block}\n</wiki_context>\n\n"
+            out[i] = {**out[i], "content": _prepend_context(out[i]["content"], prefix)}
+            break
+
+    return out, rag_sources, wiki_images
