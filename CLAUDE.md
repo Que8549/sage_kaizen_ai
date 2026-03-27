@@ -32,14 +32,33 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 
 ### Core modules (v1)
 - **Dual brains** (two llama-server instances):
-  - FAST brain (default): Qwen2.5-14B-Instruct Q6_K (port 8011, RTX 5080/CUDA1)
-  - ARCHITECT brain (on demand): Qwen3-32B Q6_K (port 8012, RTX 5090/CUDA0)
+  - FAST brain (default): `Qwen2.5-Omni-7B-Q8_0` (port 8011, RTX 5080/CUDA1) — multimodal: text + image + audio input via mmproj encoder
+  - ARCHITECT brain (on demand): `Qwen3.5-27B-Q6_K` (port 8012, RTX 5090/CUDA0) — 64K context, reasoning mode (`<think>` tokens), hybrid DeltaNet+attention
 - **Router**: selects brain, applies templates, escalates to ARCHITECT when needed
 - **Streamlit UI**: chat interface, status, templates visible, debugging-friendly
 - **Pi Agent Transport**: ZeroMQ messaging to Raspberry Pi agents (device orchestrator)
-- **RAG v1**: ingest (folder + RSS + web) into a vector store; query-time retrieval
-- **Docs Generator v1**: repo scan → README + Mermaid diagrams
-- Review config > brains > brains.yaml for latest AI models being used
+- **RAG v1**: ingest (folder + RSS + web) into PostgreSQL + pgvector; query-time retrieval
+  - `rag_v1/wiki/` — Wikipedia multimodal RAG (jina-clip-v2 embeddings, text + image)
+  - `rag_v1/media/` — Cross-modal ingest: images (jina-clip-v2, 1024-dim) + audio (CLAP, 512-dim)
+  - `rag_v1/embed/` — BGE-M3 embed client (wraps port 8020)
+  - `rag_v1/retrieve/` — retriever + citation formatting
+- **Docs Generator v1**: repo scan → README + Mermaid diagrams (planned)
+- Review `config/brains/brains.yaml` for latest AI models and all server settings
+
+### Service / Port Inventory
+| Service | Model | Port | GPU | Purpose |
+|---------|-------|------|-----|---------|
+| FAST brain | Qwen2.5-Omni-7B-Q8_0 | 8011 | CUDA1 (5080) | Multimodal chat |
+| ARCHITECT brain | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (5090) | Deep reasoning |
+| BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA0 (5090) | RAG text embeddings (1024-dim) |
+| Wiki embed (jina-clip-v2) | jina-clip-v2 | 8031 | CUDA0 (5090) | Wikipedia multimodal embeddings (1024-dim) |
+| CLAP embed | clap-htsat-unfused | 8040 | CUDA1 (5080) | Audio embeddings (512-dim) |
+
+### Supporting modules (root-level)
+- `mermaid_streamlit.py` — Mermaid diagram detection and rendering in the chat UI
+- `sk_logging.py` — centralized rotating log configuration
+- `pg_settings.py` — Pydantic BaseSettings for PostgreSQL DSN (feedback dataset DB)
+- `voice_bridge.py` — ZMQ bridge binding ports 5790/5791/5792 for the voice app
 
 ### User-facing behaviors
 - Creative writing (stories, poems)
@@ -115,32 +134,33 @@ User rig also known as "my rig":
 This section is the navigation hub. When uncertain, start with **01-ARCHITECTURE**.
 
 ### Architecture + Patterns
-- `docs/01-ARCHITECTURE.md` — system overview, data/control flow, module boundaries
-- `docs/02-ARCH-PATTERNS.md` — patterns used (dual brain, tool router, agent transport, RAG)
-- `docs/03-DECISIONS/` — ADRs (architecture decision records)
+- `docs/01-ARCHITECTURE.md` — system overview, data/control flow, module boundaries ✓
+- `docs/02-ARCH-PATTERNS.md` — patterns used (dual brain, tool router, agent transport, RAG) ✓
+- `docs/03-DECISIONS/` — ADRs (architecture decision records) ✓
 
-### Runbooks + Operations
+### Runbooks + Operations (planned — not yet created)
 - `docs/10-RUNBOOKS/01-LLAMA-SERVERS.md` — starting/stopping, logs, flags, ports
 - `docs/10-RUNBOOKS/02-STREAMLIT-UI.md` — UI troubleshooting + state model
 - `docs/10-RUNBOOKS/03-RAG-INGEST.md` — ingest idempotency, hashing, batching
 - `docs/10-RUNBOOKS/04-PI-AGENTS.md` — ZeroMQ schema, retries, safety
 
-### Prompting + Templates
+### Prompting + Templates (planned — not yet created)
 - `docs/20-PROMPTS.md` — prompt library overview, template keys, escalation rules
 
-### Testing + Quality
+### Testing + Quality (planned — not yet created)
 - `docs/30-QUALITY.md` — typing, linting, smoke tests, performance checks
 
-### Contribution Guides
+### Contribution Guides (planned — not yet created)
 - `docs/40-CONTRIBUTING.md` — PR checklist, commit hygiene, how to add modules safely
 
 ---
 
 ## 8) If You’re a Coding Agent: Start Here
-1) Read `docs/01-ARCHITECTURE.md`  
-2) Read `docs/10-RUNBOOKS/01-LLAMA-SERVERS.md`  
-3) Read `AGENTS.md`  
-4) Only then propose changes
+1) Read `docs/01-ARCHITECTURE.md`
+2) Read `docs/10-RUNBOOKS/01-LLAMA-SERVERS.md`
+3) Read `AGENTS.md`
+4) **Review recent git history** — run `git log --oneline -30` and inspect relevant diffs before proposing changes
+5) Only then propose changes
 
 ---
 
@@ -149,6 +169,20 @@ This section is the navigation hub. When uncertain, start with **01-ARCHITECTURE
 - When adding new features, prefer adding a module rather than tangling existing modules.
 - If a fact is uncertain (flags, versions, APIs), check local `--help` output or project docs.
 - For fine tuning AI models using llama-server refer to local `--help` or https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md.
+
+### Review Git History Before Implementing
+Before adding or reinstating any package, library, or approach, run:
+```
+git log --oneline -30
+git log --all --oneline --grep="<keyword>"
+git show <commit>
+```
+Past commits document what was tried and abandoned. Key known failures in this repo:
+- **`flash_attn`** — present in `requirements.txt` as a local path reference but intentionally non-functional at runtime for Python-level code. SM_120 (Blackwell, RTX 5090/5080) is unsupported by flash-attn 2.x/3.x/4.x on Windows; `flash_attn.ops.triton.rotary` requires the OpenAI Triton compiler (Linux-only). The llama-server `--flash-attn` flag is separate and works correctly (handled by the C++ runtime, not Python). For Python inference code use PyTorch SDPA (`torch.nn.functional.scaled_dot_product_attention`) with cuDNN SDP backend (`torch.backends.cuda.enable_cudnn_sdp(True)`).
+- **`cmd.exe` for llama-server** — never use; see Non-Negotiable Invariants.
+- **`stdout/stderr` redirection for llama-server** — never use; always `--log-file`.
+
+If a commit message says "reverted", "removed", "uninstalled", or describes a failure, read it before reimplementing the same approach.
 
 ---
 
