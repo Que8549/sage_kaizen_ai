@@ -73,7 +73,7 @@ def exclude_file(path: Path) -> bool:
 def main() -> None:
     cfg = RagSettings()
 
-    folder = os.environ.get("SAGE_RAG_INGEST_DIR", r"F:\Projects\sage_kaizen_ai\docs")
+    folder = os.environ.get("SAGE_RAG_INGEST_DIR", r"H:\llm_docs")
     root = Path(folder).resolve()
     print(f"Ingesting from: {root}")
 
