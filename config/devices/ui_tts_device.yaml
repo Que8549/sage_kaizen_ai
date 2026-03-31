@@ -83,7 +83,7 @@ The tool layer is optional per request.
 ## 6.1 RAG Module
 
 Components:
-- folder_ingest.py
+- ingest_docs.py
 - rss_ingest.py
 - web_ingest.py
 - ingest_utils.py (hashing + source ID logic)
