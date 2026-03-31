@@ -171,6 +171,12 @@ class WikiRetriever:
         # (model load failures, CUDA errors, import errors) are captured.
         self._embed_log.parent.mkdir(parents=True, exist_ok=True)
         log_fh = open(self._embed_log, "ab", buffering=0)
+        # Forward WIKI_EMBED_VERBOSE to the subprocess so the verbosity setting
+        # propagates from the parent process.  If the parent has not set it,
+        # the subprocess defaults to quiet mode (no tqdm bars, no access logs).
+        env = os.environ.copy()
+        if "WIKI_EMBED_VERBOSE" not in env:
+            env["WIKI_EMBED_VERBOSE"] = "0"
         try:
             # The service reads host/port/device from brains.yaml at startup.
             # cwd=_PROJECT_ROOT ensures rag_v1 is importable as a package.
@@ -179,6 +185,7 @@ class WikiRetriever:
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,
                 cwd=str(_PROJECT_ROOT),
+                env=env,
             )
         finally:
             log_fh.close()  # parent closes its copy; child keeps its own fd

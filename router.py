@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
-from typing import List
+from typing import List, Tuple
 
 from openai_client import HttpTimeouts, stream_chat_completions
 from sk_logging import get_logger
@@ -11,7 +11,7 @@ DEPTH_HINTS = (
     "explain", "analyze", "compare", "why", "how", "history", "philosophy", "theology",
     "deep", "in depth", "detailed", "step-by-step", "teach", "tutor", "architecture",
     "design", "tradeoff", "pros and cons", "evaluate", "optimize", "tune", "take time to think",
-    "double check your answer", "religious", "religion", "psychology", "philosophy", 
+    "double check your answer", "religious", "religion", "psychology", "philosophy",
 )
 
 CODE_HINTS = ("code", "python", "c#", "typescript", "debug", "stack trace", "error", "traceback", "exception")
@@ -21,6 +21,42 @@ FAST_HINTS = ("summarize", "tl;dr", "quick", "brief", "short", "bullet", "one se
 _VS_RE     = re.compile(r"(?:^|[\s\W])vs(?:$|[\s\W])")
 _VERSUS_RE = re.compile(r"(?:^|[\s\W])versus(?:$|[\s\W])")
 
+# ---------------------------------------------------------------------------
+# Search detection — temporal keywords and explicit search intent
+# ---------------------------------------------------------------------------
+
+# Temporal phrases that strongly imply a need for live/current information.
+# Intentionally conservative to avoid false positives on common words like
+# "today I want to learn..." (no search needed) vs "what happened today" (search needed).
+_SEARCH_TEMPORAL_HINTS: Tuple[str, ...] = (
+    "what happened today", "today's news", "latest news", "breaking news",
+    "current events", "right now", "this week's", "this month's",
+    "just announced", "recently announced", "just released", "newly released",
+    "trending now", "live score", "live results", "stock price", "current price",
+    "today's weather", "weather forecast",
+)
+
+# Explicit search-intent phrases — user is clearly asking for a web search.
+_SEARCH_INTENT_HINTS: Tuple[str, ...] = (
+    "search for", "search the web", "search online", "find online",
+    "look up online", "google that", "find me the latest",
+    "what is the latest", "what are the latest", "is there news about",
+    "any news on", "any updates on", "what's happening with",
+)
+
+# Keyword → category mapping for category inference.
+# Only maps when the keyword is specific enough to imply a category.
+_CATEGORY_KEYWORDS: dict[str, Tuple[str, ...]] = {
+    "news":       ("news", "headlines", "breaking", "politics", "election",
+                   "current events", "latest events"),
+    "science":    ("arxiv", "research paper", "scientific study", "journal article",
+                   "nasa discovery", "new study", "new research"),
+    "technology": ("tech news", "software release", "github release", "hardware release",
+                   "ai news", "product launch", "new update", "new version released"),
+}
+
+_DEFAULT_SEARCH_CATEGORIES: Tuple[str, ...] = ("general", "news")
+
 _LOG = get_logger("sage_kaizen.router")
 
 
@@ -29,14 +65,48 @@ class RouteDecision:
     brain: str                 # "FAST" (5080) or "ARCHITECT" (5090)
     reasons: List[str]
     score: int
+    needs_search: bool = False                      # True → run live web search this turn
+    search_categories: Tuple[str, ...] = field(default_factory=tuple)  # SearXNG categories to query
 
 
 def _log_decision(decision: "RouteDecision", user_text: str) -> None:
     reasons = ",".join(decision.reasons[:8]) if decision.reasons else ""
     _LOG.info(
-        "route | brain=%s | score=%s | reasons=[%s] | input_chars=%s",
-        decision.brain, decision.score, reasons, len(user_text)
+        "route | brain=%s | score=%s | needs_search=%s | categories=%s | reasons=[%s] | input_chars=%s",
+        decision.brain, decision.score, decision.needs_search,
+        list(decision.search_categories), reasons, len(user_text),
     )
+
+
+def _detect_search(txt: str) -> Tuple[bool, Tuple[str, ...]]:
+    """
+    Heuristic: decide whether this query needs live web data and which
+    SearXNG categories to query.
+
+    Returns (needs_search, search_categories).
+    Conservative by design — only triggers on clear signals to avoid
+    unnecessary latency on every turn.
+    """
+    for phrase in _SEARCH_TEMPORAL_HINTS:
+        if phrase in txt:
+            categories = _infer_categories(txt)
+            return True, categories
+
+    for phrase in _SEARCH_INTENT_HINTS:
+        if phrase in txt:
+            categories = _infer_categories(txt)
+            return True, categories
+
+    return False, ()
+
+
+def _infer_categories(txt: str) -> Tuple[str, ...]:
+    """Map query text to the most relevant SearXNG categories."""
+    cats: list[str] = []
+    for cat, keywords in _CATEGORY_KEYWORDS.items():
+        if any(kw in txt for kw in keywords):
+            cats.append(cat)
+    return tuple(cats) if cats else _DEFAULT_SEARCH_CATEGORIES
 
 
 def route(
@@ -69,6 +139,11 @@ def route(
     txt = user_text.lower()
     score = 0
     reasons: List[str] = []
+
+    # Live-search detection (independent of brain routing)
+    needs_search, search_categories = _detect_search(txt)
+    if needs_search:
+        reasons.append("search:live_data")
 
     # Length heuristics
     n = len(txt)
@@ -118,11 +193,23 @@ def route(
 
     # Final threshold
     if score >= 3:
-        decision = RouteDecision(brain="ARCHITECT", reasons=reasons or ["score_threshold"], score=score)
+        decision = RouteDecision(
+            brain="ARCHITECT",
+            reasons=reasons or ["score_threshold"],
+            score=score,
+            needs_search=needs_search,
+            search_categories=search_categories,
+        )
         _log_decision(decision, user_text)
         return decision
 
-    decision = RouteDecision(brain="FAST", reasons=reasons or ["default_fast"], score=score)
+    decision = RouteDecision(
+        brain="FAST",
+        reasons=reasons or ["default_fast"],
+        score=score,
+        needs_search=needs_search,
+        search_categories=search_categories,
+    )
     _log_decision(decision, user_text)
     return decision
 
@@ -133,12 +220,15 @@ def route(
 
 _CLASSIFY_SYSTEM = (
     "You are a query router. Your only job is to classify queries.\n\n"
-    "Reply with exactly one word: FAST or ARCHITECT.\n\n"
+    "Reply with exactly one word: FAST, ARCHITECT, or SEARCH.\n\n"
     "FAST — simple questions, quick lookups, summaries, casual chat, "
-    "basic calculations, short creative tasks\n"
+    "basic calculations, short creative tasks, factual questions answerable from training data\n"
     "ARCHITECT — deep technical analysis, code review, architecture design, "
     "complex multi-step reasoning, long-form writing, advanced tutoring, "
-    "hardware tuning, system design"
+    "hardware tuning, system design\n"
+    "SEARCH — any query that requires current or live information: today's news, "
+    "latest events, recent research, live prices or scores, breaking announcements, "
+    "recent software releases, anything that likely happened after your training cutoff"
 )
 
 
@@ -187,17 +277,36 @@ def llm_route(
             messages=classify_messages,
             temperature=0.0,   # deterministic classification
             top_p=1.0,
-            max_tokens=10,     # we only need "FAST" or "ARCHITECT" (1–2 tokens)
+            max_tokens=10,     # we only need one word (1–2 tokens)
             timeouts=timeouts,
         ))
         label = "".join(chunks).strip().upper()
-        brain = "ARCHITECT" if "ARCHITECT" in label else "FAST"
+
+        # SEARCH classification: route to FAST brain (light/quick turn) but
+        # flag needs_search so context_injector runs a live web fetch.
+        # Infer categories from the query text for SEARCH labels.
+        needs_search   = "SEARCH" in label
+        search_categories: Tuple[str, ...] = ()
+        if needs_search:
+            _, search_categories = _detect_search(user_text.lower())
+            if not search_categories:
+                search_categories = _infer_categories(user_text.lower())
+            brain = "FAST"
+        else:
+            brain = "ARCHITECT" if "ARCHITECT" in label else "FAST"
+
         _LOG.info(
-            "llm_route | brain=%s | label=%r | input_chars=%s",
-            brain, label, len(user_text),
+            "llm_route | brain=%s | needs_search=%s | label=%r | input_chars=%s",
+            brain, needs_search, label, len(user_text),
         )
         score = 999 if brain == "ARCHITECT" else 0
-        decision = RouteDecision(brain=brain, reasons=["llm_classification"], score=score)
+        decision = RouteDecision(
+            brain=brain,
+            reasons=["llm_classification"],
+            score=score,
+            needs_search=needs_search,
+            search_categories=search_categories,
+        )
         return decision
 
     except Exception:

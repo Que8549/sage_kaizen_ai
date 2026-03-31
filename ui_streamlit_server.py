@@ -758,7 +758,7 @@ if user_text:
             templates_caption.caption(f"\U0001F9E9 Templates: {templates_str}")
 
             history: List[dict] = st.session_state.messages[-CONFIG.max_history_messages:]
-            messages, rag_sources, wiki_images = chat_svc.prepare_messages(
+            messages, rag_sources, wiki_images, search_evidence = chat_svc.prepare_messages(
                 user_text, history, decision, templates,
                 wiki_enabled=st.session_state.get("wiki_enabled", True),
                 media_attachments=turn_attachments,
@@ -790,6 +790,16 @@ if user_text:
         _sources_md = format_sources_markdown(rag_sources)
         if _sources_md:
             _clean = _clean + "\n\n" + _sources_md
+
+        # Live web search citations
+        if search_evidence is not None and not search_evidence.empty:
+            try:
+                from search.citations import format_search_sources_markdown as _fmt_search
+                _search_md = _fmt_search(search_evidence)
+                if _search_md:
+                    _clean = _clean + "\n\n" + _search_md
+            except Exception:
+                pass
 
         if final:
             live.markdown(_clean)

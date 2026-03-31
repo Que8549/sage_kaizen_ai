@@ -82,7 +82,7 @@ flowchart TD
 | Routing | `router.py` | LLM-assisted brain selection + heuristic fallback |
 | Prompts | `prompt_library.py` | System prompt, core roles, templates, `build_messages()` |
 | HTTP | `openai_client.py` | SSE streaming client to llama-server |
-| Process | `server_manager.py` | `.bat` parsing, `Popen` spawning, readiness polling |
+| Process | `server_manager.py` | YAML-driven `Popen` spawning, readiness polling |
 | RAG | `rag_v1/` | Ingest → embed → store → retrieve |
 | Config | `settings.py` | Typed frozen dataclass, loaded from `.env` |
 | Logging | `sk_logging.py` | Rotating file logger factory |
@@ -106,7 +106,7 @@ chat_service.py → decide_route()
   │
   ▼
 inference_session.py → ensure_q5_ready() / ensure_q6_ready()
-  │  server_manager.py parses .bat → Popen → polls log markers
+  │  server_manager.py reads brains.yaml → Popen → polls log markers
   │
   ▼
 chat_service.py → select_templates() → prepare_messages()
@@ -146,25 +146,22 @@ upsert_chunks_executemany() → PostgreSQL rag_chunks table
 # 6. Server Startup Flow
 
 ```
-User clicks "Start servers" (or ChatService triggers on first turn)
+Streamlit app starts → _auto_start_servers() launches two daemon threads
   │
-  ▼
-inference_session.ensure_q5_ready()
+  ├─ Thread 1: ensure_q5_running(servers)
+  │    │  ensure_embed_running() first → ManagedServers.from_yaml() → BrainConfig(embed)
+  │    │  start_server_from_config() → _build_argv() → subprocess.Popen (no cmd.exe)
+  │    │  _wait_for_ready() polls /health every 150ms
+  │    │  checks log for "server is listening" or fatal markers
+  │    │
+  │    └─ then start Q5 (port 8011, same flow)
   │
-  ▼
-server_manager.start_server_from_bat("start_embedding_point.bat")
-  │  parse SET statements → expand %VAR% → extract llama-server command
-  │  subprocess.Popen (no cmd.exe, no shell=True)
-  │  _wait_for_ready() polls /health every 150ms
-  │  checks log for "server is listening" or fatal markers
-  │
-  ▼
-server_manager.start_server_from_bat("start_q5_server.bat")
-  │  (same flow as above, port 8011)
-  │
-  ▼  [only when ARCHITECT brain is needed]
-server_manager.start_server_from_bat("start_q6_server.bat")
-     (port 8012, up to 45 min cold start)
+  └─ Thread 2: ensure_q6_running(servers)
+       ManagedServers.from_yaml() → BrainConfig(architect)
+       start_server_from_config() → subprocess.Popen
+       _wait_for_ready() polls /health (port 8012)
+
+Config source: config/brains/brains.yaml (no .bat files)
 ```
 
 ---
