@@ -172,7 +172,7 @@ cython_debug/
 *.wav
 *.mp3
 *.docx
-*.bat # add for now
+*.bat 
 *.log
 *.tmp
 .dockerignore

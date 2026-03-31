@@ -1,31 +1,12 @@
 # config/brains/brains.yaml
 #
-# WHY USE YAML INSTEAD OF .BAT FOR CONFIG?
-# -----------------------------------------
-# .bat files mix configuration (what model to load, what flags to use) with
-# shell logic (error checks, echo statements, exit codes).  That makes it
-# hard to read config at a glance or validate it programmatically.
+# Single authoritative configuration source for all llama-server instances.
+# server_manager.py reads this file directly — no .bat files.
 #
-# YAML lets you:
-#   - See every parameter in one clean, human-readable file
-#   - Add comments explaining each flag (like this one)
-#   - Load config in Python with one line: yaml.safe_load(open(...))
-#   - Validate types and required keys before launching any process
-#   - Share config across scripts without copy-pasting .bat snippets
-#
-# HOW THIS RELATES TO THE .BAT FILES
-# ------------------------------------
-# The .bat files (start_q5_server.bat, etc.) remain the actual launch scripts
-# because server_manager.py reads them directly today.  This YAML file is the
-# DOCUMENTED, HUMAN-READABLE version of the same config — a migration target.
-# Eventually server_manager.py can read this file instead of parsing .bat files.
-#
-# HOW TO READ THIS FILE
-# ----------------------
-# Each brain has:
-#   - exe:    path to llama-server.exe  (replaces SET EXE= in .bat)
-#   - model:  path to the GGUF file     (replaces SET MODEL= in .bat)
-#   - log:    path to the log file      (replaces SET LOGFILE= in .bat)
+# Each brain entry has:
+#   - exe:    path to llama-server.exe
+#   - model:  path to the GGUF file
+#   - log:    path to the log file (--log-file; never stdout/stderr redirect)
 #   - server: all llama-server CLI flags grouped by category
 
 # -----------------------------------------------------------------------------
@@ -240,6 +221,24 @@ wiki_embed:
     text_batch: 256
     image_batch: 64
 
+  # ── Verbosity (env var, not a service param) ────────────────────────────
+  # WIKI_EMBED_VERBOSE controls how much the embed service writes to its log.
+  #
+  # Default (0 / unset): quiet mode — only lifecycle milestones are logged
+  #   (loading, compiling, warmup, ready, errors).  Suppresses:
+  #     - transformers weight-loading progress bars (tqdm)
+  #     - flash-attn / xFormers / torch_dtype deprecation warnings
+  #     - uvicorn per-request access logs (POST /embed/text 200 OK)
+  #
+  # Set WIKI_EMBED_VERBOSE=1 to restore full output for debugging:
+  #   - All transformers weight-loading progress bars
+  #   - All Python warnings
+  #   - uvicorn access logs on every request
+  #
+  # wiki_ingest.py defaults to verbose=1 (progress bars are useful for
+  # monitoring long batch ingest jobs).
+  # wiki_retriever.py (runtime) defaults to verbose=0.
+
   # ── Ingest job settings (read by wiki_ingest.py) ───────────────────────
   ingest:
     # Root directory of the extracted Wikipedia ZIM dump (from zim_dump.py)
@@ -275,6 +274,52 @@ wiki_embed:
 #   CUDA0 (RTX 5090) — wiki embed service (jina-clip-v2) + ARCHITECT brain
 #   CUDA1 (RTX 5080) — CLAP embed service (audio, freed when FAST brain off)
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Live Web Search — SearXNG private instance
+# Running at http://localhost:8080 via Docker Desktop
+#
+# Router sets needs_search=True on turns that require live data.
+# SearchOrchestrator fetches from SearXNG, filters/ranks results, then
+# Summarizer calls the FAST brain for a lightweight condensed pass before
+# the evidence is injected as a <search_context> block.
+#
+# All values here are documentation; the live defaults are env-var driven
+# (SAGE_SEARCH_* — see search/search_orchestrator.py and search/searxng_client.py).
+# Override via .env or shell environment to change at runtime without editing YAML.
+# -----------------------------------------------------------------------------
+search:
+  # Base URL of the private SearXNG Docker instance
+  searxng_url: "http://localhost:8080"
+
+  # Per-request HTTP timeout (seconds) — SearXNG fans out to multiple engines
+  timeout_seconds: 8
+
+  # Result ceiling per brain — ARCHITECT gets more context headroom (64K ctx)
+  max_results:
+    fast: 6
+    architect: 12
+
+  # Minimum SearXNG score to keep a result.
+  # 0.0 = no filter (safe default: SearXNG returns 0.0 for some valid engines).
+  min_score: 0.0
+
+  # Snippet truncation — balances context quality vs. token budget.
+  snippet_max_chars: 300
+
+  # Default time_range for news-category queries.
+  # Accepted values: day | week | month | year | (omit for all-time)
+  news_time_range: "week"
+
+  # SearXNG categories used per intent (for documentation; inferred at runtime)
+  default_categories:
+    - general
+    - news
+  category_map:
+    news:       [news, headlines, breaking, politics, election, current events]
+    science:    [arxiv, research paper, scientific study, journal article, nasa discovery]
+    technology: [tech news, software release, github release, hardware release, ai news]
+
+
 media_embed:
   # Local path to the downloaded laion/clap-htsat-unfused model weights.
   # Download: huggingface-cli download laion/clap-htsat-unfused --local-dir E:/clap-htsat-unfused

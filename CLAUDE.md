@@ -53,6 +53,17 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 | BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA0 (5090) | RAG text embeddings (1024-dim) |
 | Wiki embed (jina-clip-v2) | jina-clip-v2 | 8031 | CUDA0 (5090) | Wikipedia multimodal embeddings (1024-dim) |
 | CLAP embed | clap-htsat-unfused | 8040 | CUDA1 (5080) | Audio embeddings (512-dim) |
+| SearXNG | (metasearch) | 8080 | Docker Desktop | Live web search JSON API |
+
+### Live Web Search (`search/`)
+- `search/models.py` — `WebResult` + `SearchEvidence` normalized citation schema
+- `search/searxng_client.py` — httpx JSON client for private SearXNG instance (http://localhost:8080)
+- `search/search_orchestrator.py` — dedup, score filter, time_range, per-brain result ceiling; lazy singleton `get_orchestrator()`
+- `search/summarizer.py` — lightweight FAST-brain summarization pass before context injection; falls back to raw snippets if brain unavailable
+- `search/citations.py` — `format_search_sources_markdown()` for UI display (matches doc-RAG + wiki-RAG citation style)
+- Router sets `needs_search=True` + `search_categories` on `RouteDecision` when live data is needed
+- `context_injector.apply_rag_and_wiki_parallel()` runs a 3rd parallel worker; injects `<search_context>` block; returns 4-tuple `(messages, rag_sources, wiki_images, search_evidence)`
+- SearXNG Docker instance: `F:\Projects\searxng\` — configured with JSON format enabled, limiter disabled, CORS open
 
 ### Supporting modules (root-level)
 - `mermaid_streamlit.py` — Mermaid diagram detection and rendering in the chat UI
@@ -103,9 +114,10 @@ A change is “done” when:
 ## 5) NON-NEGOTIABLE INVARIANTS (Never regress)
 These are **hard constraints**:
 
-1. `.bat` files are **configuration only**
-   - Only authoritative keys: `EXE=...` and `MODEL=...` (and other explicit config keys we list in docs)
-   - Nothing else in `.bat` is authoritative
+1. **`config/brains/brains.yaml` is the single authoritative config source**
+   - All server settings (exe, model, log, flags, ports) live in `brains.yaml`
+   - No `.bat` files — they have been deleted; do not recreate them
+   - `server_manager.py` reads YAML directly and spawns the EXE via `subprocess.Popen`
 
 2. **Never** launch llama-server via `cmd.exe`
    - No `cmd /c ...`
@@ -115,7 +127,7 @@ These are **hard constraints**:
    - Never rely on `stdout/stderr` redirection (`>`, `>>`) for long-running servers
 
 4. Paths must be **fully expanded** before Python uses them
-   - No `%ROOT%`, no delayed expansion assumptions
+   - No `%ROOT%`, no environment variable expansion assumptions
 
 ---
 
@@ -179,8 +191,9 @@ git show <commit>
 ```
 Past commits document what was tried and abandoned. Key known failures in this repo:
 - **`flash_attn`** — present in `requirements.txt` as a local path reference but intentionally non-functional at runtime for Python-level code. SM_120 (Blackwell, RTX 5090/5080) is unsupported by flash-attn 2.x/3.x/4.x on Windows; `flash_attn.ops.triton.rotary` requires the OpenAI Triton compiler (Linux-only). The llama-server `--flash-attn` flag is separate and works correctly (handled by the C++ runtime, not Python). For Python inference code use PyTorch SDPA (`torch.nn.functional.scaled_dot_product_attention`) with cuDNN SDP backend (`torch.backends.cuda.enable_cudnn_sdp(True)`).
-- **`cmd.exe` for llama-server** — never use; see Non-Negotiable Invariants.
+- **`cmd.exe` for llama-server** — never use; `server_manager.py` spawns the EXE directly via `subprocess.Popen`.
 - **`stdout/stderr` redirection for llama-server** — never use; always `--log-file`.
+- **`.bat` launch scripts** — deleted (`start_q5_server.bat`, `start_q6_server.bat`, `start_embedding_point.bat`). All config is in `config/brains/brains.yaml`. Do not recreate `.bat` files for server launch.
 
 If a commit message says "reverted", "removed", "uninstalled", or describes a failure, read it before reimplementing the same approach.
 
@@ -189,5 +202,5 @@ If a commit message says "reverted", "removed", "uninstalled", or describes a fa
 ## 10) Related and Associated Projects
  - Integrate with Sage Kaizen Voice (voice app) located at F:\Projects\sage_kaizen_ai_voice\
  - Sage Kaizen local-first AI assistant (main app) located at F:\Projects\sage_kaizen_ai\
-
+ - SearXNG - local search engine running at http://localhost:8080/ located at F:\Projects\searxng
  

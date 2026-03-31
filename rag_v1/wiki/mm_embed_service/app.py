@@ -9,6 +9,14 @@ No environment variables are required.
 
 Run standalone:
     python -m rag_v1.wiki.mm_embed_service.app
+
+Verbosity
+---------
+By default the service only logs key lifecycle milestones (loading, ready,
+errors).  Set WIKI_EMBED_VERBOSE=1 in the environment to enable full output,
+including transformers weight-loading progress bars, Python deprecation
+warnings, and uvicorn access logs.  This is useful for diagnosing model load
+failures or GPU/CUDA issues.
 """
 from __future__ import annotations
 
@@ -17,6 +25,22 @@ import io
 import os
 from contextlib import asynccontextmanager
 from typing import Any
+
+# ── Verbosity gate ──────────────────────────────────────────────────────────
+# Must be evaluated before any import that triggers tqdm or warnings.
+_VERBOSE: bool = os.environ.get("WIKI_EMBED_VERBOSE", "").strip().lower() in (
+    "1", "true", "yes", "y", "on",
+)
+
+if not _VERBOSE:
+    # Suppress tqdm progress bars emitted by transformers during from_pretrained.
+    # TQDM_DISABLE is checked at tqdm import time; setting it here (before
+    # transformers is imported below) suppresses all tqdm output in this process.
+    os.environ.setdefault("TQDM_DISABLE", "1")
+
+    # Suppress Python warnings (flash-attn / xFormers / torch_dtype deprecation).
+    import warnings
+    warnings.filterwarnings("ignore")
 
 import torch
 import torch.nn.functional as F
@@ -30,8 +54,18 @@ except ImportError:
     pass  # HEIC support unavailable; non-HEIC images unaffected
 from pydantic import BaseModel
 from transformers import AutoModel
+import transformers as _transformers
+
+# Suppress transformers INFO/WARNING logs (weight-loading messages, deprecation
+# notices) unless verbose mode is active.  This must happen after importing
+# transformers but before any from_pretrained call.
+if not _VERBOSE:
+    _transformers.logging.set_verbosity_error()
 
 from rag_v1.wiki.wiki_embed_config import load_wiki_embed_config
+from sk_logging import get_logger
+
+_LOG = get_logger("sage_kaizen.wiki_embed_service")
 
 # ──────────────────────────────────────────────────────────────────────────── #
 # Globals (populated at startup)                                                #
@@ -84,10 +118,8 @@ async def lifespan(app: FastAPI):
     torch.backends.cuda.enable_math_sdp(False)   # unoptimised fallback; never needed
 
     # ── Model load ─────────────────────────────────────────────────────────
-    print(
-        f"[mm_embed_service] Loading jina-clip-v2 from {model_path!r} "
-        f"on {_device} (bf16, sdpa) …",
-        flush=True,
+    _LOG.info(
+        "Loading jina-clip-v2 from %r on %s (bf16, sdpa) …", model_path, _device,
     )
     # device_map streams weights directly from disk to GPU — no CPU staging copy.
     # This sets low_cpu_mem_usage automatically, halving the peak RAM footprint.
@@ -112,17 +144,17 @@ async def lifespan(app: FastAPI):
     # reduce-overhead / max-autotune to be slower than default on affected builds.
     # fullgraph=False: jina-clip-v2 uses trust_remote_code custom Python paths
     # (LoRA adapters, task instructions) that contain graph breaks; False is safe.
-    print("[mm_embed_service] Compiling model with torch.compile (max-autotune-no-cudagraphs) …", flush=True)
+    _LOG.info("Compiling model with torch.compile (max-autotune-no-cudagraphs) …")
     _model = torch.compile(_model, mode="max-autotune-no-cudagraphs", fullgraph=False)
 
     # ── Warmup ─────────────────────────────────────────────────────────────
     # Triggers JIT compilation so the first real request is not delayed.
-    print("[mm_embed_service] Running warmup inference (triggers JIT compilation) …", flush=True)
+    _LOG.info("Running warmup inference (triggers JIT compilation) …")
     with torch.inference_mode(), torch.autocast(_device_type, dtype=_dtype):
         _ = _model.encode_text(["warmup"])
 
     _loaded = True
-    print("[mm_embed_service] Model ready.", flush=True)
+    _LOG.info("Model ready — device=%s verbose=%s", _device, _VERBOSE)
 
     yield
     # No explicit cleanup needed; process exit handles GPU memory.
@@ -242,5 +274,8 @@ if __name__ == "__main__":
         "rag_v1.wiki.mm_embed_service.app:app",
         host=cfg.host,
         port=port,
-        log_level="info",
+        # In quiet mode: suppress uvicorn startup banners and all access logs.
+        # In verbose mode: full uvicorn output including per-request access logs.
+        log_level="info" if _VERBOSE else "warning",
+        access_log=_VERBOSE,
     )

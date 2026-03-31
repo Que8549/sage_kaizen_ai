@@ -475,9 +475,13 @@ def _start_embed_service(
     # Inject port and device overrides as env vars for the subprocess.
     # The service reads WIKI_EMBED_PORT / WIKI_EMBED_DEVICE in preference to
     # brains.yaml when these are set.
+    # WIKI_EMBED_VERBOSE is forwarded so verbosity is controlled from the caller.
+    # wiki_ingest runs as a batch job where verbose output is more useful,
+    # so it defaults to verbose=1 (progress bars help monitor long ingest runs).
     env = os.environ.copy()
     env["WIKI_EMBED_PORT"]   = str(effective_port)
     env["WIKI_EMBED_DEVICE"] = effective_device
+    env.setdefault("WIKI_EMBED_VERBOSE", "1")
 
     log_fh = log_path.open("a", encoding="utf-8")
     proc = subprocess.Popen(

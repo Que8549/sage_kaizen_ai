@@ -239,7 +239,7 @@ class ChatService:
         templates: Tuple[TemplateKey, ...],
         wiki_enabled: bool = True,
         media_attachments: Tuple[MediaAttachment, ...] = (),
-    ) -> Tuple[List[dict], list, list]:
+    ) -> Tuple[List[dict], list, list, object]:
         """
         Build the full OpenAI-style messages list for this turn.
 
@@ -249,7 +249,8 @@ class ChatService:
         Qwen2.5-Omni encoders.
 
         Returns:
-            (messages, rag_sources, wiki_images)
+            (messages, rag_sources, wiki_images, search_evidence)
+            search_evidence is a SearchEvidence or None when search was not triggered.
         """
         core = sage_architect_core if decision.brain == "ARCHITECT" else sage_fast_core
         system_content = build_system_only(
@@ -275,10 +276,13 @@ class ChatService:
 
         # RAG injection operates on the text query regardless of modality.
         # It appends context to the last user turn's text portion.
-        messages, rag_sources, wiki_images = apply_rag_and_wiki_parallel(
-            messages, user_text, decision, wiki_enabled
+        # Pass FAST brain coords so the search summarizer can call it concurrently.
+        messages, rag_sources, wiki_images, search_evidence = apply_rag_and_wiki_parallel(
+            messages, user_text, decision, wiki_enabled,
+            fast_base_url=self._session.q5_url,
+            fast_model_id=self._session.q5_model_id,
         )
-        return messages, rag_sources, wiki_images
+        return messages, rag_sources, wiki_images, search_evidence
 
     # ------------------------------------------------------------------ #
     # Streaming                                                            #
