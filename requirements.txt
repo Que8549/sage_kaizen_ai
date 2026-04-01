@@ -116,6 +116,16 @@ yacs==0.1.8
 # Pin versions after install and update lines below.
 
 
+# ── Lyrics ingest (Genius API + ID3 tag extraction) ─────────────────────────
+# pip install lyricsgenius mutagen
+lyricsgenius
+mutagen
+
+# ── Audio analysis (BPM, key, clustering) ────────────────────────────────────
+# pip install librosa scikit-learn
+librosa
+scikit-learn
+
 # ── Cross-modal media embeddings (CLIP + CLAP) ───────────────────────────────
 # Images: jina-clip-v2 via wiki embed service (port 8031) — no extra install.
 # Audio:  laion/clap-htsat-unfused — already downloaded to E:/clap-htsat-unfused

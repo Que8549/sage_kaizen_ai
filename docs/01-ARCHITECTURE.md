@@ -128,7 +128,7 @@ ui_streamlit_server.py
 # 5. RAG Ingest Flow (Offline, Separate Process)
 
 ```
-folder_ingest.py
+ingest_docs.py
   │  iter_text_files() — .md .txt .py .json .yaml
   │  sha256_text()     — content hash (idempotency)
   │  chunk_text()      — sliding window (1200 chars, 200 overlap)

@@ -758,7 +758,7 @@ if user_text:
             templates_caption.caption(f"\U0001F9E9 Templates: {templates_str}")
 
             history: List[dict] = st.session_state.messages[-CONFIG.max_history_messages:]
-            messages, rag_sources, wiki_images, search_evidence = chat_svc.prepare_messages(
+            messages, rag_sources, wiki_images, search_evidence, music_context = chat_svc.prepare_messages(
                 user_text, history, decision, templates,
                 wiki_enabled=st.session_state.get("wiki_enabled", True),
                 media_attachments=turn_attachments,
@@ -815,6 +815,11 @@ if user_text:
                     for _col, _img in zip(_cols, _valid_imgs):
                         with _col:
                             st.image(_img.absolute_path, caption=_img.caption_text, width='stretch')
+
+            # Music retrieval results
+            if music_context:
+                with st.expander("Music results", expanded=True):
+                    st.code(music_context, language=None)
 
             if _thinking:
                 with st.expander("Developer Mode Reasoning", expanded=False):

@@ -57,6 +57,31 @@ _CATEGORY_KEYWORDS: dict[str, Tuple[str, ...]] = {
 
 _DEFAULT_SEARCH_CATEGORIES: Tuple[str, ...] = ("general", "news")
 
+# ---------------------------------------------------------------------------
+# Music query detection
+# ---------------------------------------------------------------------------
+
+_MUSIC_HINTS: Tuple[str, ...] = (
+    "play something", "play me a song", "find songs", "find a song", "find me a song",
+    "list songs", "list tracks", "music for", "songs about", "songs with",
+    "tracks about", "tracks with", "what songs", "which songs", "any songs",
+    "song that says", "song with the lyric", "lyrics about", "contains the word",
+    "sings about", "song where someone", "songs like", "sounds like",
+    "similar to", "more like this", "find more like",
+    "make a playlist", "create a playlist", "generate a playlist", "playlist for",
+    "instrumental", "with vocals", "no vocals", "bpm", "beats per minute",
+    "in the key of", "key of c", "key of d", "key of e", "key of f",
+    "key of g", "key of a", "key of b", "explicit songs", "clean songs",
+    "fast songs", "slow songs", "upbeat tracks", "songs that sound",
+    "group my music", "music cluster", "songs in my library",
+)
+
+
+def _detect_music(txt: str) -> bool:
+    """Return True when the query looks like a music library search."""
+    return any(h in txt for h in _MUSIC_HINTS)
+
+
 _LOG = get_logger("sage_kaizen.router")
 
 
@@ -67,6 +92,7 @@ class RouteDecision:
     score: int
     needs_search: bool = False                      # True → run live web search this turn
     search_categories: Tuple[str, ...] = field(default_factory=tuple)  # SearXNG categories to query
+    needs_music: bool = False                       # True → run music retrieval this turn
 
 
 def _log_decision(decision: "RouteDecision", user_text: str) -> None:
@@ -145,6 +171,11 @@ def route(
     if needs_search:
         reasons.append("search:live_data")
 
+    # Music query detection (independent of brain routing)
+    needs_music = _detect_music(txt)
+    if needs_music:
+        reasons.append("music:library_query")
+
     # Length heuristics
     n = len(txt)
     if n > 2000:
@@ -199,6 +230,7 @@ def route(
             score=score,
             needs_search=needs_search,
             search_categories=search_categories,
+            needs_music=needs_music,
         )
         _log_decision(decision, user_text)
         return decision
@@ -209,6 +241,7 @@ def route(
         score=score,
         needs_search=needs_search,
         search_categories=search_categories,
+        needs_music=needs_music,
     )
     _log_decision(decision, user_text)
     return decision
@@ -295,9 +328,11 @@ def llm_route(
         else:
             brain = "ARCHITECT" if "ARCHITECT" in label else "FAST"
 
+        needs_music = _detect_music(user_text.lower())
+
         _LOG.info(
-            "llm_route | brain=%s | needs_search=%s | label=%r | input_chars=%s",
-            brain, needs_search, label, len(user_text),
+            "llm_route | brain=%s | needs_search=%s | needs_music=%s | label=%r | input_chars=%s",
+            brain, needs_search, needs_music, label, len(user_text),
         )
         score = 999 if brain == "ARCHITECT" else 0
         decision = RouteDecision(
@@ -306,6 +341,7 @@ def llm_route(
             score=score,
             needs_search=needs_search,
             search_categories=search_categories,
+            needs_music=needs_music,
         )
         return decision
 

@@ -24,13 +24,64 @@ Prerequisites:
 
 Run:
     python -m rag_v1.media.media_ingest --root /path/to/media/directory
-
+    
 CLI flags:
     --root          Root directory to scan recursively (required)
     --image-batch   Images per embed call  (default: from brains.yaml)
     --audio-batch   Audio clips per embed call  (default: from brains.yaml)
     --log-every     Print progress every N files scanned (default: 50)
     --no-service    Skip auto-starting the CLAP embed service
+
+Usage: 
+    python.exe -m rag_v1.media.media_ingest [-h] [--root ROOT]
+                                               [--audio-device AUDIO_DEVICE]
+                                               [--image-batch IMAGE_BATCH]
+                                               [--audio-batch AUDIO_BATCH]
+                                               [--log-every LOG_EVERY]
+                                               [--no-service] [--no-lyrics]
+                                               [--lyrics-only]
+                                               [--lyrics-workers LYRICS_WORKERS]
+                                               [--lyrics-batch LYRICS_BATCH]
+                                               [--lyrics-delay LYRICS_DELAY]
+                                               [--no-analysis]
+                                               [--analysis-workers ANALYSIS_WORKERS]
+                                               [--cluster]
+                                               [--n-clusters N_CLUSTERS]
+
+Ingest media files into media_files + image_embeddings / audio_embeddings
+tables. Images use the wiki embed service (port 8031). Audio uses the CLAP
+embed service (port 8040).
+
+options:
+  -h, --help            show this help message and exit
+  --root ROOT           Root directory to scan recursively (required unless
+                        --lyrics-only)
+  --audio-device AUDIO_DEVICE
+                        Override CLAP_DEVICE (e.g. cuda:1)
+  --image-batch IMAGE_BATCH
+  --audio-batch AUDIO_BATCH
+  --log-every LOG_EVERY
+                        Print stats every N files
+  --no-service          Skip auto-starting CLAP/wiki embed services
+  --no-lyrics           Skip lyrics ingest phase
+  --lyrics-only         Run only lyrics phase; skip audio/image ingest
+  --lyrics-workers LYRICS_WORKERS
+                        Genius API concurrent workers (default: 8)
+  --lyrics-batch LYRICS_BATCH
+                        Songs between DB commits in lyrics phase (default: 50)
+  --lyrics-delay LYRICS_DELAY
+                        Seconds to sleep between Genius calls per worker
+                        (default: 0.3)
+  --no-analysis         Skip audio analysis phase (BPM, key, vocal detection,
+                        explicit flagging)
+  --analysis-workers ANALYSIS_WORKERS
+                        Thread pool size for librosa BPM/key extraction
+                        (default: 4)
+  --cluster             Run KMeans clustering on audio embeddings after
+                        analysis
+  --n-clusters N_CLUSTERS
+                        Number of KMeans clusters (default: 50)    
+
 """
 from __future__ import annotations
 
@@ -47,11 +98,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import psycopg
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
-from pg_settings import PgSettings
 from rag_v1.db.pg import conn_ctx
 from rag_v1.ingest.ingest_utils import sha256_bytes
 from rag_v1.media.media_embed_client import AudioEmbedClient, ImageEmbedClient
@@ -138,7 +192,7 @@ def _audio_duration(path: Path) -> float | None:
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
-# SQL                                                                            #
+# SQL                                                                          #
 # ──────────────────────────────────────────────────────────────────────────── #
 
 _SQL_INSERT_FILE = """
@@ -180,7 +234,7 @@ VALUES (%s, %s::vector)
 
 
 # ──────────────────────────────────────────────────────────────────────────── #
-# DB write helpers                                                               #
+# DB write helpers                                                             #
 # ──────────────────────────────────────────────────────────────────────────── #
 
 def _upsert_file(
@@ -220,6 +274,34 @@ def _upsert_file(
 # Service lifecycle helpers                                                       #
 # ──────────────────────────────────────────────────────────────────────────── #
 
+def _make_subprocess_env(**overrides: str) -> dict[str, str]:
+    """
+    Build an env dict for child service processes.
+
+    Starts from os.environ, then layers in HF_TOKEN from .env (if not already
+    set in the OS env), then applies any caller-supplied overrides.
+
+    HuggingFace Hub (huggingface_hub >= 0.20) reads HF_TOKEN.  The legacy
+    HUGGING_FACE_HUB_TOKEN alias is also set for compatibility with older
+    transformers builds.
+    """
+    from dotenv import dotenv_values  # noqa: PLC0415
+
+    env = os.environ.copy()
+
+    # Load .env values without touching os.environ in the current process.
+    env_file = _PROJECT_ROOT / ".env"
+    if env_file.exists():
+        dotenv_vals = dotenv_values(str(env_file))
+        hf_token = env.get("HF_TOKEN") or dotenv_vals.get("HF_TOKEN", "")
+        if hf_token:
+            env["HF_TOKEN"] = hf_token
+            env["HUGGING_FACE_HUB_TOKEN"] = hf_token  # legacy alias
+
+    env.update(overrides)
+    return env
+
+
 def _ensure_wiki_service(
     client: ImageEmbedClient,
     timeout_s: int,
@@ -235,6 +317,7 @@ def _ensure_wiki_service(
     svc_log_fh = open(service_log, "ab")
     proc = subprocess.Popen(
         [sys.executable, "-m", "rag_v1.wiki.mm_embed_service.app"],
+        env=_make_subprocess_env(),
         stdout=svc_log_fh,
         stderr=svc_log_fh,
     )
@@ -269,9 +352,10 @@ def _ensure_clap_service(
 
     _LOG.info("CLAP embed service not running — auto-starting ...")
     _LOG.info("Service stdout/stderr -> %s", service_log)
-    env = os.environ.copy()
+    clap_overrides: dict[str, str] = {}
     if device:
-        env["CLAP_DEVICE"] = device
+        clap_overrides["CLAP_DEVICE"] = device
+    env = _make_subprocess_env(**clap_overrides)
 
     svc_log_fh = open(service_log, "ab")  # append; multiple runs accumulate
     proc = subprocess.Popen(
@@ -591,38 +675,96 @@ def main() -> None:
             "Audio uses the CLAP embed service (port 8040)."
         )
     )
-    parser.add_argument("--root",          required=True, help="Root directory to scan recursively")
-    parser.add_argument("--audio-device",  default=None,  help="Override CLAP_DEVICE (e.g. cuda:1)")
-    parser.add_argument("--image-batch",   type=int,      default=cfg.image_batch)
-    parser.add_argument("--audio-batch",   type=int,      default=cfg.audio_batch)
-    parser.add_argument("--log-every",     type=int,      default=50,  help="Print stats every N files")
-    parser.add_argument("--no-service",    action="store_true",        help="Skip auto-starting CLAP service")
+    
+    parser.add_argument("--root",            default=None,        help="Root directory to scan recursively (required unless --lyrics-only)")
+    parser.add_argument("--audio-device",    default=None,        help="Override CLAP_DEVICE (e.g. cuda:1)")
+    parser.add_argument("--image-batch",     type=int,            default=cfg.image_batch)
+    parser.add_argument("--audio-batch",     type=int,            default=cfg.audio_batch)
+    parser.add_argument("--log-every",       type=int,            default=50,   help="Print stats every N files")
+    parser.add_argument("--no-service",      action="store_true",               help="Skip auto-starting CLAP/wiki embed services")
+    parser.add_argument("--no-lyrics",       action="store_true",               help="Skip lyrics ingest phase")
+    parser.add_argument("--lyrics-only",     action="store_true",               help="Run only lyrics phase; skip audio/image ingest")
+    parser.add_argument("--lyrics-workers",  type=int,            default=8,    help="Genius API concurrent workers (default: 8)")
+    parser.add_argument("--lyrics-batch",    type=int,            default=50,   help="Songs between DB commits in lyrics phase (default: 50)")
+    parser.add_argument("--lyrics-delay",    type=float,          default=0.3,  help="Seconds to sleep between Genius calls per worker (default: 0.3)")
+    parser.add_argument("--no-analysis",     action="store_true",               help="Skip audio analysis phase (BPM, key, vocal detection, explicit flagging)")
+    parser.add_argument("--analysis-workers",type=int,            default=4,    help="Thread pool size for librosa BPM/key extraction (default: 4)")
+    parser.add_argument("--cluster",         action="store_true",               help="Run KMeans clustering on audio embeddings after analysis")
+    parser.add_argument("--n-clusters",      type=int,            default=50,   help="Number of KMeans clusters (default: 50)")
     args = parser.parse_args()
 
-    root = Path(args.root).expanduser().resolve()
-    if not root.is_dir():
-        print(f"ERROR: --root is not a directory: {root}", file=sys.stderr)
-        sys.exit(1)
+    if not args.lyrics_only and args.root is None:
+        parser.error("--root is required unless --lyrics-only is specified")
 
+    from pg_settings import PgSettings  # noqa: PLC0415
     pg = PgSettings()
-    stats = run_ingest(
-        root=root,
-        dsn=pg.pg_dsn,
-        image_host=cfg.image_host,
-        image_port=cfg.image_port,
-        audio_host=cfg.audio_host,
-        audio_port=cfg.audio_port,
-        image_batch=args.image_batch,
-        audio_batch=args.audio_batch,
-        startup_timeout=int(cfg.startup_timeout_s),
-        audio_device=args.audio_device,
-        log_every=args.log_every,
-        auto_service=not args.no_service,
-        # service log paths use defaults (logs/ directory)
-    )
 
-    print(f"\n=== Ingest complete === {stats.report()}", flush=True)
-    _LOG.info("Ingest complete. %s", stats.report())
+    # ── Phase 1: audio + image ingest ────────────────────────────────────── #
+    if not args.lyrics_only:
+        root = Path(args.root).expanduser().resolve()  # type: ignore[arg-type]
+        if not root.is_dir():
+            print(f"ERROR: --root is not a directory: {root}", file=sys.stderr)
+            sys.exit(1)
+
+        stats = run_ingest(
+            root=root,
+            dsn=pg.pg_dsn,
+            image_host=cfg.image_host,
+            image_port=cfg.image_port,
+            audio_host=cfg.audio_host,
+            audio_port=cfg.audio_port,
+            image_batch=args.image_batch,
+            audio_batch=args.audio_batch,
+            startup_timeout=int(cfg.startup_timeout_s),
+            audio_device=args.audio_device,
+            log_every=args.log_every,
+            auto_service=not args.no_service,
+        )
+        print(f"\n=== Audio/image ingest complete === {stats.report()}", flush=True)
+        _LOG.info("Audio/image ingest complete. %s", stats.report())
+
+    # ── Phase 2: lyrics fetch + embed ────────────────────────────────────── #
+    if not args.no_lyrics:
+        from rag_v1.config.rag_settings import RagSettings      # noqa: PLC0415
+        from rag_v1.media.lyrics_ingest import run_lyrics_ingest  # noqa: PLC0415
+
+        rag_cfg = RagSettings()
+        lyrics_stats = run_lyrics_ingest(
+            dsn=pg.pg_dsn,
+            embed_base_url=rag_cfg.embed_base_url,
+            embed_model=rag_cfg.embed_model,
+            workers=args.lyrics_workers,
+            lyrics_batch=args.lyrics_batch,
+            delay_s=args.lyrics_delay,
+            chunk_chars=rag_cfg.chunk_chars,
+            chunk_overlap=rag_cfg.chunk_overlap,
+        )
+        print(f"\n=== Lyrics ingest complete === {lyrics_stats.report()}", flush=True)
+        _LOG.info("Lyrics ingest complete. %s", lyrics_stats.report())
+
+    # ── Phase 3: audio analysis (BPM, key, vocal detection, explicit) ────── #
+    if not args.no_analysis and not args.lyrics_only:
+        from rag_v1.media.audio_analysis_ingest import run_audio_analysis_ingest  # noqa: PLC0415
+
+        analysis_stats = run_audio_analysis_ingest(
+            dsn=pg.pg_dsn,
+            clap_host=cfg.audio_host,
+            clap_port=cfg.audio_port,
+            workers=args.analysis_workers,
+        )
+        print(f"\n=== Audio analysis complete === {analysis_stats.report()}", flush=True)
+        _LOG.info("Audio analysis complete. %s", analysis_stats.report())
+
+    # ── Phase 4: acoustic clustering (optional, only when --cluster) ──────── #
+    if args.cluster and not args.lyrics_only:
+        from rag_v1.media.audio_cluster import run_clustering  # noqa: PLC0415
+
+        cluster_stats = run_clustering(
+            dsn=pg.pg_dsn,
+            n_clusters=args.n_clusters,
+        )
+        print(f"\n=== Clustering complete === {cluster_stats.report()}", flush=True)
+        _LOG.info("Clustering complete. %s", cluster_stats.report())
 
 
 if __name__ == "__main__":

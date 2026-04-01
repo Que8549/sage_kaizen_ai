@@ -99,6 +99,16 @@ async def lifespan(app: FastAPI):
         local_files_only=True,
         torch_dtype=_dtype,
     )
+
+    # cuDNN BatchNorm does not support FP16 weights: it upcasts its *input* to
+    # FP32 inside autocast (BatchNorm is on PyTorch's fp32 ops allowlist), but
+    # if the *weights* are FP16 (from torch_dtype=float16 above), cuDNN raises:
+    #   "FloatTensor does not equal HalfTensor (cudnn_batch_norm)"
+    # Fix: restore BN parameters to FP32 while the rest of the model stays FP16.
+    for module in _model.modules():
+        if isinstance(module, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)):
+            module.float()
+
     _model.eval()
     _model.to(_device)
 

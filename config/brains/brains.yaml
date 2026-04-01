@@ -326,7 +326,7 @@ media_embed:
   clap_model_dir: "E:/clap-htsat-unfused"
 
   log: "F:/Projects/sage_kaizen_ai/logs/clap_embed_service.log"
-  startup_timeout_s: 120    # CLAP loads in ~30-60 s on CUDA1
+  startup_timeout_s: 300    # model load + torch.compile JIT + warmup = ~150-200 s on CUDA1
 
   # Image embedding — delegates to the always-running wiki embed service.
   image_service:
