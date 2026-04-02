@@ -28,6 +28,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from input_guard import sanitize_chunk
 from rag_v1.config.rag_settings import RagSettings
 from rag_v1.runtime.router_integration import RagInjector, _prepend_context
 from sk_logging import get_logger
@@ -221,7 +222,7 @@ def apply_wiki_rag(
         lines: List[str] = []
         for c in result.chunks:
             section = " > ".join(c.section_path) if c.section_path else "Introduction"
-            lines.append(f"[{c.title} / {section} | score={c.score:.3f}]\n{c.text}")
+            lines.append(f"[{c.title} / {section} | score={c.score:.3f}]\n{sanitize_chunk(c.text, max_chars=None)}")
         ctx = "\n\n---\n\n".join(lines)
 
         out = list(messages)
@@ -279,7 +280,7 @@ def _fetch_wiki_result(
         lines: List[str] = []
         for c in result.chunks:
             section = " > ".join(c.section_path) if c.section_path else "Introduction"
-            lines.append(f"[{c.title} / {section} | score={c.score:.3f}]\n{c.text}")
+            lines.append(f"[{c.title} / {section} | score={c.score:.3f}]\n{sanitize_chunk(c.text, max_chars=None)}")
         ctx_block = "\n\n---\n\n".join(lines)
 
         _LOG.info(

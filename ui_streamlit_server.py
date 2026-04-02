@@ -35,6 +35,7 @@ logging.getLogger("tornado.general").addFilter(_stop_race_filter)
 # ─────────────────────────────────────────────────────────────────────────────
 
 from chat_service import ChatService, MediaAttachment, TurnConfig
+from input_guard import InjectionDetectedError, check_user_input
 from rag_v1.retrieve.citations import format_sources_markdown
 from inference_session import InferenceSession
 from mermaid_streamlit import DiagramHandler
@@ -412,6 +413,7 @@ with st.sidebar:
     _v_icon = "🎙" if _voice_bridge.voice_ready else "🔄"
     _v_label = "ready" if _voice_bridge.voice_ready else "loading models..."
     st.caption(f"{_v_icon} Voice: {_v_label}")
+    tts_enabled = st.toggle("Voice TTS", value=True, help="Send LLM responses to the TTS engine. Disable to read only, no audio output.")
 
     if st.button("Discover model IDs"):
         mid5, mid6 = session.discover_model_ids(timeouts_status)
@@ -627,6 +629,13 @@ _pending_voice = st.session_state.pop("_voice_input", None)
 user_text = _pending_voice or st.chat_input("Ask Sage Kaizen\u2026", key="chat_input")
 
 if user_text:
+    # Hard-reject structural injection patterns before any processing
+    try:
+        check_user_input(user_text)
+    except InjectionDetectedError as _inj:
+        st.error(f"Request blocked: {_inj}")
+        st.stop()
+
     # Snapshot attachments for this turn then clear the pending list
     turn_attachments: Tuple[MediaAttachment, ...] = tuple(
         st.session_state.pending_attachments
@@ -765,15 +774,17 @@ if user_text:
             )
 
             voice_session_id = str(uuid4())
-            _voice_bridge.start_turn(voice_session_id, decision.brain)
+            if tts_enabled:
+                _voice_bridge.start_turn(voice_session_id, decision.brain)
             full_streamed = ""
             try:
                 def _voice_stream():
                     for piece in chat_svc.stream_response(messages, decision, cfg):
-                        if _voice_bridge.barge_in_event.is_set():
+                        if tts_enabled and _voice_bridge.barge_in_event.is_set():
                             _voice_bridge.barge_in_event.clear()
                             return
-                        _voice_bridge.publish_token(voice_session_id, piece)
+                        if tts_enabled:
+                            _voice_bridge.publish_token(voice_session_id, piece)
                         yield piece
                 full_streamed = live.write_stream(_voice_stream()) or ""
             except LlamaServerError as e:
@@ -781,7 +792,8 @@ if user_text:
             except Exception as e:
                 live.error(f"Unexpected error: {type(e).__name__}: {e}")
             finally:
-                _voice_bridge.end_turn(voice_session_id)
+                if tts_enabled:
+                    _voice_bridge.end_turn(voice_session_id)
 
         elapsed  = time.time() - start
         st.session_state.last_thinking_time = elapsed

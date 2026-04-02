@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
+from input_guard import sanitize_chunk
 from rag_v1.config.rag_settings import RetrievedChunk
 from rag_v1.runtime.rag_pipeline import RagPipeline
 
@@ -62,7 +63,7 @@ class RagInjector:
 
         k = top_k if top_k is not None else (4 if brain == "FAST" else 10)
         ctx, chunks = self.pipeline.build_context(user_text, k)
-        ctx = ctx.strip()
+        ctx = sanitize_chunk(ctx.strip(), max_chars=None)
 
         if not ctx:
             return list(messages), []
