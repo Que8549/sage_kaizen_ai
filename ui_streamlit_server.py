@@ -616,9 +616,9 @@ with st.expander(
         accept_multiple_files=True,
         key="media_uploader",
         help=(
-            "Images: PNG, JPG, WEBP, GIF, BMP\n"
-            "Audio:  WAV, MP3, FLAC, OGG, M4A  (sent to Qwen2.5-Omni audio encoder)\n"
-            "Video:  MP4, MOV, AVI, MKV, WEBM  (frames extracted; requires cv2)"
+            "Images: PNG, JPG, WEBP, GIF, BMP  → ARCHITECT (Qwen3.5-27B vision mmproj)\n"
+            "Audio:  WAV, MP3, FLAC, OGG, M4A  → FAST (Qwen2.5-Omni audio encoder)\n"
+            "Video:  MP4, MOV, AVI, MKV, WEBM  → ARCHITECT (frames extracted; requires cv2)"
         ),
     )
 

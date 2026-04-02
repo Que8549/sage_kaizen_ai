@@ -8,12 +8,16 @@ The UI layer (ui_streamlit_server.py) calls this class and renders the
 yielded chunks.  It has no direct knowledge of routing internals, prompt
 assembly, or RAG.
 
-Multimodal support (Qwen2.5-Omni FAST brain):
+Multimodal support:
     Attach MediaAttachment objects to a turn via TurnConfig.media_attachments.
     Images and audio are serialised as OpenAI-compatible content-part arrays
     and sent to llama-server's /v1/chat/completions endpoint.
     Video is handled client-side (frame extraction) and arrives here as
-    multiple image attachments.
+    multiple image (video_frame) attachments.
+
+    Routing:
+      - Images / video frames → ARCHITECT (Qwen3.5-27B, vision mmproj, 128K ctx, reasoning)
+      - Audio                 → FAST      (Qwen2.5-Omni, audio encoder; Qwen3.5-27B has none)
 """
 from __future__ import annotations
 
@@ -162,41 +166,35 @@ class ChatService:
 
         Priority order:
           1. Empty input → FAST
-          2. Audio attachments → FAST (Qwen2.5-Omni has audio encoder; ARCHITECT is vision-only)
-          3. Image/video + deep_mode → ARCHITECT (thinking + vision analysis)
-          4. Image/video default → FAST (quick visual queries)
-          5. auto_escalate disabled → respect deep_mode toggle only
-          6. deep_mode on → ARCHITECT (unconditional)
-          7. Q5 is live → ask FAST brain to classify (LLM routing)
-          8. Q5 not live → keyword-scoring heuristic (no server needed)
+          2. Image/video attachments → ARCHITECT (vision mmproj + 128K ctx + reasoning)
+          3. Audio attachments → FAST (Qwen2.5-Omni has audio encoder; Qwen3.5-27B does not)
+          4. auto_escalate disabled → respect deep_mode toggle only
+          5. deep_mode on → ARCHITECT (unconditional)
+          6. Q5 is live → ask FAST brain to classify (LLM routing)
+          7. Q5 not live → keyword-scoring heuristic (no server needed)
         """
         if not user_text and not cfg.media_attachments:
             return RouteDecision(brain="FAST", reasons=["empty_input"], score=0)
 
         # Multimodal routing:
-        #   Audio → always FAST (Qwen2.5-Omni has audio encoder; ARCHITECT is vision-only).
-        #   Image/video + deep_mode → ARCHITECT (Qwen3.5-27B thinking + vision for deep analysis).
-        #   Image/video default → FAST (faster for quick visual queries).
+        #   Image/video → always ARCHITECT (Qwen3.5-27B vision mmproj, 128K context, reasoning).
+        #   Audio → always FAST (Qwen2.5-Omni has audio encoder; Qwen3.5-27B does not).
         if cfg.media_attachments:
             kinds = sorted({a.kind for a in cfg.media_attachments})
-            has_audio = any(a.kind == "audio" for a in cfg.media_attachments)
+            has_vision = any(a.kind in ("image", "video_frame") for a in cfg.media_attachments)
+            has_audio  = any(a.kind == "audio" for a in cfg.media_attachments)
+            if has_vision:
+                return RouteDecision(
+                    brain="ARCHITECT",
+                    reasons=[f"multimodal:{','.join(kinds)}", "vision_architect"],
+                    score=999,
+                )
             if has_audio:
                 return RouteDecision(
                     brain="FAST",
                     reasons=[f"multimodal:{','.join(kinds)}", "audio_requires_fast"],
                     score=0,
                 )
-            if cfg.deep_mode:
-                return RouteDecision(
-                    brain="ARCHITECT",
-                    reasons=[f"multimodal:{','.join(kinds)}", "deep_mode_vision"],
-                    score=999,
-                )
-            return RouteDecision(
-                brain="FAST",
-                reasons=[f"multimodal:{','.join(kinds)}"],
-                score=0,
-            )
 
         if not cfg.auto_escalate:
             return self._manual_decision(cfg.deep_mode)
