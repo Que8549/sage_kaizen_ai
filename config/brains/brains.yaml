@@ -52,7 +52,7 @@ fast:
     # 16K context: 1 image ≈ 1280 tokens, leaving 15104 for conversation.
     ctx_size: 16384
     batch_size: 2048          # larger batch improves image-token prefill speed
-    ubatch_size: 512
+    ubatch_size: 1024         # 1024 halves GPU kernel dispatch rounds vs 512 during RAG prefill
 
     threads: 10
     threads_batch: 10
@@ -80,14 +80,33 @@ fast:
 
 
 # -----------------------------------------------------------------------------
-# ARCHITECT Brain — Qwen3.5-27B Q6_K — port 8012
+# ARCHITECT Brain — Qwen3.5-27B-Uncensored-HauhauCS-Aggressive Q6_K — port 8012
 # GPU: RTX 5090 (CUDA0, 32 GB VRAM)
+#
+# Architecture: Hybrid Gated DeltaNet linear attention + full softmax attention
+#   - 64 layers total; 16 use KV cache (softmax attention), 48 use fixed recurrent state
+#   - KV cache VRAM cost is ~75% lower than a pure-Transformer model of the same size
+#   - Natively multimodal (text + image + video) via mmproj vision encoder
+#   - 262K native context; model card recommends >= 128K for thinking mode
+#
+# VRAM budget on CUDA0 (32 GB):
+#   Model weights Q6_K:        ~21.0 GB
+#   mmproj encoder F16:         ~0.9 GB  (885 MB vision encoder, when enabled)
+#   KV cache q8_0 @ ctx=131072:~4.0 GB  (16 KV layers, 32 heads, head_dim=128)
+#   Compute buffer:             ~1.5 GB
+#   Total w/ mmproj:           ~27.4 GB  → ~4.6 GB headroom  ✓
+#
+# Multimodal setup (optional — requires downloading vision encoder):
+#   huggingface-cli download HauhauCS/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive \
+#     --include "mmproj-Qwen3.5-27B-Uncensored-HauhauCS-Aggressive-f16.gguf" \
+#     --local-dir E:/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive
+#   Then uncomment the mmproj line below.
 # -----------------------------------------------------------------------------
 architect:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
   model: "E:/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive-Q6_K.gguf"
   log: "F:/Projects/sage_kaizen_ai/logs/q6_server.log"
-  startup_timeout_s: 300 # 5 minutes
+  startup_timeout_s: 360    # 6 minutes — 27B model loads; allow extra for mmproj if enabled
 
   server:
     host: "127.0.0.1"
@@ -100,13 +119,15 @@ architect:
     n_gpu_layers: "all"
     split_mode: "none"
 
-    # Context — Qwen3.5-27B is a hybrid DeltaNet+attention model (qwen35 arch):
-    # only 16 of 64 layers use KV cache; the other 48 use a fixed recurrent state.
-    # KV cache VRAM cost is ~75% lower than an equivalent pure-Transformer model.
-    # At ctx=65536 with q8_0 KV the cache costs ~2 GB; 5090 has ~9.7 GB headroom.
-    ctx_size: 65536           # 64K — well within VRAM budget; model trained to 262K
+    # Multimodal vision encoder — uncomment after downloading mmproj file (see header above).
+    # Enables image and video input on the ARCHITECT brain alongside text reasoning.
+    mmproj: "E:/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive/mmproj-Qwen3.5-27B-Uncensored-HauhauCS-Aggressive-f16.gguf"
+
+    # Context — model trained to 262K; model card requires >= 128K for thinking mode.
+    # Only 16/64 layers use KV cache; at 128K q8_0 KV costs ~4 GB (5090 has ~4.6 GB headroom).
+    ctx_size: 131072          # 128K — meets model thinking-mode requirement
     batch_size: 2048          # logical batch (llama.cpp default); better prefill throughput
-    ubatch_size: 512          # physical micro-batch; fewer GPU kernel dispatches per tile
+    ubatch_size: 1024         # 1024 halves GPU kernel dispatch rounds vs 512 during RAG prefill
 
     # More threads for the heavier model
     threads: 22
@@ -128,19 +149,69 @@ architect:
     cache_type_k: "q8_0"     # near-lossless; halves KV memory vs f16
     cache_type_v: "q8_0"     # only 16/64 layers use KV — pressure to go lower is minimal
 
+    # SWA full cache — Qwen3.5-27B's 16 softmax-attention layers use sliding window attention.
+    # Without this flag llama.cpp may use a smaller rolling window, silently losing context
+    # beyond the SWA window.  Enabling full-size SWA cache preserves coherence across the
+    # full 128K context at the cost of the KV VRAM already budgeted above.
+    swa_full: true
+
+    # KV cache reuse via prefix shifting — big latency win for RAG-heavy turns.
+    # The system prompt + injected RAG/wiki/search context is an identical prefix
+    # shared across most turns.  With cache_reuse=256, llama-server attempts to
+    # shift and reuse at least 256 cached tokens rather than re-prefilling from scratch.
+    cache_reuse: 256
+
+    # Raise server process priority so ARCHITECT turns are not preempted by background tasks.
+    prio: 2                   # high (0=normal, 1=medium, 2=high, 3=realtime)
+
     fit: true
-    fit_target: 2048          # 2 GB buffer; extra headroom for 65K ctx window
-    fit_ctx: 65536
+    fit_target: 3072          # 3 GB buffer; extra headroom for 128K ctx + optional mmproj
+    fit_ctx: 131072
 
     no_warmup: true
     n_predict: -1             # unlimited — thinking mode can generate thousands of tokens;
                               # model stops via EOS; clients should set their own max_tokens
 
-    # Thinking mode — Qwen3.5-27B always runs with <think> enabled on ARCHITECT.
-    # Non-thinking fast responses are routed to the FAST brain (Qwen2.5-14B) by router.py.
+    # Thinking mode — Qwen3.5-27B-Uncensored always runs with <think> enabled on ARCHITECT.
+    # Non-thinking fast responses are routed to the FAST brain (Qwen2.5-Omni-7B) by router.py.
+    # Model card recommended sampling (thinking mode): temp=0.6, top_k=20, top_p=0.95.
+    reasoning: "on"           # explicit thinking mode (--reasoning on); b8639+ flag
     reasoning_budget: -1      # unrestricted thinking depth (--reasoning-budget -1)
     reasoning_format: "deepseek"  # routes <think> tokens to reasoning_content in API
                                   # response, keeping the content field clean for the UI
+    # --reasoning-budget-message: only fires when reasoning_budget > 0 (finite).
+    # With reasoning_budget=-1 (unlimited) this flag has no effect.
+    # Example for a capped-budget setup:
+    #   reasoning_budget: 8000
+    #   reasoning_budget_message: "Wrap up reasoning and provide the answer."
+
+    # ── Speculative decoding (draftless n-gram) ───────────────────────────────
+    # ngram-map-k: builds a frequency hash-map of n-gram patterns seen in the
+    # current context and uses them as draft tokens.  No separate model needed.
+    # Expected: ~70% draft acceptance → ~1.7x effective generation throughput.
+    #
+    # IMPORTANT: DO NOT use ngram-mod with Qwen3.5 hybrid models.
+    # Issues #19232 and #19267 document crashes and hangs with hybrid attention
+    # architectures.  ngram-map-k is stable and preferred.
+    #
+    # Minor q8_0 KV compat note: ~5% overhead vs f16 KV — acceptable tradeoff
+    # for the 2x VRAM saving and near-zero quality loss of q8_0.
+    spec_type: "ngram-map-k"
+    spec_ngram_size_n: 5      # 5-token lookup patterns — sweet spot for reasoning chains
+    draft_max: 48             # propose up to 48 draft tokens per step
+    draft_min: 16             # always propose at least 16 (avoids tiny unproductive batches)
+
+    # ── Prefill checkpoints ───────────────────────────────────────────────────
+    # Creates a KV-state snapshot every 4096 tokens during the initial RAG prompt
+    # injection (prefill phase).  For a 4–16K RAG prefix this creates 1–4
+    # checkpoints; subsequent turns whose prefix matches a checkpoint avoid full
+    # reprocessing.  Works correctly alongside swa_full: true.
+    #
+    # Issue #20225 note: without swa_full, Qwen3.5 hybrid models invalidate
+    # checkpoints on every turn (causing full reprocessing).  swa_full: true
+    # (already set above) is the correct fix; checkpoint_every_n_tokens then
+    # resumes working as intended.
+    checkpoint_every_n_tokens: 4096
 
     log_colors: false
     log_timestamps: true

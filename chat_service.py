@@ -94,6 +94,11 @@ class TurnConfig:
     """
     All per-turn generation parameters supplied by the user via the sidebar.
     Frozen so it can be passed around safely.
+
+    Sampling notes (model card recommendations):
+      FAST  (Qwen2.5-Omni-7B):  temp=0.7, top_p=0.80, top_k=40,  min_p=0.05
+      ARCH  (Qwen3.5-27B think): temp=0.6, top_p=0.95, top_k=20,  min_p=0.0
+      ARCH  (Qwen3.5-27B plain): temp=0.7, top_p=0.80, top_k=20,  min_p=0.0
     """
     deep_mode: bool
     auto_escalate: bool
@@ -103,6 +108,10 @@ class TurnConfig:
     temperature_q6: float
     top_p_q5: float
     top_p_q6: float
+    top_k_q5: int
+    top_k_q6: int
+    min_p_q5: float
+    min_p_q6: float
     max_tokens_q5: int
     max_tokens_q6: int
     # Multimodal attachments for this turn (empty tuple = text-only)
@@ -153,19 +162,36 @@ class ChatService:
 
         Priority order:
           1. Empty input → FAST
-          2. Media attachments present → FAST (only Qwen2.5-Omni handles media)
-          3. auto_escalate disabled → respect deep_mode toggle only
-          4. deep_mode on → ARCHITECT (unconditional, text analysis only)
-          5. Q5 is live → ask FAST brain to classify (LLM routing)
-          6. Q5 not live → keyword-scoring heuristic (no server needed)
+          2. Audio attachments → FAST (Qwen2.5-Omni has audio encoder; ARCHITECT is vision-only)
+          3. Image/video + deep_mode → ARCHITECT (thinking + vision analysis)
+          4. Image/video default → FAST (quick visual queries)
+          5. auto_escalate disabled → respect deep_mode toggle only
+          6. deep_mode on → ARCHITECT (unconditional)
+          7. Q5 is live → ask FAST brain to classify (LLM routing)
+          8. Q5 not live → keyword-scoring heuristic (no server needed)
         """
         if not user_text and not cfg.media_attachments:
             return RouteDecision(brain="FAST", reasons=["empty_input"], score=0)
 
-        # Multimodal turns always go to FAST (Qwen2.5-Omni).
-        # ARCHITECT (Qwen3.5-27B) has no vision/audio encoder.
+        # Multimodal routing:
+        #   Audio → always FAST (Qwen2.5-Omni has audio encoder; ARCHITECT is vision-only).
+        #   Image/video + deep_mode → ARCHITECT (Qwen3.5-27B thinking + vision for deep analysis).
+        #   Image/video default → FAST (faster for quick visual queries).
         if cfg.media_attachments:
             kinds = sorted({a.kind for a in cfg.media_attachments})
+            has_audio = any(a.kind == "audio" for a in cfg.media_attachments)
+            if has_audio:
+                return RouteDecision(
+                    brain="FAST",
+                    reasons=[f"multimodal:{','.join(kinds)}", "audio_requires_fast"],
+                    score=0,
+                )
+            if cfg.deep_mode:
+                return RouteDecision(
+                    brain="ARCHITECT",
+                    reasons=[f"multimodal:{','.join(kinds)}", "deep_mode_vision"],
+                    score=999,
+                )
             return RouteDecision(
                 brain="FAST",
                 reasons=[f"multimodal:{','.join(kinds)}"],
@@ -310,6 +336,8 @@ class ChatService:
             messages=messages,
             temperature=float(cfg.temperature_q6 if is_arch else cfg.temperature_q5),
             top_p=float(cfg.top_p_q6 if is_arch else cfg.top_p_q5),
+            top_k=int(cfg.top_k_q6 if is_arch else cfg.top_k_q5),
+            min_p=float(cfg.min_p_q6 if is_arch else cfg.min_p_q5),
             max_tokens=int(cfg.max_tokens_q6 if is_arch else cfg.max_tokens_q5),
             timeouts=self._timeouts,
         )

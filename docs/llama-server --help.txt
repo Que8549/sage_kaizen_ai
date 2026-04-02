@@ -1,12 +1,6 @@
 F:\Projects\sage_kaizen_ai\llama.cpp\build\bin\Release\llama-server.exe --help
+version: 8639 (a1cfb6453) built with MSVC 19.44.35225.0 for x64
 
-load_backend: loaded RPC backend from C:\Users\Alquin\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\ggml-rpc.dll
-ggml_vulkan: Found 3 Vulkan devices:
-ggml_vulkan: 0 = NVIDIA GeForce RTX 5090 (NVIDIA) | uma: 0 | fp16: 1 | bf16: 1 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: NV_coopmat2
-ggml_vulkan: 1 = AMD Radeon(TM) Graphics (AMD proprietary driver) | uma: 1 | fp16: 1 | bf16: 0 | warp size: 32 | shared memory: 32768 | int dot: 1 | matrix cores: none
-ggml_vulkan: 2 = NVIDIA GeForce RTX 5080 (NVIDIA) | uma: 0 | fp16: 1 | bf16: 1 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: NV_coopmat2
-load_backend: loaded Vulkan backend from C:\Users\Alquin\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\ggml-vulkan.dll
-load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe\ggml-cpu-zen4.dll
 ----- common params -----
 
 -h,    --help, --usage                  print usage and exit
@@ -14,7 +8,6 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
 --license                               show source code license and dependencies
 -cl,   --cache-list                     show list of models in cache
 --completion-bash                       print source-able bash completion script for llama.cpp
---verbose-prompt                        print a verbose prompt before generation (default: false)
 -t,    --threads N                      number of CPU threads to use during generation (default: -1)
                                         (env: LLAMA_ARG_THREADS)
 -tb,   --threads-batch N                number of threads to use during batch and prompt processing (default:
@@ -93,8 +86,6 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
                                         (env: LLAMA_ARG_CACHE_TYPE_V)
 -dt,   --defrag-thold N                 KV cache defragmentation threshold (DEPRECATED)
                                         (env: LLAMA_ARG_DEFRAG_THOLD)
---rpc SERVERS                           comma separated list of RPC servers (host:port)
-                                        (env: LLAMA_ARG_RPC)
 --mlock                                 force system to keep model in RAM rather than swapping or compressing
                                         (env: LLAMA_ARG_MLOCK)
 --mmap, --no-mmap                       whether to memory-map model. (if mmap disabled, slower load but may
@@ -182,7 +173,7 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
                                         Q4_K_M doesn't exist.
                                         mmproj is also downloaded automatically if available. to disable, add
                                         --no-mmproj
-                                        example: unsloth/phi-4-GGUF:q4_k_m
+                                        example: ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M
                                         (default: unused)
                                         (env: LLAMA_ARG_HF_REPO)
 -hfd,  -hfrd, --hf-repo-draft <user>/<model>[:quant]
@@ -217,7 +208,7 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
                                          - 3: info
                                          - 4: debug
                                         (default: 3)
-
+                                        
                                         (env: LLAMA_LOG_VERBOSITY)
 --log-prefix                            Enable prefix in log messages
                                         (env: LLAMA_LOG_PREFIX)
@@ -245,15 +236,15 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
                                         edskypmxt)
 --ignore-eos                            ignore end of stream token and continue generating (implies
                                         --logit-bias EOS-inf)
---temp N                                temperature (default: 0.80)
+--temp, --temperature N                 temperature (default: 0.80)
 --top-k N                               top-k sampling (default: 40, 0 = disabled)
                                         (env: LLAMA_ARG_TOP_K)
 --top-p N                               top-p sampling (default: 0.95, 1.0 = disabled)
 --min-p N                               min-p sampling (default: 0.05, 0.0 = disabled)
---top-nsigma N                          top-n-sigma sampling (default: -1.00, -1.0 = disabled)
+--top-nsigma, --top-n-sigma N           top-n-sigma sampling (default: -1.00, -1.0 = disabled)
 --xtc-probability N                     xtc probability (default: 0.00, 0.0 = disabled)
 --xtc-threshold N                       xtc threshold (default: 0.10, 1.0 = disabled)
---typical N                             locally typical sampling, parameter p (default: 1.00, 1.0 = disabled)
+--typical, --typical-p N                locally typical sampling, parameter p (default: 1.00, 1.0 = disabled)
 --repeat-last-n N                       last n tokens to consider for penalize (default: 64, 0 = disabled, -1
                                         = ctx_size)
 --repeat-penalty N                      penalize repeat sequence of tokens (default: 1.00, 1.0 = disabled)
@@ -284,7 +275,7 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
                                         i.e. `--logit-bias 15043+1` to increase likelihood of token ' Hello',
                                         or `--logit-bias 15043-1` to decrease likelihood of token ' Hello'
 --grammar GRAMMAR                       BNF-like grammar to constrain generations (see samples in grammars/
-                                        dir) (default: '')
+                                        dir)
 --grammar-file FNAME                    file to read grammar from
 -j,    --json-schema SCHEMA             JSON schema to constrain generations (https://json-schema.org/), e.g.
                                         `{}` for any JSON object
@@ -304,10 +295,13 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
                                         generation)
 -lcd,  --lookup-cache-dynamic FNAME     path to dynamic lookup cache to use for lookup decoding (updated by
                                         generation)
---ctx-checkpoints, --swa-checkpoints N
+-ctxcp, --ctx-checkpoints, --swa-checkpoints N
                                         max number of context checkpoints to create per slot (default:
-                                        8)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)
+                                        32)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)
                                         (env: LLAMA_ARG_CTX_CHECKPOINTS)
+-cpent, --checkpoint-every-n-tokens N   create a checkpoint every n tokens during prefill (processing), -1 to
+                                        disable (default: 8192)
+                                        (env: LLAMA_ARG_CHECKPOINT_EVERY_NT)
 -cram, --cache-ram N                    set the maximum cache size in MiB (default: 8192, -1 - no limit, 0 -
                                         disable)[(more
                                         info)](https://github.com/ggml-org/llama.cpp/pull/16391)
@@ -358,13 +352,17 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
 -ncmoed, --n-cpu-moe-draft N            keep the Mixture of Experts (MoE) weights of the first N layers in the
                                         CPU for the draft model
                                         (env: LLAMA_ARG_N_CPU_MOE_DRAFT)
--a,    --alias STRING                   set alias for model name (to be used by REST API)
+-a,    --alias STRING                   set model name aliases, comma-separated (to be used by API)
                                         (env: LLAMA_ARG_ALIAS)
+--tags STRING                           set model tags, comma-separated (informational, not used for routing)
+                                        (env: LLAMA_ARG_TAGS)
 --host HOST                             ip address to listen, or bind to an UNIX socket if the address ends
                                         with .sock (default: 127.0.0.1)
                                         (env: LLAMA_ARG_HOST)
 --port PORT                             port to listen (default: 8080)
                                         (env: LLAMA_ARG_PORT)
+--reuse-port                            allow multiple sockets to bind to the same port (default: disabled)
+                                        (env: LLAMA_ARG_REUSE_PORT)
 --path PATH                             path to serve static files from (default: )
                                         (env: LLAMA_ARG_STATIC_PATH)
 --api-prefix PREFIX                     prefix path the server serves from, without the trailing slash
@@ -375,6 +373,16 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
 --webui-config-file PATH                JSON file that provides default WebUI settings (overrides WebUI
                                         defaults)
                                         (env: LLAMA_ARG_WEBUI_CONFIG_FILE)
+--webui-mcp-proxy, --no-webui-mcp-proxy
+                                        experimental: whether to enable MCP CORS proxy - do not enable in
+                                        untrusted environments (default: disabled)
+                                        (env: LLAMA_ARG_WEBUI_MCP_PROXY)
+--tools TOOL1,TOOL2,...                 experimental: whether to enable built-in tools for AI agents - do not
+                                        enable in untrusted environments (default: no tools)
+                                        specify "all" to enable all tools
+                                        available tools: read_file, file_glob_search, grep_search,
+                                        exec_shell_command, write_file, edit_file, apply_diff
+                                        (env: LLAMA_ARG_TOOLS)
 --webui, --no-webui                     whether to enable the Web UI (default: enabled)
                                         (env: LLAMA_ARG_WEBUI)
 --embedding, --embeddings               restrict to only support embedding use case; use only with dedicated
@@ -434,9 +442,15 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
                                         also populating `message.reasoning_content`
                                         (default: auto)
                                         (env: LLAMA_ARG_THINK)
---reasoning-budget N                    controls the amount of thinking allowed; currently only one of: -1 for
-                                        unrestricted thinking budget, or 0 to disable thinking (default: -1)
+-rea,  --reasoning [on|off|auto]        Use reasoning/thinking in the chat ('on', 'off', or 'auto', default:
+                                        'auto' (detect from template))
+                                        (env: LLAMA_ARG_REASONING)
+--reasoning-budget N                    token budget for thinking: -1 for unrestricted, 0 for immediate end,
+                                        N>0 for token budget (default: -1)
                                         (env: LLAMA_ARG_THINK_BUDGET)
+--reasoning-budget-message MESSAGE      message injected before the end-of-thinking tag when reasoning budget
+                                        is exhausted (default: none)
+                                        (env: LLAMA_ARG_THINK_BUDGET_MESSAGE)
 --chat-template JINJA_TEMPLATE          set custom jinja chat template (default: template taken from model's
                                         metadata)
                                         if suffix/prefix are specified, template will be disabled
@@ -444,11 +458,11 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
                                         before this flag):
                                         list of built-in templates:
                                         bailing, bailing-think, bailing2, chatglm3, chatglm4, chatml,
-                                        command-r, deepseek, deepseek2, deepseek3, exaone-moe, exaone3,
-                                        exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite, grok-2,
-                                        hunyuan-dense, hunyuan-moe, kimi-k2, llama2, llama2-sys,
-                                        llama2-sys-bos, llama2-sys-strip, llama3, llama4, megrez, minicpm,
-                                        mistral-v1, mistral-v3, mistral-v3-tekken, mistral-v7,
+                                        command-r, deepseek, deepseek-ocr, deepseek2, deepseek3, exaone-moe,
+                                        exaone3, exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite,
+                                        granite-4.0, grok-2, hunyuan-dense, hunyuan-moe, kimi-k2, llama2,
+                                        llama2-sys, llama2-sys-bos, llama2-sys-strip, llama3, llama4, megrez,
+                                        minicpm, mistral-v1, mistral-v3, mistral-v3-tekken, mistral-v7,
                                         mistral-v7-tekken, monarch, openchat, orion, pangu-embedded, phi3,
                                         phi4, rwkv-world, seed_oss, smolvlm, solar-open, vicuna, vicuna-orca,
                                         yandex, zephyr
@@ -461,21 +475,26 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
                                         before this flag):
                                         list of built-in templates:
                                         bailing, bailing-think, bailing2, chatglm3, chatglm4, chatml,
-                                        command-r, deepseek, deepseek2, deepseek3, exaone-moe, exaone3,
-                                        exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite, grok-2,
-                                        hunyuan-dense, hunyuan-moe, kimi-k2, llama2, llama2-sys,
-                                        llama2-sys-bos, llama2-sys-strip, llama3, llama4, megrez, minicpm,
-                                        mistral-v1, mistral-v3, mistral-v3-tekken, mistral-v7,
+                                        command-r, deepseek, deepseek-ocr, deepseek2, deepseek3, exaone-moe,
+                                        exaone3, exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite,
+                                        granite-4.0, grok-2, hunyuan-dense, hunyuan-moe, kimi-k2, llama2,
+                                        llama2-sys, llama2-sys-bos, llama2-sys-strip, llama3, llama4, megrez,
+                                        minicpm, mistral-v1, mistral-v3, mistral-v3-tekken, mistral-v7,
                                         mistral-v7-tekken, monarch, openchat, orion, pangu-embedded, phi3,
                                         phi4, rwkv-world, seed_oss, smolvlm, solar-open, vicuna, vicuna-orca,
                                         yandex, zephyr
                                         (env: LLAMA_ARG_CHAT_TEMPLATE_FILE)
+--skip-chat-parsing, --no-skip-chat-parsing
+                                        force a pure content parser, even if a Jinja template is specified;
+                                        model will output everything in the content section, including any
+                                        reasoning and/or tool calls (default: disabled)
+                                        (env: LLAMA_ARG_SKIP_CHAT_PARSING)
 --prefill-assistant, --no-prefill-assistant
                                         whether to prefill the assistant's response if the last message is an
                                         assistant message (default: prefill enabled)
                                         when this flag is set, if the last message is an assistant message
                                         then it will be treated as a full message and not prefilled
-
+                                        
                                         (env: LLAMA_ARG_PREFILL_ASSISTANT)
 -sps,  --slot-prompt-similarity SIMILARITY
                                         how much the prompt of a request must match the prompt of a slot in
@@ -512,12 +531,12 @@ load_backend: loaded CPU backend from C:\Users\Alquin\AppData\Local\Microsoft\Wi
 --spec-type [none|ngram-cache|ngram-simple|ngram-map-k|ngram-map-k4v|ngram-mod]
                                         type of speculative decoding to use when no draft model is provided
                                         (default: none)
+                                        
+                                        (env: LLAMA_ARG_SPEC_TYPE)
 --spec-ngram-size-n N                   ngram size N for ngram-simple/ngram-map speculative decoding, length
                                         of lookup n-gram (default: 12)
 --spec-ngram-size-m N                   ngram size M for ngram-simple/ngram-map speculative decoding, length
                                         of draft m-gram (default: 48)
---spec-ngram-check-rate N               ngram check rate for ngram-simple/ngram-map speculative decoding
-                                        (default: 1)
 --spec-ngram-min-hits N                 minimum hits for ngram-map speculative decoding (default: 1)
 -mv,   --model-vocoder FNAME            vocoder model for audio generation (default: unused)
 --tts-use-guide-tokens                  Use guide tokens to improve TTS word recall

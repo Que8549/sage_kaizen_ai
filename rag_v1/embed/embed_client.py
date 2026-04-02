@@ -42,12 +42,9 @@ class EmbedClient:
         r.raise_for_status()
         data = r.json()
 
-        # Pylance needs to know this list will hold embeddings (not None)
-        out: List[List[float]] = [ [] for _ in range(len(texts)) ]
-
+        # JSON parsing already yields Python floats; list() copies without
+        # re-converting each element (skips 1024 float() calls per embedding).
+        out: List[List[float]] = [[] for _ in range(len(texts))]
         for item in data["data"]:
-            emb = item["embedding"]
-            # Be explicit: ensure emb is a list[float]
-            out[item["index"]] = [float(x) for x in emb]
-
+            out[item["index"]] = list(item["embedding"])
         return out

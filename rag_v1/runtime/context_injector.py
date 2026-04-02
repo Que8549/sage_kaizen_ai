@@ -25,8 +25,13 @@ never crashes the app at startup.
 from __future__ import annotations
 
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+# Module-level executor — threads are kept alive for the process lifetime so
+# thread creation cost is paid once, not on every chat turn.
+# max_workers=4 covers the four parallel fetches: doc-RAG, wiki-RAG, search, music.
+_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rag_par")
 
 from input_guard import sanitize_chunk
 from rag_v1.config.rag_settings import RagSettings
@@ -468,17 +473,16 @@ def apply_rag_and_wiki_parallel(
     search_evidence is None when live search was not triggered.
     music_context is "" when music retrieval was not triggered.
     """
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="rag_par") as pool:
-        rag_fut    = pool.submit(apply_rag, messages, user_text, decision)
-        wiki_fut   = pool.submit(_fetch_wiki_result, user_text, decision, wiki_enabled)
-        search_fut = pool.submit(_fetch_search_result, user_text, decision,
-                                 fast_base_url, fast_model_id)
-        music_fut  = pool.submit(_fetch_music_result, user_text, decision)
+    rag_fut    = _POOL.submit(apply_rag, messages, user_text, decision)
+    wiki_fut   = _POOL.submit(_fetch_wiki_result, user_text, decision, wiki_enabled)
+    search_fut = _POOL.submit(_fetch_search_result, user_text, decision,
+                              fast_base_url, fast_model_id)
+    music_fut  = _POOL.submit(_fetch_music_result, user_text, decision)
 
-        rag_messages, rag_sources         = rag_fut.result()
-        wiki_ctx_block, wiki_images       = wiki_fut.result()
-        search_ctx_block, search_evidence = search_fut.result()
-        music_ctx_block                   = music_fut.result()
+    rag_messages, rag_sources         = rag_fut.result()
+    wiki_ctx_block, wiki_images       = wiki_fut.result()
+    search_ctx_block, search_evidence = search_fut.result()
+    music_ctx_block                   = music_fut.result()
 
     # Inject wiki context into already-RAG-enriched messages
     out = list(rag_messages)
