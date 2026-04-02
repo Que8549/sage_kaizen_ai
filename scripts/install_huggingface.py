@@ -19,12 +19,13 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 # Re-download if needed:
 snapshot_download(
-    repo_id = "distil-whisper/distil-large-v3.5",
-    local_dir = "E:/distil-large-v3.5",
-    # allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*", "*Q8_0*",  "*UD-IQ1_M*",  "*UD-IQ1_S*", "*UD-Q6_K_XL*", "*mmproj*F16*"] 
+    repo_id = "HauhauCS/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive",
+    local_dir = "E:/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive",
+    allow_patterns = ["*mmproj*F16*"], 
     max_workers=16,  # 8 = default
 )
 
+# allow_patterns = ["*Q4_K_M*", "*Q5_K_M*", "*Q6_K*", "*UD-Q6_K_XL*", "*Q8_0*", "*mmproj*F16*"] 
 
 # NousResearch/Hermes-4.3-36B-GGUF  https://huggingface.co/NousResearch/Hermes-4.3-36B-GGUF
 # ACE-Step 1.5 https://huggingface.co/ACE-Step/Ace-Step1.5
