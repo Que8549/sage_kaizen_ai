@@ -34,13 +34,51 @@ Thread safety
 """
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import sys
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 _LOG = logging.getLogger("sage_kaizen.audio_analysis")
+
+
+# ---------------------------------------------------------------------------
+# OS-level stderr suppressor
+# ---------------------------------------------------------------------------
+# libsndfile (used by soundfile for MP3) writes "Illegal Audio-MPEG-Header"
+# warnings directly to OS file descriptor 2, bypassing Python's sys.stderr.
+# contextlib.redirect_stderr() cannot suppress them — only dup2(devnull, 2)
+# works at the kernel level.
+#
+# This is safe here because:
+#   - Any real decode failure raises an exception (caught by the caller).
+#   - The suppression window is limited to the single librosa.load() call.
+#   - Python's sys.stderr is restored via the saved duplicate fd.
+#
+# On Windows, os.devnull = 'nul'; on Linux/macOS = '/dev/null'.
+
+@contextlib.contextmanager
+def _suppress_c_stderr():
+    """Suppress C-library stderr output (e.g. mpg123 decode warnings)."""
+    try:
+        # Save a duplicate of the real stderr fd before redirecting
+        saved_fd = os.dup(2)
+    except OSError:
+        yield
+        return
+    try:
+        null_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null_fd, 2)
+        os.close(null_fd)
+        yield
+    finally:
+        # Restore the real stderr fd
+        os.dup2(saved_fd, 2)
+        os.close(saved_fd)
 
 # ---------------------------------------------------------------------------
 # Krumhansl-Schmuckler key profiles
@@ -91,8 +129,12 @@ def extract_bpm_key(path: Path) -> tuple[float | None, str | None]:
         return None, None
 
     try:
-        # Load at native sample rate, mono, first 90 s only
-        y, sr = librosa.load(str(path), sr=None, mono=True, duration=90.0)
+        # Load at native sample rate, mono, first 90 s only.
+        # Suppress C-level stderr to squelch libsndfile/mpg123 "Illegal
+        # Audio-MPEG-Header" notes that appear on MP3s with embedded LYRICS3
+        # tags (harmless — the decoder resyncs and loads the audio correctly).
+        with _suppress_c_stderr():
+            y, sr = librosa.load(str(path), sr=None, mono=True, duration=90.0)
     except Exception as exc:
         _LOG.debug("librosa.load failed for %s: %s", path.name, exc)
         return None, None

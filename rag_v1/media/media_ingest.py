@@ -676,7 +676,7 @@ def main() -> None:
         )
     )
     
-    parser.add_argument("--root",            default=None,        help="Root directory to scan recursively (required unless --lyrics-only)")
+    parser.add_argument("--root",            default=r"G:\Music\MP3", help="Root directory to scan recursively (default: G:\\Music\\MP3)")
     parser.add_argument("--audio-device",    default=None,        help="Override CLAP_DEVICE (e.g. cuda:1)")
     parser.add_argument("--image-batch",     type=int,            default=cfg.image_batch)
     parser.add_argument("--audio-batch",     type=int,            default=cfg.audio_batch)
@@ -689,12 +689,9 @@ def main() -> None:
     parser.add_argument("--lyrics-delay",    type=float,          default=0.3,  help="Seconds to sleep between Genius calls per worker (default: 0.3)")
     parser.add_argument("--no-analysis",     action="store_true",               help="Skip audio analysis phase (BPM, key, vocal detection, explicit flagging)")
     parser.add_argument("--analysis-workers",type=int,            default=4,    help="Thread pool size for librosa BPM/key extraction (default: 4)")
-    parser.add_argument("--cluster",         action="store_true",               help="Run KMeans clustering on audio embeddings after analysis")
+    parser.add_argument("--no-cluster",      action="store_true",               help="Skip KMeans clustering of audio embeddings")
     parser.add_argument("--n-clusters",      type=int,            default=50,   help="Number of KMeans clusters (default: 50)")
     args = parser.parse_args()
-
-    if not args.lyrics_only and args.root is None:
-        parser.error("--root is required unless --lyrics-only is specified")
 
     from pg_settings import PgSettings  # noqa: PLC0415
     pg = PgSettings()
@@ -756,7 +753,7 @@ def main() -> None:
         _LOG.info("Audio analysis complete. %s", analysis_stats.report())
 
     # ── Phase 4: acoustic clustering (optional, only when --cluster) ──────── #
-    if args.cluster and not args.lyrics_only:
+    if not args.no_cluster and not args.lyrics_only:
         from rag_v1.media.audio_cluster import run_clustering  # noqa: PLC0415
 
         cluster_stats = run_clustering(

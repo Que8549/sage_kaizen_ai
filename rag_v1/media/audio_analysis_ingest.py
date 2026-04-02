@@ -192,7 +192,8 @@ def run_audio_analysis_ingest(
 
         # ── 3. BPM + key extraction (ThreadPoolExecutor, CPU-bound)
         bpm_key_map: dict[str, _AnalysisResult] = {}
-        processed = 0
+        extracted = 0   # Phase 1 counter — separate from stats (which count Phase 2 DB writes)
+        extract_errors = 0
 
         with ThreadPoolExecutor(
             max_workers=workers,
@@ -202,13 +203,18 @@ def run_audio_analysis_ingest(
             for future in as_completed(future_to_job):
                 result = future.result()
                 bpm_key_map[result.media_id] = result
-                processed += 1
+                extracted += 1
                 if result.error:
-                    stats.errors += 1
-                if processed % log_every == 0:
-                    msg = f"[{processed}/{total}] BPM/key extracted — {stats.report()}"
+                    extract_errors += 1
+                if extracted % log_every == 0:
+                    msg = (
+                        f"[{extracted}/{total}] BPM/key extracted"
+                        f" — decode_errors={extract_errors}"
+                    )
                     _LOG.info(msg)
                     print(msg, flush=True)
+
+        stats.errors = extract_errors  # carry Phase-1 errors into final report
 
         # ── 4. Vocal detection + explicit scan + DB write (single thread)
         with conn.cursor() as cur:
