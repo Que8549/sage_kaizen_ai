@@ -17,6 +17,7 @@ Fallback behaviour
 """
 from __future__ import annotations
 
+from input_guard import sanitize_search_snippet
 from openai_client import HttpTimeouts, stream_chat_completions
 from search.models import SearchEvidence
 from sk_logging import get_logger
@@ -63,14 +64,14 @@ def summarize_evidence(
 
     to = timeouts or _SUMMARIZER_TIMEOUTS
 
-    # Build numbered results block for the prompt
+    # Build numbered results block for the prompt — sanitize each snippet
     lines: list[str] = []
     for i, r in enumerate(evidence.results, 1):
         date_part = f" | {r.published_date}" if r.published_date else ""
         lines.append(
             f"[{i}] {r.title} | {r.source_engine}{date_part}\n"
             f"URL: {r.url}\n"
-            f"Snippet: {r.snippet}"
+            f"Snippet: {sanitize_search_snippet(r.snippet)}"
         )
     results_block = "\n\n".join(lines)
 
@@ -126,9 +127,7 @@ def build_raw_context(evidence: SearchEvidence, snippet_max_chars: int = 300) ->
     lines: list[str] = []
     for i, r in enumerate(evidence.results, 1):
         date_part = f" | {r.published_date}" if r.published_date else ""
-        snippet = r.snippet
-        if len(snippet) > snippet_max_chars:
-            snippet = snippet[:snippet_max_chars] + "..."
+        snippet = sanitize_search_snippet(r.snippet, max_chars=snippet_max_chars)
         lines.append(
             f"[{i}] {r.title} | {r.source_engine}{date_part}\n"
             f"URL: {r.url}\n"
