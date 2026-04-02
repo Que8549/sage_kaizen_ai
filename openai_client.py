@@ -11,6 +11,26 @@ class LlamaServerError(RuntimeError):
     pass
 
 
+# Per-host requests.Session cache — reuses TCP connections across turns.
+# Plain requests.post()/get() open a new socket per call; a Session keeps the
+# connection alive so the TCP handshake cost (~0.1–1 ms on loopback) is paid
+# once per server, not once per turn.
+_sessions: Dict[str, requests.Session] = {}
+
+
+def _session(base_url: str) -> requests.Session:
+    """Return (or create) a persistent Session for this base URL."""
+    sess = _sessions.get(base_url)
+    if sess is None:
+        sess = requests.Session()
+        # Keep up to 4 connections per host alive in the pool
+        adapter = requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=4)
+        sess.mount("http://", adapter)
+        sess.mount("https://", adapter)
+        _sessions[base_url] = sess
+    return sess
+
+
 @dataclass(frozen=True)
 class HttpTimeouts:
     connect_s: float
@@ -45,7 +65,7 @@ def _probe_get(base: str, path: str, *, timeouts: HttpTimeouts) -> Tuple[bool, s
     """
     url = f"{base}{path}"
     try:
-        r = requests.get(url, timeout=_timeout_tuple(timeouts))
+        r = _session(base).get(url, timeout=_timeout_tuple(timeouts))
         if r.status_code == 200:
             return True, f"OK ({path})"
         return False, f"{path}={r.status_code}"
@@ -93,7 +113,7 @@ def discover_model_id(base_url: str, *, timeouts: HttpTimeouts) -> Optional[str]
     """
     base = _normalize_base_url(base_url)
     try:
-        r = requests.get(f"{base}/v1/models", timeout=_timeout_tuple(timeouts))
+        r = _session(base).get(f"{base}/v1/models", timeout=_timeout_tuple(timeouts))
         r.raise_for_status()
         data = r.json()
         items = data.get("data", [])
@@ -126,6 +146,8 @@ def stream_chat_completions(
     top_p: float,
     max_tokens: int,
     timeouts: HttpTimeouts,
+    top_k: int = -1,
+    min_p: float = 0.0,
 ) -> Iterator[str]:
     base = _normalize_base_url(base_url)
     url = f"{base}/v1/chat/completions"
@@ -137,9 +159,11 @@ def stream_chat_completions(
         "temperature": float(temperature),
         "top_p": float(top_p),
         "max_tokens": int(max_tokens),
+        "top_k": int(top_k),
+        "min_p": float(min_p),
     }
 
-    with requests.post(url, json=payload, stream=True, timeout=_timeout_tuple(timeouts)) as r:
+    with _session(base).post(url, json=payload, stream=True, timeout=_timeout_tuple(timeouts)) as r:
         if r.status_code // 100 != 2:
             try:
                 body = r.text

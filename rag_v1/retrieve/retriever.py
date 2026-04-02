@@ -13,19 +13,22 @@ class PgvectorRetriever:
         q_emb = self.embed.embed([query])[0]
 
         max_dist = getattr(self.cfg, "max_distance", 0.5)
+
+        # Direct ORDER BY lets the HNSW index handle candidate selection;
+        # the WHERE distance filter is applied in Python so the planner never
+        # falls back to a seq-scan to satisfy the threshold condition.
         sql = """
-        WITH q AS (SELECT %s::vector AS v)
         SELECT source_id, chunk_id, content, metadata,
-               (embedding <=> q.v) AS distance
-        FROM rag_chunks, q
-        WHERE embedding IS NOT NULL
-          AND (embedding <=> q.v) < %s
-        ORDER BY embedding <=> q.v
+               (embedding <=> %s::vector) AS distance
+        FROM rag_chunks
+        ORDER BY embedding <=> %s::vector
         LIMIT %s;
         """
 
-        with get_conn(self.cfg.pg_dsn) as conn:
-            rows = conn.execute(sql, (q_emb, max_dist, k)).fetchall()
+        conn = get_conn(self.cfg.pg_dsn)
+        conn.execute("SET hnsw.ef_search = 100")
+        rows = conn.execute(sql, (q_emb, q_emb, k)).fetchall()
+        rows = [r for r in rows if float(r["distance"]) < max_dist]
 
         results = []
         for r in rows:

@@ -317,6 +317,7 @@ if "last_route"          not in st.session_state: st.session_state.last_route   
 if "fb_rated_ids"        not in st.session_state: st.session_state.fb_rated_ids        = set()
 if "fb_stats_dirty"      not in st.session_state: st.session_state.fb_stats_dirty      = True
 if "pending_attachments" not in st.session_state: st.session_state.pending_attachments = []
+if "tts_enabled"         not in st.session_state: st.session_state.tts_enabled         = True
 
 # ── Feedback DB: one-time schema init ──────────────────────────────────────
 # Module-level flag: ensure_schema() only needs one DB round-trip per process.
@@ -386,6 +387,24 @@ def _render_server_status() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
+# TTS toggle fragment                                                           #
+# ─────────────────────────────────────────────────────────────────────────── #
+# Isolated in a fragment so toggling it does NOT trigger a full app rerun.
+# A full rerun while the architect brain is streaming kills the generator,
+# stopping the response mid-stream.  Storing the value in session_state lets
+# the turn execution code snapshot it once at turn start.
+
+@st.fragment
+def _tts_toggle() -> None:
+    val = st.toggle(
+        "Voice TTS",
+        value=st.session_state.tts_enabled,
+        help="Send LLM responses to the TTS engine. Disable to read only, no audio output.",
+    )
+    st.session_state.tts_enabled = val
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 # Sidebar                                                                      #
 # ─────────────────────────────────────────────────────────────────────────── #
 
@@ -412,7 +431,7 @@ with st.sidebar:
             st.warning("Tried to stop, but one or more servers may still be running.")
 
     _render_server_status()
-    tts_enabled = st.toggle("Voice TTS", value=True, help="Send LLM responses to the TTS engine. Disable to read only, no audio output.")
+    _tts_toggle()
 
     if st.button("Discover model IDs"):
         mid5, mid6 = session.discover_model_ids(timeouts_status)
@@ -443,12 +462,25 @@ with st.sidebar:
     )
 
     st.subheader("Generation")
-    temperature_q5  = st.slider("Q5 temperature",  0.0, 2.0, 0.7,  0.05)
-    temperature_q6  = st.slider("Q6 temperature",  0.0, 2.0, 0.6,  0.05)
-    top_p_q5        = st.slider("Q5 top_p",        0.1, 1.0, 0.80, 0.01)
-    top_p_q6        = st.slider("Q6 top_p",        0.1, 1.0, 0.95, 0.01)
-    max_tokens_q5   = st.selectbox("Q5 max_tokens", [1024, 2048, 4096, 8192, 16384], index=2)
-    max_tokens_q6   = st.selectbox("Q6 max_tokens", [4096, 8192, 16384, 32768, 65536], index=3)
+    st.caption("FAST = Qwen2.5-Omni-7B  |  ARCH = Qwen3.5-27B (thinking)")
+    temperature_q5  = st.slider("FAST temperature",  0.0, 2.0,  0.70, 0.05,
+        help="Qwen2.5-Omni-7B. Model-card default: 0.7")
+    temperature_q6  = st.slider("ARCH temperature",  0.0, 2.0,  0.60, 0.05,
+        help="Qwen3.5-27B thinking mode. Model-card default: 0.6")
+    top_p_q5        = st.slider("FAST top_p",        0.0, 1.0,  0.80, 0.01,
+        help="Nucleus sampling. Model-card default: 0.80")
+    top_p_q6        = st.slider("ARCH top_p",        0.0, 1.0,  0.95, 0.01,
+        help="Nucleus sampling. Model-card default: 0.95")
+    top_k_q5        = st.slider("FAST top_k",        1,   200,  40,   1,
+        help="Top-K sampling. llama.cpp default: 40")
+    top_k_q6        = st.slider("ARCH top_k",        1,   200,  20,   1,
+        help="Top-K sampling. Model-card default: 20")
+    min_p_q5        = st.slider("FAST min_p",        0.0, 0.5,  0.05, 0.01,
+        help="Min-P sampling. llama.cpp default: 0.05")
+    min_p_q6        = st.slider("ARCH min_p",        0.0, 0.5,  0.00, 0.01,
+        help="Min-P sampling. Model-card default: 0.0 (disabled)")
+    max_tokens_q5   = st.selectbox("FAST max_tokens", [1024, 2048, 4096, 8192, 16384], index=2)
+    max_tokens_q6   = st.selectbox("ARCH max_tokens", [4096, 8192, 16384, 32768, 65536], index=3)
 
     if st.session_state.last_thinking_time is not None:
         st.caption(f"\u23F1\uFE0F Last thinking time: {st.session_state.last_thinking_time:.2f}s")
@@ -665,6 +697,10 @@ if user_text:
         temperature_q6=temperature_q6,
         top_p_q5=top_p_q5,
         top_p_q6=top_p_q6,
+        top_k_q5=int(top_k_q5),
+        top_k_q6=int(top_k_q6),
+        min_p_q5=float(min_p_q5),
+        min_p_q6=float(min_p_q6),
         max_tokens_q5=int(max_tokens_q5),
         max_tokens_q6=int(max_tokens_q6),
         media_attachments=turn_attachments,
@@ -772,17 +808,22 @@ if user_text:
                 media_attachments=turn_attachments,
             )
 
+            # Snapshot tts_enabled once so the generator is not sensitive to
+            # mid-turn widget changes (toggling the sidebar fragment would not
+            # trigger a full rerun, but a snapshot is still safer).
+            _tts_on = bool(st.session_state.tts_enabled)
+
             voice_session_id = str(uuid4())
-            if tts_enabled:
+            if _tts_on:
                 _voice_bridge.start_turn(voice_session_id, decision.brain)
             full_streamed = ""
             try:
                 def _voice_stream():
                     for piece in chat_svc.stream_response(messages, decision, cfg):
-                        if tts_enabled and _voice_bridge.barge_in_event.is_set():
+                        if _tts_on and _voice_bridge.barge_in_event.is_set():
                             _voice_bridge.barge_in_event.clear()
                             return
-                        if tts_enabled:
+                        if _tts_on:
                             _voice_bridge.publish_token(voice_session_id, piece)
                         yield piece
                 full_streamed = live.write_stream(_voice_stream()) or ""
@@ -791,7 +832,7 @@ if user_text:
             except Exception as e:
                 live.error(f"Unexpected error: {type(e).__name__}: {e}")
             finally:
-                if tts_enabled:
+                if _tts_on:
                     _voice_bridge.end_turn(voice_session_id)
 
         elapsed  = time.time() - start

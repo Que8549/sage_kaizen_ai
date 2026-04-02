@@ -79,7 +79,6 @@ SELECT
     wc.text,
     (wc.embedding <=> %s::vector) AS distance
 FROM wiki_chunks wc
-WHERE (wc.embedding <=> %s::vector) < %s
 ORDER BY wc.embedding <=> %s::vector
 LIMIT %s;
 """
@@ -283,12 +282,15 @@ class WikiRetriever:
     # ------------------------------------------------------------------ #
 
     def _get_chunks(self, qvec: list[float], top_k: int) -> list[WikiChunk]:
-        with get_conn(self._pg_dsn) as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                rows = cur.execute(
-                    _SQL_TOP_CHUNKS,
-                    (qvec, qvec, self._max_distance, qvec, top_k),
-                ).fetchall()
+        conn = get_conn(self._pg_dsn)
+        conn.execute("SET hnsw.ef_search = 100")
+        with conn.cursor(row_factory=dict_row) as cur:
+            rows = cur.execute(
+                _SQL_TOP_CHUNKS,
+                (qvec, qvec, top_k),
+            ).fetchall()
+        # Filter by distance threshold in Python; keeps the HNSW index path clean
+        rows = [r for r in rows if float(r["distance"]) < self._max_distance]
 
         return [
             WikiChunk(
@@ -312,12 +314,12 @@ class WikiRetriever:
         if not bundle_ids:
             return []
 
-        with get_conn(self._pg_dsn) as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                rows = cur.execute(
-                    _SQL_TOP_IMAGES,
-                    (qvec, qvec, bundle_ids, top_images),
-                ).fetchall()
+        conn = get_conn(self._pg_dsn)
+        with conn.cursor(row_factory=dict_row) as cur:
+            rows = cur.execute(
+                _SQL_TOP_IMAGES,
+                (qvec, qvec, bundle_ids, top_images),
+            ).fetchall()
 
         images: list[WikiImage] = []
         for row in rows:

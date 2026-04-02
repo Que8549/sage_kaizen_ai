@@ -142,8 +142,8 @@ def route(
 ) -> RouteDecision:
     """
     Returns a routing decision:
-      - FAST      -> 5080 (Qwen2.5-14B Q6_K)
-      - ARCHITECT -> 5090 (Qwen2.5-32B Q6_K_L)
+      - FAST      -> 5080 (Qwen2.5-Omni-7B Q8_0, multimodal)
+      - ARCHITECT -> 5090 (Qwen3.5-27B-Uncensored Q6_K, thinking+multimodal)
 
     voice_mode: when True, short queries (<150 chars) receive a -1 score bias
                 toward FAST, reflecting the conversational nature of voice input.
