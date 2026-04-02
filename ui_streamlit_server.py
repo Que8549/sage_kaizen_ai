@@ -39,7 +39,7 @@ from input_guard import InjectionDetectedError, check_user_input
 from rag_v1.retrieve.citations import format_sources_markdown
 from inference_session import InferenceSession
 from mermaid_streamlit import DiagramHandler
-from openai_client import HttpTimeouts, LlamaServerError, _normalize_base_url
+from openai_client import HttpTimeouts, LlamaServerError, _normalize_base_url, health_check
 from prompt_library import TemplateKey
 from router import route as _heuristic_route, llm_route as _llm_route
 from router import RouteDecision
@@ -305,22 +305,6 @@ _auto_start_servers()
 timeouts        = HttpTimeouts(connect_s=CONFIG.connect_timeout_s, read_s=CONFIG.read_timeout_s)
 timeouts_status = HttpTimeouts(connect_s=0.5, read_s=1.0)
 
-# ── Health-check TTL cache (2 s) ─────────────────────────────────────────── #
-# health_q5/q6 fire on every Streamlit rerun; gate with a 2 s module-level
-# cache to avoid hammering llama-server on every keystroke / widget click.
-_HEALTH_TTL = 2.0
-_health_cache: dict = {}  # key → (result_tuple, expiry_float)
-
-
-def _cached_health(key: str, fn) -> tuple:
-    entry = _health_cache.get(key)
-    now = time.monotonic()
-    if entry and now < entry[1]:
-        return entry[0]
-    result = fn()
-    _health_cache[key] = (result, now + _HEALTH_TTL)
-    return result
-
 # ─────────────────────────────────────────────────────────────────────────── #
 # Session state                                                                #
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -381,6 +365,27 @@ _voice_input_poller()
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
+# Server-status fragment (polls every 3 s)                                     #
+# ─────────────────────────────────────────────────────────────────────────── #
+# Uses @st.fragment(run_every=3) so the health captions update automatically
+# as servers warm up — no user interaction required.  Called inside the
+# sidebar block so its elements are rendered there.
+
+@st.fragment(run_every=3.0)
+def _render_server_status() -> None:
+    """Render live server health captions; reruns every 3 s independently."""
+    _q5_url = _normalize_base_url(CONFIG.q5_base_url)
+    _q6_url = _normalize_base_url(CONFIG.q6_base_url)
+    _ok5, _d5 = health_check(_q5_url, timeouts=timeouts_status)
+    _ok6, _d6 = health_check(_q6_url, timeouts=timeouts_status)
+    st.caption(f"Q5 (Omni): {'✅' if _ok5 else '❌'} {_d5}")
+    st.caption(f"Q6 (Architect): {'✅' if _ok6 else '❌'} {_d6}")
+    _v_icon  = "🎙" if _voice_bridge.voice_ready else "🔄"
+    _v_label = "ready" if _voice_bridge.voice_ready else "loading models..."
+    st.caption(f"{_v_icon} Voice: {_v_label}")
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 # Sidebar                                                                      #
 # ─────────────────────────────────────────────────────────────────────────── #
 
@@ -406,13 +411,7 @@ with st.sidebar:
         else:
             st.warning("Tried to stop, but one or more servers may still be running.")
 
-    ok5, d5 = _cached_health("q5", lambda: session.health_q5(timeouts_status))
-    ok6, d6 = _cached_health("q6", lambda: session.health_q6(timeouts_status))
-    st.caption(f"Q5 (Omni): {'✅' if ok5 else '❌'} {d5}")
-    st.caption(f"Q6 (Architect): {'✅' if ok6 else '❌'} {d6}")
-    _v_icon = "🎙" if _voice_bridge.voice_ready else "🔄"
-    _v_label = "ready" if _voice_bridge.voice_ready else "loading models..."
-    st.caption(f"{_v_icon} Voice: {_v_label}")
+    _render_server_status()
     tts_enabled = st.toggle("Voice TTS", value=True, help="Send LLM responses to the TTS engine. Disable to read only, no audio output.")
 
     if st.button("Discover model IDs"):
@@ -532,7 +531,7 @@ for m in st.session_state.messages:
                     placeholder="Wrong facts, too verbose, etc. (optional)",
                     label_visibility="collapsed",
                 )
-                tb_c1, tb_c2, tb_c3 = st.columns([1, 1, 10])
+                tb_c1, tb_c2, _ = st.columns([1, 1, 10])
                 with tb_c1:
                     thumb_up   = st.button("\U0001F44D", key=f"up_{msg_id}")
                 with tb_c2:
