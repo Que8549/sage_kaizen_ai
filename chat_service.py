@@ -35,7 +35,7 @@ from prompt_library import (
     sage_fast_core,
 )
 from rag_v1.runtime.context_injector import apply_rag_and_wiki_parallel
-from router import RouteDecision, route as heuristic_route
+from router import RouteDecision, route as heuristic_route, heuristic_is_ambiguous
 from sk_logging import get_logger
 
 _LOG = get_logger("sage_kaizen.chat_service")
@@ -202,7 +202,16 @@ class ChatService:
         if cfg.deep_mode:
             return RouteDecision(brain="ARCHITECT", reasons=["manual_deep_mode"], score=999)
 
-        # LLM routing: only works when Q5 is already running
+        # Two-tier routing:
+        #   1. Run instant keyword heuristic first (0 ms, no server call).
+        #   2. Only for ambiguous scores (1-2) call the FAST brain to classify.
+        #      Clear FAST (score=0) and clear ARCHITECT (score≥3) skip the LLM
+        #      round-trip entirely, saving ~500ms per non-ambiguous turn.
+        heuristic = heuristic_route(user_text, force_architect=False)
+        if not heuristic_is_ambiguous(heuristic.score):
+            return heuristic
+
+        # Ambiguous zone — ask FAST brain for a tie-break (only when it's running)
         q5_up, _ = self._session.health_q5(self._status_timeouts)
         if q5_up:
             try:
@@ -213,9 +222,9 @@ class ChatService:
                     timeouts=self._status_timeouts,
                 )
             except Exception:
-                _LOG.warning("LLM routing failed; falling back to heuristic")
+                _LOG.warning("LLM routing failed; using heuristic result (score=%d)", heuristic.score)
 
-        return heuristic_route(user_text, force_architect=False)
+        return heuristic
 
     @staticmethod
     def _manual_decision(deep_mode: bool) -> RouteDecision:

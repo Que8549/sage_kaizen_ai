@@ -66,6 +66,18 @@ fast:
     cache_type_k: "q8_0"
     cache_type_v: "q8_0"
 
+    # KV prefix cache in host RAM — llama-server stores a copy of the most
+    # recently computed KV prefix in system RAM so the next turn that shares
+    # the same prefix (system prompt + RAG context) can skip re-prefilling.
+    # 512 MiB covers the full system-prompt + a typical RAG injection.
+    # Benchmark: ~93% TTFT reduction for cache-hit turns (Discussion #20574).
+    cache_ram: 512
+
+    # Lower slot-prompt-similarity threshold → more aggressive KV slot reuse.
+    # Default is 0.50 in older builds; 0.10 means 90% of turns will attempt
+    # to reuse the nearest slot's cached prefix rather than starting fresh.
+    slot_prompt_similarity: 0.10
+
     fit: true
     fit_ctx: 16384
     fit_target: 512
@@ -163,6 +175,16 @@ architect:
 
     # Raise server process priority so ARCHITECT turns are not preempted by background tasks.
     prio: 2                   # high (0=normal, 1=medium, 2=high, 3=realtime)
+
+    # KV prefix cache in host RAM (see FAST brain notes above for rationale).
+    # 256 MiB is smaller because ARCHITECT already has aggressive prefix
+    # checkpointing (checkpoint_every_n_tokens: 4096) + cache_reuse: 256.
+    # Together these cover the reuse space; cache_ram covers the cross-turn case.
+    cache_ram: 256
+
+    # Aggressive slot-reuse for the single ARCHITECT slot (parallel=1).
+    # With one slot there is no contention, so the lower threshold is safe.
+    slot_prompt_similarity: 0.10
 
     fit: true
     fit_target: 3072          # 3 GB buffer; extra headroom for 128K ctx + optional mmproj

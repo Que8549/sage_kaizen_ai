@@ -11,10 +11,15 @@ DEPTH_HINTS = (
     "explain", "analyze", "compare", "why", "how", "history", "philosophy", "theology",
     "deep", "in depth", "detailed", "step-by-step", "teach", "tutor", "architecture",
     "design", "tradeoff", "pros and cons", "evaluate", "optimize", "tune", "take time to think",
-    "double check your answer", "religious", "religion", "psychology", "philosophy",
+    "double check your answer", "religious", "religion", "psychology",
 )
 
-CODE_HINTS = ("code", "python", "c#", "typescript", "debug", "stack trace", "error", "traceback", "exception")
+CODE_HINTS = (
+    "code", "python", "c#", "typescript", "javascript", "rust", "go lang", "golang",
+    "sql", "bash", "shell script", "powershell", "regex", "function", "class definition",
+    "debug", "stack trace", "error", "traceback", "exception", "refactor", "unit test",
+    "postgresql",
+)
 
 FAST_HINTS = ("summarize", "tl;dr", "quick", "brief", "short", "bullet", "one sentence", "in one paragraph")
 
@@ -93,6 +98,15 @@ class RouteDecision:
     needs_search: bool = False                      # True → run live web search this turn
     search_categories: Tuple[str, ...] = field(default_factory=tuple)  # SearXNG categories to query
     needs_music: bool = False                       # True → run music retrieval this turn
+
+
+def heuristic_is_ambiguous(score: int) -> bool:
+    """
+    True when the heuristic score falls in the ambiguous zone (1–2).
+    Score 0   = clear FAST;  ≥3 = clear ARCHITECT;  1–2 = uncertain.
+    Only the ambiguous zone benefits from the extra LLM classification round-trip.
+    """
+    return score in (1, 2)
 
 
 def _log_decision(decision: "RouteDecision", user_text: str) -> None:
@@ -252,16 +266,11 @@ def route(
 # ---------------------------------------------------
 
 _CLASSIFY_SYSTEM = (
-    "You are a query router. Your only job is to classify queries.\n\n"
-    "Reply with exactly one word: FAST, ARCHITECT, or SEARCH.\n\n"
-    "FAST — simple questions, quick lookups, summaries, casual chat, "
-    "basic calculations, short creative tasks, factual questions answerable from training data\n"
-    "ARCHITECT — deep technical analysis, code review, architecture design, "
-    "complex multi-step reasoning, long-form writing, advanced tutoring, "
-    "hardware tuning, system design\n"
-    "SEARCH — any query that requires current or live information: today's news, "
-    "latest events, recent research, live prices or scores, breaking announcements, "
-    "recent software releases, anything that likely happened after your training cutoff"
+    "Route queries. Reply with ONE word only: FAST, ARCHITECT, or SEARCH.\n"
+    "FAST: simple questions, summaries, casual chat, quick facts, basic math, short creative tasks.\n"
+    "ARCHITECT: deep analysis, code review, system design, multi-step reasoning, long writing.\n"
+    "SEARCH: needs live/current data — news, prices, scores, recent events, new releases.\n"
+    "No explanation. One word."
 )
 
 
