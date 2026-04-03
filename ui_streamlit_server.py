@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import io
 import logging
@@ -11,6 +12,27 @@ from typing import List, Optional, Tuple
 from uuid import uuid4
 
 import streamlit as st
+
+# ── Suppress asyncio "Event loop is closed" on Ctrl+C shutdown ───────────────
+# Python 3.12+ closes the asyncio event loop earlier during shutdown than
+# Streamlit expects.  When the signal handler calls runtime.stop() →
+# eventloop.call_soon_threadsafe(), the loop is already closed, raising:
+#   RuntimeError: Event loop is closed
+# printed as "Exception ignored while joining a thread in _thread._shutdown()".
+# This is harmless — shutdown completes — but noisy.  Patch call_soon_threadsafe
+# to silently swallow the closed-loop error during teardown.
+_orig_call_soon_threadsafe = asyncio.BaseEventLoop.call_soon_threadsafe
+
+def _patched_call_soon_threadsafe(self, callback, *args, context=None):  # type: ignore[override]
+    try:
+        return _orig_call_soon_threadsafe(self, callback, *args, context=context)
+    except RuntimeError as exc:
+        if "Event loop is closed" in str(exc):
+            return
+        raise
+
+asyncio.BaseEventLoop.call_soon_threadsafe = _patched_call_soon_threadsafe  # type: ignore[method-assign]
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ── Suppress benign Tornado WebSocket error on Ctrl+C shutdown ───────────────
 # When Streamlit stops (RuntimeState.STOPPING), the browser WebSocket may
@@ -616,9 +638,9 @@ with st.expander(
         accept_multiple_files=True,
         key="media_uploader",
         help=(
-            "Images: PNG, JPG, WEBP, GIF, BMP\n"
-            "Audio:  WAV, MP3, FLAC, OGG, M4A  (sent to Qwen2.5-Omni audio encoder)\n"
-            "Video:  MP4, MOV, AVI, MKV, WEBM  (frames extracted; requires cv2)"
+            "Images: PNG, JPG, WEBP, GIF, BMP  → ARCHITECT (Qwen3.5-27B vision mmproj)\n"
+            "Audio:  WAV, MP3, FLAC, OGG, M4A  → FAST (Qwen2.5-Omni audio encoder)\n"
+            "Video:  MP4, MOV, AVI, MKV, WEBM  → ARCHITECT (frames extracted; requires cv2)"
         ),
     )
 
