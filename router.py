@@ -34,11 +34,10 @@ _VERSUS_RE = re.compile(r"(?:^|[\s\W])versus(?:$|[\s\W])")
 # Intentionally conservative to avoid false positives on common words like
 # "today I want to learn..." (no search needed) vs "what happened today" (search needed).
 _SEARCH_TEMPORAL_HINTS: Tuple[str, ...] = (
-    "what happened today", "today's news", "latest news", "breaking news",
+    "today's news", "latest news", "breaking news",
     "current events", "right now", "this week's", "this month's",
     "just announced", "recently announced", "just released", "newly released",
-    "trending now", "live score", "live results", "stock price", "current price",
-    "today's weather", "weather forecast",
+    "trending now", "live score", "live results", "stock price", "current price",    
 )
 
 # Explicit search-intent phrases — user is clearly asking for a web search.
@@ -46,7 +45,8 @@ _SEARCH_INTENT_HINTS: Tuple[str, ...] = (
     "search for", "search the web", "search online", "find online",
     "look up online", "google that", "find me the latest",
     "what is the latest", "what are the latest", "is there news about",
-    "any news on", "any updates on", "what's happening with",
+    "any news on", "any updates on", "what's happening with", "top stories",
+    "today's weather", "weather forecast", "what happened today", 
 )
 
 # Keyword → category mapping for category inference.
