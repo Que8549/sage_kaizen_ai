@@ -3,18 +3,23 @@ rag_v1/runtime/context_injector.py
 
 RAG context injection for chat turns.
 
-apply_rag()      — injects retrieved document chunks into the last user message.
-apply_wiki_rag() — injects Wikipedia chunks + images into the last user message.
+Public API (called from chat_service.prepare_messages()):
+  apply_rag_and_wiki_parallel() — runs all four fetches concurrently and
+                                  injects the results into the messages list.
+  apply_rag()                   — doc-RAG only (used as a sub-task of the
+                                  parallel function; also useful for testing).
 
-Both are called exclusively from chat_service.prepare_messages() and have no
-dependency on the routing logic in router.py.
+Internal fetch workers (thread-pool tasks, not part of the public API):
+  _fetch_wiki_result()   — Wikipedia multimodal retrieval
+  _fetch_search_result() — live SearXNG web search + optional summarization
+  _fetch_music_result()  — music library retrieval
 
-Env-var helpers
----------------
-env_bool / env_int live here (not in settings.py) because they read runtime
-flags that change behaviour per-call (RAG on/off, topK) rather than startup
-configuration.  settings.py._env() handles the startup-string case; these
-handle the typed-runtime-flag case.  Two distinct purposes, one place each.
+Runtime env flags
+-----------------
+env_bool / env_int are imported from env_utils.py.  They are re-read on every
+chat turn so that flags like SAGE_RAG_ENABLED can be toggled at runtime without
+restarting the app.  Startup configuration uses pydantic-settings BaseSettings
+(settings.py / pg_settings.py) — one approach per purpose.
 
 Lazy singletons
 ---------------
@@ -24,7 +29,7 @@ never crashes the app at startup.
 """
 from __future__ import annotations
 
-import os
+import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -33,6 +38,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 # max_workers=4 covers the four parallel fetches: doc-RAG, wiki-RAG, search, music.
 _POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rag_par")
 
+from env_utils import env_bool, env_int
 from input_guard import sanitize_chunk
 from rag_v1.config.rag_settings import RagSettings
 from rag_v1.runtime.router_integration import RagInjector, _prepend_context
@@ -42,8 +48,11 @@ from sk_logging import get_logger
 try:
     from rag_v1.wiki.wiki_retriever import WikiRetriever
     _WIKI_AVAILABLE = True
-except ImportError:
+except ImportError as _wiki_err:
     _WIKI_AVAILABLE = False
+    import logging as _l; _l.getLogger("sage_kaizen.context_injector").warning(
+        "Wiki RAG unavailable (ImportError: %s) — wiki retrieval disabled", _wiki_err
+    )
 
 # Live web search — optional dependency
 try:
@@ -51,8 +60,11 @@ try:
     from search.search_orchestrator import get_orchestrator
     from search.summarizer import build_raw_context, summarize_evidence
     _SEARCH_AVAILABLE = True
-except ImportError:
+except ImportError as _search_err:
     _SEARCH_AVAILABLE = False
+    import logging as _l; _l.getLogger("sage_kaizen.context_injector").warning(
+        "Live search unavailable (ImportError: %s) — search disabled", _search_err
+    )
 
 # Music retrieval — optional dependency
 try:
@@ -62,35 +74,16 @@ try:
         format_music_context,
     )
     _MUSIC_AVAILABLE = True
-except ImportError:
+except ImportError as _music_err:
     _MUSIC_AVAILABLE = False
+    import logging as _l; _l.getLogger("sage_kaizen.context_injector").warning(
+        "Music retrieval unavailable (ImportError: %s) — music search disabled", _music_err
+    )
 
 if TYPE_CHECKING:
-    from rag_v1.wiki.wiki_retriever import WikiRetriever
     from search.models import SearchEvidence
 
 _LOG = get_logger("sage_kaizen.context_injector")
-
-
-# ---------------------------------------------------------------------------
-# Env-var helpers
-# ---------------------------------------------------------------------------
-
-def env_bool(name: str, default: bool = True) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "y", "on")
-
-
-def env_int(name: str, default: int) -> int:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    try:
-        return int(v.strip())
-    except ValueError:
-        return default
 
 
 # ---------------------------------------------------------------------------
@@ -184,70 +177,6 @@ def apply_rag(
         return messages, []
 
 
-def apply_wiki_rag(
-    messages: List[Dict[str, Any]],
-    user_text: str,
-    decision: Any,  # RouteDecision — duck-typed to avoid cross-package import
-    wiki_enabled: bool | None = None,
-) -> Tuple[List[Dict[str, Any]], list]:
-    """
-    Always-on Wikipedia RAG enrichment.  Call after apply_rag(), before
-    sending to llama-server.
-
-    Mirrors apply_rag() pattern:
-      - Injects a <wiki_context> block into the last user turn.
-      - Returns (messages, wiki_images) where wiki_images is a
-        list[WikiImage] for Streamlit image rendering.
-
-    Controls:
-      - wiki_enabled: if None, reads env SAGE_WIKI_RAG_ENABLED (default True)
-      - top_k:        same env vars as regular RAG (SAGE_RAG_FAST_TOPK / ARCH_TOPK)
-    """
-    enabled = env_bool("SAGE_WIKI_RAG_ENABLED", default=True) if wiki_enabled is None else wiki_enabled
-    if not enabled or not user_text:
-        return messages, []
-
-    min_chars = env_int("SAGE_RAG_MIN_CHARS", default=12)
-    if len(user_text.strip()) < min_chars:
-        return messages, []
-
-    retriever = _get_wiki_retriever()
-    if retriever is None:
-        return messages, []
-
-    fast_k = env_int("SAGE_RAG_FAST_TOPK", default=4)
-    arch_k = env_int("SAGE_RAG_ARCH_TOPK", default=10)
-    top_k  = fast_k if decision.brain == "FAST" else arch_k
-
-    try:
-        result = retriever.search(user_text, top_k_chunks=top_k, top_images=3)
-        if result.empty or not result.chunks:
-            return messages, []
-
-        lines: List[str] = []
-        for c in result.chunks:
-            section = " > ".join(c.section_path) if c.section_path else "Introduction"
-            lines.append(f"[{c.title} / {section} | score={c.score:.3f}]\n{sanitize_chunk(c.text, max_chars=None)}")
-        ctx = "\n\n---\n\n".join(lines)
-
-        out = list(messages)
-        for i in reversed(range(len(out))):
-            if out[i].get("role") == "user":
-                prefix = f"<wiki_context>\n{ctx}\n</wiki_context>\n\n"
-                out[i] = {**out[i], "content": _prepend_context(out[i]["content"], prefix)}
-                break
-
-        _LOG.info(
-            "wiki_rag | chunks=%d images=%d | query_chars=%d",
-            len(result.chunks), len(result.images), len(user_text),
-        )
-        return out, result.images
-
-    except Exception:
-        _LOG.exception("Wiki RAG injection failed; continuing without wiki context")
-        return messages, []
-
-
 def _fetch_wiki_result(
     user_text: str,
     decision: Any,
@@ -304,13 +233,24 @@ def _fetch_search_result(
     decision: Any,
     fast_base_url: str | None = None,
     fast_model_id: str | None = None,
+    summarizer_base_url: str | None = None,
+    summarizer_model_id: str | None = None,
 ) -> "tuple[str, SearchEvidence | None]":
     """
     Run a live SearXNG search and return (ctx_block, evidence).
 
     Only executes when decision.needs_search is True and the search
     module is available.  Falls back to raw snippet formatting when the
-    FAST brain is unavailable for the summarization pass.
+    summarization brain is unavailable.
+
+    Summarizer priority:
+      1. summarizer_base_url (dedicated CPU brain, port 8013)  — preferred
+      2. fast_base_url       (FAST brain, port 8011)           — fallback
+      3. raw snippets        (SAGE_SEARCH_SUMMARIZE=false or both unavailable)
+
+    Controls:
+      SAGE_SEARCH_ENABLED     (default true)  — master search on/off
+      SAGE_SEARCH_SUMMARIZE   (default true)  — skip to raw snippets when false
 
     Returns:
         (ctx_block, evidence)
@@ -348,17 +288,31 @@ def _fetch_search_result(
         _LOG.info("search_rag | no results returned for query_chars=%d", len(user_text))
         return "", None
 
-    # Summarization pass using the FAST brain
+    # Summarization pass — prefer dedicated summarizer brain when configured.
+    # Set SAGE_SEARCH_SUMMARIZE=false to skip entirely and inject raw snippets.
     summary = ""
-    if fast_base_url and fast_model_id:
-        try:
-            summary = summarize_evidence(
-                evidence=evidence,
-                fast_base_url=fast_base_url,
-                fast_model_id=fast_model_id,
-            )
-        except Exception:
-            _LOG.warning("Summarization failed; injecting raw search snippets")
+    summarize_enabled = env_bool("SAGE_SEARCH_SUMMARIZE", default=True)
+    if summarize_enabled:
+        # Pick the best available summarization endpoint
+        _sum_url   = summarizer_base_url or fast_base_url
+        _sum_model = summarizer_model_id or fast_model_id
+        _sum_source = "summarizer" if summarizer_base_url else "fast_brain"
+        if _sum_url and _sum_model:
+            try:
+                summary = summarize_evidence(
+                    evidence=evidence,
+                    fast_base_url=_sum_url,
+                    fast_model_id=_sum_model,
+                )
+                if summary:
+                    _LOG.info("search_rag | summarization via %s", _sum_source)
+            except Exception:
+                _LOG.warning(
+                    "Summarization failed (source=%s url=%s); injecting raw snippets",
+                    _sum_source, _sum_url,
+                )
+    else:
+        _LOG.info("search_rag | SAGE_SEARCH_SUMMARIZE=false — injecting raw snippets")
 
     # Build context block — prefer summary, fall back to raw snippets
     from datetime import datetime, timezone
@@ -449,6 +403,8 @@ def apply_rag_and_wiki_parallel(
     wiki_enabled: bool | None = None,
     fast_base_url: str | None = None,
     fast_model_id: str | None = None,
+    summarizer_base_url: str | None = None,
+    summarizer_model_id: str | None = None,
 ) -> Tuple[List[Dict[str, Any]], list, list, "Optional[SearchEvidence]", str]:
     """
     Run document RAG, wiki RAG, live web search, and music retrieval
@@ -463,9 +419,13 @@ def apply_rag_and_wiki_parallel(
 
     Parameters
     ----------
-    fast_base_url : FAST brain base URL — required for the summarization pass.
-                    Pass None to skip summarization and inject raw snippets.
-    fast_model_id : FAST brain model alias (from InferenceSession.q5_model_id).
+    fast_base_url         : FAST brain base URL — fallback summarization endpoint.
+    fast_model_id         : FAST brain model alias.
+    summarizer_base_url   : Dedicated CPU summarizer base URL (port 8013).
+                            When set, used instead of fast_base_url for search
+                            summarization, freeing the FAST brain slot for
+                            the main conversation response.
+    summarizer_model_id   : Summarizer model alias (from brains.yaml alias key).
 
     Returns
     -------
@@ -475,14 +435,81 @@ def apply_rag_and_wiki_parallel(
     """
     rag_fut    = _POOL.submit(apply_rag, messages, user_text, decision)
     wiki_fut   = _POOL.submit(_fetch_wiki_result, user_text, decision, wiki_enabled)
-    search_fut = _POOL.submit(_fetch_search_result, user_text, decision,
-                              fast_base_url, fast_model_id)
+    search_fut = _POOL.submit(
+        _fetch_search_result, user_text, decision,
+        fast_base_url, fast_model_id,
+        summarizer_base_url, summarizer_model_id,
+    )
     music_fut  = _POOL.submit(_fetch_music_result, user_text, decision)
 
-    rag_messages, rag_sources         = rag_fut.result()
-    wiki_ctx_block, wiki_images       = wiki_fut.result()
-    search_ctx_block, search_evidence = search_fut.result()
-    music_ctx_block                   = music_fut.result()
+    # Per-worker timeout: prevents a hung SearXNG fetch, slow jina-clip GPU
+    # restore, or stalled DB query from blocking the turn indefinitely.
+    # Values are generous (doc-RAG: 15 s, wiki: 20 s, search+summarize: 30 s,
+    # music: 10 s) — real work is much faster; these are safety ceilings.
+    # TimeoutError is caught and logged; the turn continues with partial context.
+    _WORKER_TIMEOUTS = {"rag": 15, "wiki": 20, "search": 30, "music": 10}
+
+    try:
+        rag_messages, rag_sources = rag_fut.result(timeout=_WORKER_TIMEOUTS["rag"])
+    except Exception:
+        _LOG.exception("RAG worker timed out or failed; continuing without doc-RAG")
+        rag_messages, rag_sources = messages, []
+
+    try:
+        wiki_ctx_block, wiki_images = wiki_fut.result(timeout=_WORKER_TIMEOUTS["wiki"])
+    except Exception:
+        _LOG.exception("Wiki worker timed out or failed; continuing without wiki context")
+        wiki_ctx_block, wiki_images = "", []
+
+    try:
+        search_ctx_block, search_evidence = search_fut.result(timeout=_WORKER_TIMEOUTS["search"])
+    except Exception:
+        _LOG.exception("Search worker timed out or failed; continuing without search context")
+        search_ctx_block, search_evidence = "", None
+
+    try:
+        music_ctx_block = music_fut.result(timeout=_WORKER_TIMEOUTS["music"])
+    except Exception:
+        _LOG.exception("Music worker timed out or failed; continuing without music context")
+        music_ctx_block = ""
+
+    # ── Token budget guardrails ────────────────────────────────────────────
+    # Trim wiki and search context blocks before injection so that a single
+    # source cannot consume more than its per-brain char budget.
+    # Defaults: FAST 4 000 wiki / 2 000 search; ARCH 16 000 wiki / 6 000 search.
+    # Override via env vars without touching this file.
+    is_fast = getattr(decision, "brain", "FAST") == "FAST"
+
+    wiki_max = env_int(
+        "SAGE_RAG_WIKI_FAST_MAX_CHARS" if is_fast else "SAGE_RAG_WIKI_ARCH_MAX_CHARS",
+        default=4_000 if is_fast else 16_000,
+    )
+    if wiki_ctx_block and len(wiki_ctx_block) > wiki_max:
+        wiki_ctx_block = wiki_ctx_block[:wiki_max] + "\n[... wiki context trimmed to budget ...]"
+        _LOG.info("wiki_rag | trimmed to budget | brain=%s max_chars=%d", decision.brain, wiki_max)
+
+    search_max = env_int(
+        "SAGE_SEARCH_FAST_MAX_CHARS" if is_fast else "SAGE_SEARCH_ARCH_MAX_CHARS",
+        default=2_000 if is_fast else 6_000,
+    )
+    if search_ctx_block and len(search_ctx_block) > search_max:
+        search_ctx_block = search_ctx_block[:search_max] + "\n[... search context trimmed to budget ...]"
+        _LOG.info("search_rag | trimmed to budget | brain=%s max_chars=%d", decision.brain, search_max)
+
+    # Structured injection summary for post-turn analysis
+    _LOG.info(
+        "context_injection_json %s",
+        json.dumps({
+            "brain":             getattr(decision, "brain", "FAST"),
+            "rag_chunks":        len(rag_sources),
+            "wiki_chars":        len(wiki_ctx_block) if wiki_ctx_block else 0,
+            "search_chars":      len(search_ctx_block) if search_ctx_block else 0,
+            "music_chars":       len(music_ctx_block) if music_ctx_block else 0,
+            "wiki_images":       len(wiki_images),
+            "wiki_trimmed":      bool(wiki_ctx_block and len(wiki_ctx_block) >= wiki_max),
+            "search_trimmed":    bool(search_ctx_block and len(search_ctx_block) >= search_max),
+        }),
+    )
 
     # Inject wiki context into already-RAG-enriched messages
     out = list(rag_messages)

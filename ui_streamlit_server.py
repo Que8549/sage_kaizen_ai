@@ -340,6 +340,8 @@ if "fb_rated_ids"        not in st.session_state: st.session_state.fb_rated_ids 
 if "fb_stats_dirty"      not in st.session_state: st.session_state.fb_stats_dirty      = True
 if "pending_attachments" not in st.session_state: st.session_state.pending_attachments = []
 if "tts_enabled"         not in st.session_state: st.session_state.tts_enabled         = True
+if "_is_streaming"       not in st.session_state: st.session_state._is_streaming       = False
+if "_greeting_played"    not in st.session_state: st.session_state._greeting_played    = False
 
 # ── Feedback DB: one-time schema init ──────────────────────────────────────
 # Module-level flag: ensure_schema() only needs one DB round-trip per process.
@@ -367,9 +369,13 @@ except Exception:
 # ─────────────────────────────────────────────────────────────────────────── #
 # Runs every 100ms as an independent fragment.  When a voice transcript
 # arrives from the voice app it is inspected:
-#   - voice commands (e.g. "new chat") → set _voice_new_chat flag
+#   - voice commands (e.g. "new chat") → set _voice_new_chat flag and full rerun
 #   - all other text                   → set _voice_input for normal processing
-# A full-app rerun is triggered in both cases.
+# Full-app rerun is triggered in both cases — UNLESS a response is currently
+# streaming (_is_streaming = True).  While streaming, a full rerun would kill
+# write_stream() mid-sentence; instead we use scope="fragment" so the voice
+# input is queued in session state and processed on the next natural rerun
+# (after the current response finishes).
 
 @st.fragment(run_every=0.1)
 def _voice_input_poller() -> None:
@@ -379,7 +385,15 @@ def _voice_input_poller() -> None:
             st.session_state["_voice_new_chat"] = True
         else:
             st.session_state["_voice_input"] = text
-        st.rerun()
+        # Do not interrupt an active write_stream() with a full rerun — a
+        # TTS silence gap can allow a mouse-click or ambient sound to be
+        # transcribed and land here while Sage Kaizen is still responding.
+        # Use scope="fragment" to store the input without killing the stream;
+        # the queued input is picked up on the next app-level rerun.
+        if st.session_state.get("_is_streaming", False):
+            st.rerun(scope="fragment")
+        else:
+            st.rerun()
     except queue.Empty:
         pass
 
@@ -406,6 +420,16 @@ def _render_server_status() -> None:
     _v_icon  = "🎙" if _voice_bridge.voice_ready else "🔄"
     _v_label = "ready" if _voice_bridge.voice_ready else "loading models..."
     st.caption(f"{_v_icon} Voice: {_v_label}")
+
+    # Play "Sage Kaizen online." exactly once per session — only after Q5,
+    # Q6, and voice models are ALL confirmed ready.  The greeting was removed
+    # from the voice app's startup so it no longer fires before LLM servers
+    # are healthy.  TTS is also checked (tts_enabled) so the greeting isn't
+    # played silently if the user has audio off.
+    _all_ready = _ok5 and _ok6 and _voice_bridge.voice_ready
+    if _all_ready and st.session_state.get("tts_enabled", True) and not st.session_state.get("_greeting_played", False):
+        st.session_state["_greeting_played"] = True
+        _voice_bridge.play_greeting()
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -503,6 +527,28 @@ with st.sidebar:
         help="Min-P sampling. Model-card default: 0.0 (disabled)")
     max_tokens_q5   = st.selectbox("FAST max_tokens", [1024, 2048, 4096, 8192, 16384], index=2)
     max_tokens_q6   = st.selectbox("ARCH max_tokens", [4096, 8192, 16384, 32768, 65536], index=3)
+
+    _THINKING_OPTIONS = {
+        "Auto (creative=2K, other=unlimited)": -1,
+        "Off (0 — no thinking)":              0,
+        "512 tokens":                          512,
+        "1024 tokens":                         1024,
+        "2048 tokens":                         2048,
+        "4096 tokens":                         4096,
+        "8192 tokens":                         8192,
+        "Unlimited":                           -1,
+    }
+    _thinking_label = st.selectbox(
+        "ARCH thinking budget",
+        list(_THINKING_OPTIONS.keys()),
+        index=0,
+        help=(
+            "Controls how many <think> tokens ARCHITECT may generate before answering.\n"
+            "Auto: creative writing capped at 2048 tokens; code/analysis unlimited.\n"
+            "Off: no thinking, fastest response. Unlimited: unconstrained (slow for creative tasks)."
+        ),
+    )
+    thinking_budget = _THINKING_OPTIONS[_thinking_label]
 
     if st.session_state.last_thinking_time is not None:
         st.caption(f"\u23F1\uFE0F Last thinking time: {st.session_state.last_thinking_time:.2f}s")
@@ -725,6 +771,7 @@ if user_text:
         min_p_q6=float(min_p_q6),
         max_tokens_q5=int(max_tokens_q5),
         max_tokens_q6=int(max_tokens_q6),
+        thinking_budget=int(thinking_budget),
         media_attachments=turn_attachments,
     )
 
@@ -839,21 +886,24 @@ if user_text:
             if _tts_on:
                 _voice_bridge.start_turn(voice_session_id, decision.brain)
             full_streamed = ""
+            st.session_state["_is_streaming"] = True
             try:
                 def _voice_stream():
+                    _barged_in = False
                     for piece in chat_svc.stream_response(messages, decision, cfg):
-                        if _tts_on and _voice_bridge.barge_in_event.is_set():
+                        if _tts_on and not _barged_in and _voice_bridge.barge_in_event.is_set():
                             _voice_bridge.barge_in_event.clear()
-                            return
-                        if _tts_on:
+                            _barged_in = True   # stop voice tokens; keep writing text
+                        if _tts_on and not _barged_in:
                             _voice_bridge.publish_token(voice_session_id, piece)
-                        yield piece
+                        yield piece             # always yield — barge-in silences voice, not text
                 full_streamed = live.write_stream(_voice_stream()) or ""
             except LlamaServerError as e:
                 live.error(str(e))
             except Exception as e:
                 live.error(f"Unexpected error: {type(e).__name__}: {e}")
             finally:
+                st.session_state["_is_streaming"] = False
                 if _tts_on:
                     _voice_bridge.end_turn(voice_session_id)
 

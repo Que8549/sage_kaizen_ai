@@ -203,4 +203,71 @@ If a commit message says "reverted", "removed", "uninstalled", or describes a fa
  - Integrate with Sage Kaizen Voice (voice app) located at F:\Projects\sage_kaizen_ai_voice\
  - Sage Kaizen local-first AI assistant (main app) located at F:\Projects\sage_kaizen_ai\
  - SearXNG - local search engine running at http://localhost:8080/ located at F:\Projects\searxng
- 
+
+---
+
+## 11) FAST Brain Model — Upgrade Research Log (2026-04-07)
+
+### Current State (as of 2026-04-07)
+- **Model**: `Qwen2.5-Omni-7B-Q8_0` — the only viable audio-capable model for the RTX 5080 in llama.cpp
+- **llama.cpp build**: b8639 (early April 2025) — outdated; rebuild recommended
+- **Known limitation**: Mid-response Chinese language code-switching during long-form generation (confirmed Qwen2.5-Omni-7B training data bias; see QwenLM/Qwen2.5 issue #347)
+- **Workaround applied**: `router.py` now routes creative writing (`CREATIVE_HINTS`) to ARCHITECT (score +3); `prompt_library.py` `sage_fast_core` includes English-only instruction
+
+### Why No Upgrade Is Possible Yet
+Audio file upload support (`kind="audio"` in `chat_service.py`) depends on llama.cpp's mmproj audio encoder. In the llama.cpp ecosystem (as of 2026-04-07), **only Qwen2.5-Omni-7B** combines all three capabilities: audio input + image/video input + general text reasoning. Every other capable model fails on at least one requirement:
+
+| Candidate | Blocker |
+|---|---|
+| Qwen3-8B / Qwen3-VL-8B | No audio encoder — audio uploads break |
+| Gemma 3 12B | No audio encoder in llama.cpp |
+| Qwen3-Omni-30B-A3B | Fits on 5090 but 5090 is fully occupied by ARCHITECT + BGE-M3 (~29 GB used of 32 GB) |
+| Qwen3.5-Omni | llama.cpp audio support confirmed incomplete as of 2026-04-07 |
+| Voxtral-Mini-3B | Known crash on audio encoding — llama.cpp issue #21080 |
+| Ultravox v0.5/v0.6 (8B) | Audio-to-text only; no vision, no general reasoning |
+
+### VRAM Budget — Current vs Proposed Q6_K Downquant
+If English stability is needed on FAST without a model change, dropping to Q6_K saves ~1.85 GB with negligible quality loss (~0.1–0.2 PPL):
+
+```
+# Current (Q8_0)                    # Proposed (Q6_K)
+Model weights:   ~8.10 GB           Model weights:   ~6.25 GB  (-1.85 GB)
+mmproj F16:      ~2.64 GB           mmproj F16:      ~2.64 GB  (unchanged)
+KV cache q8_0:   ~0.45 GB           KV cache q8_0:   ~0.45 GB  (unchanged)
+Compute buffer:  ~0.50 GB           Compute buffer:  ~0.50 GB  (unchanged)
+Total:          ~11.70 GB           Total:           ~9.84 GB
+Headroom:        ~4.3 GB            Headroom:        ~6.2 GB  (+1.9 GB)
+```
+Q6_K GGUF: https://huggingface.co/ggml-org/Qwen2.5-Omni-7B-GGUF  
+`brains.yaml` change: update `model:` path and `alias:` only — all flags, mmproj, and ports unchanged.
+
+### Functionality Checklist (What Must Be Preserved on Any FAST Upgrade)
+Before proposing or applying a FAST brain model change, verify all of the following are maintained:
+
+| Capability | How It Works | File |
+|---|---|---|
+| Audio file uploads (`.wav`, `.mp3`) | mmproj audio encoder; `kind="audio"` routes to FAST | `chat_service.py:194` |
+| Image input | mmproj vision encoder; `kind="image"/"video_frame"` → ARCHITECT or FAST | `chat_service.py:183` |
+| Video input | Client-side frame extraction → image attachments → ARCHITECT | `chat_service.py:183` |
+| Flash attention | `flash_attn: true` in brains.yaml; C++ runtime only (not Python) | `brains.yaml:65` |
+| KV prefix cache | `cache_ram: 512`, `slot_prompt_similarity: 0.10` | `brains.yaml:74,79` |
+| 16K context | `ctx_size: 16384` — 1 image ≈ 1280 tokens, 15104 for conversation | `brains.yaml:53` |
+| Port 8011, CUDA1 | Hard-coded in routing and inference session | `brains.yaml:38,43` |
+| TTS voice pipeline | Audio output is text-only; Kokoro handles TTS separately | `voice_bridge.py` |
+
+### Watch List — When to Revisit the FAST Brain Upgrade
+Monitor these milestones; when any trigger is met, re-evaluate:
+
+1. **Qwen3.5-Omni llama.cpp audio PR merges** — check https://github.com/ggml-org/llama.cpp/pulls for "omni" or "audio" PRs. This is the primary upgrade path when it lands. Model will need 5090 or GPU upgrade (30B+ size).
+
+2. **Voxtral-Mini-3B crash fixed** — track llama.cpp issue #21080. If fixed, Mistral's 3B audio model could run as a lightweight audio-only companion on the 5080 alongside a stronger text model.
+
+3. **Qwen2.5-Omni-14B or larger Omni release** — Alibaba has only released 3B and 7B Omni variants. A 14B would be a direct drop-in upgrade if it fits (~14 GB weights Q6_K = marginal, Q4_K_M = comfortable on 5080).
+
+4. **Gemma 4 audio support in llama.cpp** — Gemma 4 natively supports audio but llama.cpp audio parsing is not yet implemented. Track https://github.com/ggml-org/llama.cpp/issues.
+
+5. **llama.cpp rebuild** — Current build b8639 predates SM_120 Blackwell kernel optimizations. Rebuilding from latest release (https://github.com/ggml-org/llama.cpp/releases) improves token throughput on RTX 5080/5090 with no model changes needed.
+
+### Qwen2.5-Omni-7B GGUF Sources
+- Official: https://huggingface.co/ggml-org/Qwen2.5-Omni-7B-GGUF (Q8_0, Q6_K, Q4_K_M, and others)
+- Unsloth: https://huggingface.co/unsloth/Qwen2.5-Omni-7B-GGUF (extensive quant options including IQ variants)

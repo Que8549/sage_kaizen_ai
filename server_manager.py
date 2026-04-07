@@ -21,7 +21,7 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 import yaml
@@ -162,7 +162,7 @@ def _load_brain_config(yaml_path: Path, name: str) -> BrainConfig:
 @dataclass(frozen=True)
 class ManagedServers:
     """
-    Holds loaded BrainConfig for all three llama-server instances.
+    Holds loaded BrainConfig for all llama-server instances.
 
     Ports, log paths, and startup timeouts are all sourced from brains.yaml.
     brains.yaml is the single authoritative config source.
@@ -170,10 +170,15 @@ class ManagedServers:
     Construct via the class method:
         servers = ManagedServers.from_yaml()           # uses default path
         servers = ManagedServers.from_yaml(my_path)    # custom path
+
+    Optional fields (None when not configured in brains.yaml):
+        summarizer — lightweight CPU brain for search summarization (port 8013).
+                     Activate by uncommenting the summarizer: section in brains.yaml.
     """
     embed: BrainConfig
     fast: BrainConfig
     architect: BrainConfig
+    summarizer: Optional[BrainConfig] = field(default=None)
 
     @classmethod
     def from_yaml(cls, path: Path = _BRAINS_YAML) -> "ManagedServers":
@@ -236,10 +241,18 @@ def _load_managed_servers(path: Path) -> ManagedServers:
             f"brains.yaml not found: {path}\n"
             "Expected at config/brains/brains.yaml relative to project root."
         )
+    # Try to load the optional summarizer brain (commented out by default).
+    # KeyError means the section is absent/commented — not an error.
+    _summarizer: Optional[BrainConfig] = None
+    try:
+        _summarizer = _load_brain_config(path, "summarizer")
+    except KeyError:
+        pass
     return ManagedServers(
         embed=_load_brain_config(path, "embed"),
         fast=_load_brain_config(path, "fast"),
         architect=_load_brain_config(path, "architect"),
+        summarizer=_summarizer,
     )
 
 
@@ -524,4 +537,38 @@ def ensure_q6_running(servers: ManagedServers) -> Tuple[bool, str]:
         base_url=base_url,
         timeout_s=servers.q6_start_timeout_s,
         log_path=servers.q6_log,
+    )
+
+
+def ensure_summarizer_running(servers: ManagedServers) -> Tuple[bool, str]:
+    """
+    Start the optional CPU summarizer brain (port 8013) if configured and not running.
+
+    Returns (False, reason) immediately when no summarizer: section exists in
+    brains.yaml — the caller must treat this as "not available, fall back to
+    FAST brain" rather than an error.
+    """
+    if servers.summarizer is None:
+        return False, "summarizer: section not configured in brains.yaml"
+
+    s = servers.summarizer
+    base_url = s.base_url
+
+    if find_pid_by_port(s.port) is not None:
+        ok, how = _http_ready(base_url, timeout_s=1.0)
+        if ok:
+            return True, f"Summarizer already ready ({how})"
+
+    stop_server_on_port(s.port)
+
+    ok, msg = start_server_from_config(s)
+    if not ok:
+        return False, f"Summarizer start failed: {msg}"
+
+    return _wait_for_ready(
+        host=s.host,
+        port=s.port,
+        base_url=base_url,
+        timeout_s=s.startup_timeout_s,
+        log_path=s.log,
     )

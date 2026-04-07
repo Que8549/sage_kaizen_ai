@@ -148,6 +148,7 @@ def stream_chat_completions(
     timeouts: HttpTimeouts,
     top_k: int = -1,
     min_p: float = 0.0,
+    thinking_budget: int = -1,
 ) -> Iterator[str]:
     base = _normalize_base_url(base_url)
     url = f"{base}/v1/chat/completions"
@@ -167,6 +168,14 @@ def stream_chat_completions(
         # system-prompt / RAG prefixes (93% reduction with --cram enabled).
         "cache_prompt": True,
     }
+
+    # thinking_budget controls the ARCHITECT reasoning token budget per-request.
+    # -1 = unlimited (default for code/architecture/analysis turns)
+    #  0 = no thinking (instant output, no CoT)
+    #  N = cap at N thinking tokens then emit answer
+    # Only inject when != -1 to avoid overriding the server default on FAST turns.
+    if thinking_budget != -1:
+        payload["thinking_budget"] = int(thinking_budget)
 
     with _session(base).post(url, json=payload, stream=True, timeout=_timeout_tuple(timeouts)) as r:
         if r.status_code // 100 != 2:

@@ -26,10 +26,11 @@
 # ARCHITECT (Qwen3.5-27B) on CUDA0 runs simultaneously — no GPU conflict.
 # Audio output (TTS) is NOT supported by llama.cpp; responses are text-only.
 # Video input: client-side frame extraction → sent as individual images.
+# Old model: Qwen2.5-Omni-7B-Q8_0.gguf
 # -----------------------------------------------------------------------------
 fast:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
-  model: "E:/Qwen2.5-Omni-7B-GGUF/Qwen2.5-Omni-7B-Q8_0.gguf"
+  model: "E:/Qwen2.5-Omni-7B-GGUF/Qwen2.5-Omni-7B-Q6_K.gguf"
   log: "F:/Projects/sage_kaizen_ai/logs/q5_server.log"
   startup_timeout_s: 300    # 5 minutes — 7B model loads quickly on CUDA1
 
@@ -131,9 +132,12 @@ architect:
     n_gpu_layers: "all"
     split_mode: "none"
 
-    # Multimodal vision encoder — uncomment after downloading mmproj file (see header above).
-    # Enables image and video input on the ARCHITECT brain alongside text reasoning.
-    mmproj: "E:/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive/mmproj-Qwen3.5-27B-Uncensored-HauhauCS-Aggressive-f16.gguf"
+    # Multimodal vision encoder — DISABLED: loading mmproj silently disables speculative
+    # decoding (ngram-map-k), cache_reuse, and swa_full at startup, cutting generation
+    # throughput from ~4.9 t/s → ~2.89 t/s. Image/video queries are now routed to the
+    # FAST brain (Qwen2.5-Omni-7B), which has its own audio+vision mmproj encoder and
+    # handles all modalities. Re-enable here only if ARCHITECT-exclusive vision is needed.
+    # mmproj: "E:/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive/mmproj-Qwen3.5-27B-Uncensored-HauhauCS-Aggressive-f16.gguf"
 
     # Context — model trained to 262K; model card requires >= 128K for thinking mode.
     # Only 16/64 layers use KV cache; at 128K q8_0 KV costs ~4 GB (5090 has ~4.6 GB headroom).
@@ -265,6 +269,11 @@ embed:
     device: "CUDA0"
     n_gpu_layers: "all"
 
+    # Process scheduling priority (same flag as ARCHITECT).
+    # ARCHITECT uses prio: 2 (high); embed gets prio: 1 (medium) so that
+    # ARCHITECT generation is never preempted by embedding requests on CUDA0.
+    prio: 1
+
     # BGE-M3 produces 1024-dimensional embeddings.
     # ctx_size should match your ingest chunk size (rag_v1 default: 1200 chars ~ 300 tokens)
     ctx_size: 2048
@@ -313,6 +322,14 @@ wiki_embed:
     # ingest calls always stay within the service limits.
     text_batch: 256
     image_batch: 64
+
+    # CUDA0 contention guard: after idle_timeout_s seconds of no requests,
+    # the service offloads jina-clip-v2 from GPU to CPU (freeing ~2 GB VRAM).
+    # On the next request the model is restored to GPU automatically (< 5 s
+    # with warm TORCHINDUCTOR_CACHE_DIR; first restore after cold boot: ~15 s).
+    # Set to 0 to disable idle offload and keep the model resident on GPU.
+    # Override per-session: WIKI_EMBED_IDLE_TIMEOUT_S env var.
+    idle_timeout_s: 120
 
   # ── Verbosity (env var, not a service param) ────────────────────────────
   # WIKI_EMBED_VERBOSE controls how much the embed service writes to its log.
@@ -411,6 +428,119 @@ search:
     news:       [news, headlines, breaking, politics, election, current events]
     science:    [arxiv, research paper, scientific study, journal article, nasa discovery]
     technology: [tech news, software release, github release, hardware release, ai news]
+
+
+# -----------------------------------------------------------------------------
+# Voice System — Sage Kaizen AI Voice (sage_kaizen_ai_voice project)
+# Authoritative reference for the voice pipeline.
+# Runtime config lives at: F:/Projects/sage_kaizen_ai_voice/config/voice.yaml
+# Source code lives at:    F:/Projects/sage_kaizen_ai_voice/src/
+#
+# Integration: voice pipeline CONNECTS to ZMQ sockets; main app BINDS.
+# Python version constraint: voice project must use Python 3.11.x (ctranslate2).
+# GPU: STT (faster-whisper) runs on CPU; TTS (Kokoro ONNX) runs on CPU.
+# -----------------------------------------------------------------------------
+voice:
+  stt:
+    # faster-whisper distil-large-v3.5 INT8 — CPU-only
+    model_dir:    "E:/distil-large-v3.5-ct2-int8"
+    device:       "cpu"
+    compute_type: "int8"
+    language:     "en"
+    beam_size:    1
+    vad_filter:   true
+    # Silence gate: 25 chunks × 30 ms = 750 ms endpoint detection
+    silence_chunks_to_stop: 25
+
+  tts:
+    # Kokoro-82M ONNX (onnx-community/Kokoro-82M-v1.0-ONNX) — CPU-only
+    # WARNING: model_q8f16.onnx crashes CPUExecutionProvider — always use model_quantized.onnx
+    onnx_model:   "E:/Kokoro-82M-v1.0-ONNX/onnx/model_quantized.onnx"
+    voices_dir:   "E:/Kokoro-82M-v1.0-ONNX/voices"
+    sample_rate:  24000
+    default_voice: "am_onyx"
+    default_speed: 0.87
+    default_lang:  "en-us"
+
+  personas:
+    narrator:
+      voice: "am_fenrir"
+      speed: 0.87
+      use_case: "Creative, philosophy, long-form narration"
+    mentor:
+      voice: "am_fenrir"
+      speed: 0.92
+      use_case: "Research, code, architecture, grades 6-9"
+    teacher:
+      voice: "am_michael"
+      speed: 0.95
+      use_case: "K-5 tutoring, step-by-step explainers"
+    chat:
+      voice: "am_fenrir"
+      speed: 1.00
+      use_case: "Conversational"
+    quick:
+      voice: "am_onyx"
+      speed: 1.05
+      use_case: "Device control, status ACKs"
+
+  zmq:
+    # Main app BINDS; voice pipeline CONNECTS
+    transcript_bus: "tcp://127.0.0.1:5790"   # STT → Main  (PUSH/PULL)
+    token_bus:      "tcp://127.0.0.1:5791"   # Main → TTS  (PUB/SUB)
+    interrupt_bus:  "tcp://127.0.0.1:5792"   # TTS → Main  (PUSH/PULL)
+    # Pi agents use 5800-5810 — no conflict
+
+
+# -----------------------------------------------------------------------------
+# Summarizer Brain — optional lightweight CPU model for search summarization
+# GPU: CPU-only (no VRAM cost; runs on Ryzen 9 9950X3D via AVX-512)
+#
+# Why this exists: search summarization currently calls the FAST brain (8011).
+# With parallel=1 on FAST, a summarization sub-call occupies the only slot
+# during a live-search turn, blocking the main conversation response until
+# summarization finishes.  A dedicated CPU summarizer decouples these paths.
+#
+# How to activate:
+#   1. server_manager.py auto-starts the summarizer brain.
+#   2. context_injector.py will automatically prefer the summarizer URL
+#      (http://127.0.0.1:8013) over the FAST brain for search summarization.
+#
+# To force-disable summarization entirely (use raw snippets, zero latency):
+#   Set env var: SAGE_SEARCH_SUMMARIZE=false
+# -----------------------------------------------------------------------------
+summarizer:
+  exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
+  model: "E:/Qwen2.5-3B/qwen2.5-3b-instruct-q8_0.gguf"
+  log: "F:/Projects/sage_kaizen_ai/logs/summarizer_server.log"
+  startup_timeout_s: 120   # small model loads in < 30 s on CPU
+
+  server:
+    host: "127.0.0.1"
+    port: 8013
+
+    alias: "Qwen2.5-3B-Summarizer"
+
+    # CPU-only — no VRAM cost.  All CUDA0/CUDA1 headroom preserved for brains.
+    n_gpu_layers: 0
+
+    ctx_size: 2048          # summarization prompts are short; 2K is plenty
+    batch_size: 512
+    ubatch_size: 256
+
+    threads: 8              # 8 physical cores; leaves 8 free for ARCHITECT I/O
+    threads_batch: 8
+    threads_http: 2
+
+    parallel: 1
+    no_kv_unified: true
+    no_cont_batching: true
+
+    n_predict: -1
+    log_colors: false
+    log_timestamps: true
+    log_prefix: true
+    log_verbosity: 3
 
 
 media_embed:

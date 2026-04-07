@@ -4,7 +4,6 @@ from pathlib import Path
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-from typing import Optional
 
 
 def project_root() -> Path:
