@@ -3,8 +3,8 @@ rag_v1/wiki/wiki_retriever.py
 
 Runtime retriever for the Wikipedia multimodal index.
 
-Used by router.apply_wiki_rag() on every chat turn when wiki retrieval
-is enabled.  On first call, auto-starts the jina-clip-v2 embed service
+Used by apply_rag_and_wiki_parallel() (context_injector.py) on every chat
+turn when wiki retrieval is enabled.  On first call, auto-starts the jina-clip-v2 embed service
 as a subprocess (if not already running) and registers atexit cleanup.
 
 Configuration (wiki root, embed host/port) is read from

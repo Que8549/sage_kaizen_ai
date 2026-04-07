@@ -47,7 +47,7 @@ import queue
 import re
 import subprocess
 import threading
-import uuid
+import uuid as _uuid
 from pathlib import Path
 from typing import Optional
 
@@ -410,3 +410,43 @@ class VoiceBridge:
             )
         except zmq.ZMQError:
             _LOG.warning("VoiceBridge: failed to send turn_done")
+
+    def play_greeting(self, text: str = "Sage Kaizen online.") -> None:
+        """
+        Play a one-shot greeting via the TTS pipeline.
+
+        Called by the Streamlit UI once Q5, Q6, AND voice are all confirmed
+        ready — so the user hears the announcement only after every component
+        is online.
+
+        Sends session_start → token (full greeting text) → turn_done in one
+        shot.  The voice app's sentence buffer flushes on turn_done, so the
+        entire phrase is synthesised and played as a single audio chunk.
+        Must be called from the Streamlit main thread (owns the PUB socket).
+        """
+        if not self.voice_ready:
+            _LOG.warning("VoiceBridge.play_greeting: voice app not ready yet — skipped")
+            return
+        session_id = str(_uuid.uuid4())
+        voice, speed, persona = _BRAIN_VOICE["FAST"]
+        try:
+            self._pub.send(_json.encode({
+                "type":       "session_start",
+                "session_id": session_id,
+                "voice":      voice,
+                "speed":      speed,
+                "lang":       "en-us",
+                "persona":    persona,
+            }), zmq.NOBLOCK)
+            self._pub.send(_json.encode({
+                "type":       "token",
+                "session_id": session_id,
+                "text":       text,
+            }), zmq.NOBLOCK)
+            self._pub.send(_json.encode({
+                "type":       "turn_done",
+                "session_id": session_id,
+            }), zmq.NOBLOCK)
+            _LOG.info("VoiceBridge: greeting sent — %r", text)
+        except zmq.ZMQError:
+            _LOG.warning("VoiceBridge: failed to send greeting (voice app down?)")

@@ -22,44 +22,12 @@ SAGE_SEARCH_NEWS_TIME_RANGE  time_range value for news queries, default week
 """
 from __future__ import annotations
 
-import os
-
+from env_utils import env_bool, env_float, env_int, env_str
 from search.models import SearchEvidence, WebResult
 from search.searxng_client import SearXNGClient
 from sk_logging import get_logger
 
 _LOG = get_logger("sage_kaizen.search.orchestrator")
-
-
-def _env_bool(name: str, default: bool = True) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "y", "on")
-
-
-def _env_float(name: str, default: float) -> float:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    try:
-        return float(v.strip())
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    try:
-        return int(v.strip())
-    except ValueError:
-        return default
-
-
-def _env_str(name: str, default: str) -> str:
-    return os.getenv(name, default).strip()
 
 
 class SearchOrchestrator:
@@ -92,10 +60,10 @@ class SearchOrchestrator:
             timeout_s       = timeout_seconds,
             snippet_max_chars = snippet_max_chars,
         )
-        self._min_score        = min_score        or _env_float("SAGE_SEARCH_MIN_SCORE",        0.0)
-        self._max_fast         = max_results_fast or _env_int("SAGE_SEARCH_MAX_RESULTS_FAST",   6)
-        self._max_arch         = max_results_architect or _env_int("SAGE_SEARCH_MAX_RESULTS_ARCH", 12)
-        self._news_time_range  = news_time_range  or _env_str("SAGE_SEARCH_NEWS_TIME_RANGE",    "week")
+        self._min_score        = min_score        or env_float("SAGE_SEARCH_MIN_SCORE",        default=0.0)
+        self._max_fast         = max_results_fast or env_int("SAGE_SEARCH_MAX_RESULTS_FAST",   default=6)
+        self._max_arch         = max_results_architect or env_int("SAGE_SEARCH_MAX_RESULTS_ARCH", default=12)
+        self._news_time_range  = news_time_range  or env_str("SAGE_SEARCH_NEWS_TIME_RANGE",    default="week")
 
     # ------------------------------------------------------------------
     # Public API

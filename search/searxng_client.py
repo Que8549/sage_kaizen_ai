@@ -23,7 +23,6 @@ SAGE_SEARCH_SNIPPET_CHARS max chars per snippet           (default: 300)
 """
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
 import httpx
@@ -34,34 +33,11 @@ from tenacity import (
     wait_fixed,
 )
 
+from env_utils import env_float, env_int, env_str
 from search.models import SearchEvidence, WebResult
 from sk_logging import get_logger
 
 _LOG = get_logger("sage_kaizen.search.client")
-
-
-def _env_str(name: str, default: str) -> str:
-    return os.getenv(name, default).strip()
-
-
-def _env_float(name: str, default: float) -> float:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    try:
-        return float(v.strip())
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    try:
-        return int(v.strip())
-    except ValueError:
-        return default
 
 
 class SearXNGClient:
@@ -79,9 +55,9 @@ class SearXNGClient:
         timeout_s: float | None = None,
         snippet_max_chars: int | None = None,
     ) -> None:
-        self._base_url = (base_url or _env_str("SAGE_SEARCH_URL", "http://localhost:8080")).rstrip("/")
-        self._timeout  = timeout_s or _env_float("SAGE_SEARCH_TIMEOUT_S", 8.0)
-        self._snip_max = snippet_max_chars or _env_int("SAGE_SEARCH_SNIPPET_CHARS", 300)
+        self._base_url = (base_url or env_str("SAGE_SEARCH_URL", default="http://localhost:8080")).rstrip("/")
+        self._timeout  = timeout_s or env_float("SAGE_SEARCH_TIMEOUT_S", default=8.0)
+        self._snip_max = snippet_max_chars or env_int("SAGE_SEARCH_SNIPPET_CHARS", default=300)
 
     # ------------------------------------------------------------------
     # Public API

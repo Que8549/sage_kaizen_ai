@@ -16,8 +16,10 @@ Multimodal support:
     multiple image (video_frame) attachments.
 
     Routing:
-      - Images / video frames → ARCHITECT (Qwen3.5-27B, vision mmproj, 128K ctx, reasoning)
-      - Audio                 → FAST      (Qwen2.5-Omni, audio encoder; Qwen3.5-27B has none)
+      - Images / video frames → FAST (Qwen2.5-Omni has combined audio+vision mmproj;
+                                       ARCHITECT mmproj disabled — loading it kills speculative
+                                       decoding, cache_reuse, and swa_full)
+      - Audio                 → FAST (Qwen2.5-Omni audio encoder; Qwen3.5-27B has none)
 """
 from __future__ import annotations
 
@@ -39,6 +41,13 @@ from router import RouteDecision, route as heuristic_route, heuristic_is_ambiguo
 from sk_logging import get_logger
 
 _LOG = get_logger("sage_kaizen.chat_service")
+
+# Thinking-token cap applied automatically to creative writing turns when the
+# user has not set an explicit budget (thinking_budget == -1).  Creative tasks
+# benefit from a short planning phase but 11+ minutes of uncapped thinking adds
+# no measurable quality gain — the output is driven by base model training.
+# Set to 0 to disable thinking entirely for creative routes by default.
+_CREATIVE_THINKING_CAP = 2048
 
 # Keyword lists for auto-template selection
 _TEACH_HINTS      = ("teach", "tutor", "explain like", "for a 3rd grader", "for a 10th grader")
@@ -118,6 +127,10 @@ class TurnConfig:
     min_p_q6: float
     max_tokens_q5: int
     max_tokens_q6: int
+    # ARCHITECT thinking budget (-1 = unlimited, 0 = off, N > 0 = cap at N tokens).
+    # Sent as reasoning_budget in the chat completions payload.
+    # Creative turns auto-cap at _CREATIVE_THINKING_CAP when this is -1.
+    thinking_budget: int = -1
     # Multimodal attachments for this turn (empty tuple = text-only)
     media_attachments: Tuple[MediaAttachment, ...] = field(default_factory=tuple)
 
@@ -166,35 +179,37 @@ class ChatService:
 
         Priority order:
           1. Empty input → FAST
-          2. Image/video attachments → ARCHITECT (vision mmproj + 128K ctx + reasoning)
-          3. Audio attachments → FAST (Qwen2.5-Omni has audio encoder; Qwen3.5-27B does not)
-          4. auto_escalate disabled → respect deep_mode toggle only
-          5. deep_mode on → ARCHITECT (unconditional)
-          6. Q5 is live → ask FAST brain to classify (LLM routing)
-          7. Q5 not live → keyword-scoring heuristic (no server needed)
+          2. Image/video/audio attachments → FAST (Qwen2.5-Omni has combined audio+vision
+             mmproj; ARCHITECT mmproj is disabled to preserve speculative decoding)
+          3. auto_escalate disabled → respect deep_mode toggle only
+          4. deep_mode on → ARCHITECT (unconditional)
+          5. Q5 is live → ask FAST brain to classify (LLM routing)
+          6. Q5 not live → keyword-scoring heuristic (no server needed)
         """
         if not user_text and not cfg.media_attachments:
             return RouteDecision(brain="FAST", reasons=["empty_input"], score=0)
 
         # Multimodal routing:
-        #   Image/video → always ARCHITECT (Qwen3.5-27B vision mmproj, 128K context, reasoning).
-        #   Audio → always FAST (Qwen2.5-Omni has audio encoder; Qwen3.5-27B does not).
+        #   All media (image, video_frame, audio) → FAST (Qwen2.5-Omni-7B).
+        #   Qwen2.5-Omni has a combined audio+vision mmproj encoder.
+        #   ARCHITECT mmproj is disabled: loading it silently kills ngram-map-k speculative
+        #   decoding, cache_reuse, and swa_full at startup, halving generation throughput.
         if cfg.media_attachments:
             kinds = sorted({a.kind for a in cfg.media_attachments})
             has_vision = any(a.kind in ("image", "video_frame") for a in cfg.media_attachments)
             has_audio  = any(a.kind == "audio" for a in cfg.media_attachments)
-            if has_vision:
-                return RouteDecision(
-                    brain="ARCHITECT",
-                    reasons=[f"multimodal:{','.join(kinds)}", "vision_architect"],
-                    score=999,
-                )
-            if has_audio:
-                return RouteDecision(
-                    brain="FAST",
-                    reasons=[f"multimodal:{','.join(kinds)}", "audio_requires_fast"],
-                    score=0,
-                )
+            if has_vision and has_audio:
+                modality = "multimodal"
+            elif has_vision:
+                modality = "video" if any(a.kind == "video_frame" for a in cfg.media_attachments) else "image"
+            else:
+                modality = "audio"
+            return RouteDecision(
+                brain="FAST",
+                reasons=[f"multimodal:{','.join(kinds)}", "fast_mmproj"],
+                score=0,
+                modality=modality,
+            )
 
         if not cfg.auto_escalate:
             return self._manual_decision(cfg.deep_mode)
@@ -310,11 +325,14 @@ class ChatService:
 
         # RAG injection operates on the text query regardless of modality.
         # It appends context to the last user turn's text portion.
-        # Pass FAST brain coords so the search summarizer can call it concurrently.
+        # Prefer the dedicated CPU summarizer when configured (decouples
+        # summarization from the FAST brain's single inference slot).
         messages, rag_sources, wiki_images, search_evidence, music_context = apply_rag_and_wiki_parallel(
             messages, user_text, decision, wiki_enabled,
             fast_base_url=self._session.q5_url,
             fast_model_id=self._session.q5_model_id,
+            summarizer_base_url=self._session.summarizer_url or None,
+            summarizer_model_id=self._session.summarizer_model_id or None,
         )
         return messages, rag_sources, wiki_images, search_evidence, music_context
 
@@ -331,11 +349,31 @@ class ChatService:
         """
         Yield text chunks from the selected llama-server.
 
+        For ARCHITECT turns, resolves the effective thinking budget:
+          - cfg.thinking_budget != -1 → use it as-is (explicit user override)
+          - cfg.thinking_budget == -1 and creative route → cap at _CREATIVE_THINKING_CAP
+          - cfg.thinking_budget == -1 and non-creative → unlimited (-1)
+
         Raises LlamaServerError if the server returns an HTTP error.
         """
         base_url = self._session.url_for_brain(decision.brain)
         model_id = self._session.model_id_for_brain(decision.brain)
         is_arch = decision.brain == "ARCHITECT"
+
+        # Resolve thinking budget for ARCHITECT turns only.
+        thinking_budget: int = -1
+        if is_arch:
+            if cfg.thinking_budget != -1:
+                # Explicit user setting — honour it directly.
+                thinking_budget = cfg.thinking_budget
+            elif any(r.startswith("creative:") for r in decision.reasons):
+                # Auto-cap: creative writing doesn't benefit from unlimited thinking.
+                thinking_budget = _CREATIVE_THINKING_CAP
+                _LOG.info(
+                    "stream_response: auto-capping thinking to %d tokens (creative route)",
+                    _CREATIVE_THINKING_CAP,
+                )
+            # else: -1 (unlimited) — code review, architecture, analysis, etc.
 
         yield from stream_chat_completions(
             base_url=base_url,
@@ -346,6 +384,7 @@ class ChatService:
             top_k=int(cfg.top_k_q6 if is_arch else cfg.top_k_q5),
             min_p=float(cfg.min_p_q6 if is_arch else cfg.min_p_q5),
             max_tokens=int(cfg.max_tokens_q6 if is_arch else cfg.max_tokens_q5),
+            thinking_budget=thinking_budget,
             timeouts=self._timeouts,
         )
 

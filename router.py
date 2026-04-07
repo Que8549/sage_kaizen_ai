@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import re
 from typing import List, Tuple
 
@@ -21,7 +22,20 @@ CODE_HINTS = (
     "postgresql",
 )
 
-FAST_HINTS = ("summarize", "tl;dr", "quick", "brief", "short", "bullet", "one sentence", "in one paragraph")
+FAST_HINTS = ("summarize", "tl;dr", "quick", "brief", "short answer", "keep it short", "bullet", "one sentence", "in one paragraph")
+
+# Creative writing — long-form narrative needs ARCHITECT for language stability.
+# Qwen2.5-Omni-7B (FAST brain) code-switches to Chinese mid-response on long
+# creative tasks. Qwen3.5-27B (ARCHITECT) is far more stable at this length.
+CREATIVE_HINTS = (
+    "write a story", "write a short story", "write a poem", "write a song",
+    "write a scene", "write a chapter", "write a script", "write a screenplay",
+    "write a novel", "write an essay", "write a blog post",
+    "write me a story", "write me a poem", "write me a song", "write me a scene",
+    "write me a short story", "write me an essay",
+    "tell me a story", "compose a poem", "compose a song",
+    "creative writing", "fiction story", "short fiction",
+)
 
 _VS_RE     = re.compile(r"(?:^|[\s\W])vs(?:$|[\s\W])")
 _VERSUS_RE = re.compile(r"(?:^|[\s\W])versus(?:$|[\s\W])")
@@ -37,7 +51,14 @@ _SEARCH_TEMPORAL_HINTS: Tuple[str, ...] = (
     "today's news", "latest news", "breaking news",
     "current events", "right now", "this week's", "this month's",
     "just announced", "recently announced", "just released", "newly released",
-    "trending now", "live score", "live results", "stock price", "current price",    
+    "trending now", "live score", "live results", "stock price", "current price", 
+    # Weather — always live data; no static knowledge can answer these
+    "current weather", "weather right now", "weather outside",
+    "current temperature", "temperature right now", "temperature outside",
+    "is it raining", "is it snowing", "is it hot", "is it cold",
+    "what is the weather", "what's the weather", "how's the weather",
+    "weather in", "weather for", "weather near", "weather at",
+    "temperature in", "temperature for",
 )
 
 # Explicit search-intent phrases — user is clearly asking for a web search.
@@ -46,7 +67,8 @@ _SEARCH_INTENT_HINTS: Tuple[str, ...] = (
     "look up online", "google that", "find me the latest",
     "what is the latest", "what are the latest", "is there news about",
     "any news on", "any updates on", "what's happening with", "top stories",
-    "today's weather", "weather forecast", "what happened today", 
+    "today's weather", "weather forecast", "what happened today",
+    "weather today", "forecast today", "forecast for", "current",
 )
 
 # Keyword → category mapping for category inference.
@@ -58,6 +80,8 @@ _CATEGORY_KEYWORDS: dict[str, Tuple[str, ...]] = {
                    "nasa discovery", "new study", "new research"),
     "technology": ("tech news", "software release", "github release", "hardware release",
                    "ai news", "product launch", "new update", "new version released"),
+    "general":    ("weather", "temperature", "forecast", "rain", "snow",
+                   "humidity", "wind speed", "uv index"),
 }
 
 _DEFAULT_SEARCH_CATEGORIES: Tuple[str, ...] = ("general", "news")
@@ -98,6 +122,7 @@ class RouteDecision:
     needs_search: bool = False                      # True → run live web search this turn
     search_categories: Tuple[str, ...] = field(default_factory=tuple)  # SearXNG categories to query
     needs_music: bool = False                       # True → run music retrieval this turn
+    modality: str = "text"                          # "text" | "image" | "audio" | "video" | "multimodal"
 
 
 def heuristic_is_ambiguous(score: int) -> bool:
@@ -112,9 +137,23 @@ def heuristic_is_ambiguous(score: int) -> bool:
 def _log_decision(decision: "RouteDecision", user_text: str) -> None:
     reasons = ",".join(decision.reasons[:8]) if decision.reasons else ""
     _LOG.info(
-        "route | brain=%s | score=%s | needs_search=%s | categories=%s | reasons=[%s] | input_chars=%s",
-        decision.brain, decision.score, decision.needs_search,
+        "route | brain=%s | score=%s | modality=%s | needs_search=%s | categories=%s | reasons=[%s] | input_chars=%s",
+        decision.brain, decision.score, decision.modality, decision.needs_search,
         list(decision.search_categories), reasons, len(user_text),
+    )
+    _LOG.info(
+        "route_json %s",
+        json.dumps({
+            "route":             decision.brain.lower(),
+            "score":             decision.score,
+            "modality":          decision.modality,
+            "reasons":           decision.reasons[:8],
+            "rag_needed":        decision.score >= 3 or decision.needs_search,
+            "search_used":       decision.needs_search,
+            "search_categories": list(decision.search_categories),
+            "music_used":        decision.needs_music,
+            "input_chars":       len(user_text),
+        }),
     )
 
 
@@ -218,6 +257,15 @@ def route(
         if k in txt:
             score += 3
             reasons.append(f"code:{k}")
+            break
+
+    # Creative writing (strong) — routes to ARCHITECT for language stability.
+    # Qwen2.5-Omni-7B code-switches to Chinese on long-form creative tasks;
+    # Qwen3.5-27B handles multi-paragraph narrative reliably in English.
+    for k in CREATIVE_HINTS:
+        if k in txt:
+            score += 3
+            reasons.append(f"creative:{k}")
             break
 
     # Multi-part markers (weak)
