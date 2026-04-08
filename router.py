@@ -3,10 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import re
+import time
 from typing import List, Tuple
 
 from openai_client import HttpTimeouts, stream_chat_completions
 from sk_logging import get_logger
+
+# ── Routing thresholds (tune here without touching logic) ──────────────────
+ARCHITECT_THRESHOLD : int = 3    # heuristic score required to select ARCHITECT
+VOICE_BIAS_THRESHOLD: int = 150  # chars below which voice_mode applies a -1 score bias
+VERY_LONG_INPUT     : int = 2000 # chars above which +4 score is applied
+LONG_INPUT          : int = 800  # chars above which +2 score is applied
+LLM_CAP_CHARS       : int = 500  # max chars passed to the LLM classifier
 
 DEPTH_HINTS = (
     "explain", "analyze", "compare", "why", "how", "history", "philosophy", "theology",
@@ -127,32 +135,33 @@ class RouteDecision:
 
 def heuristic_is_ambiguous(score: int) -> bool:
     """
-    True when the heuristic score falls in the ambiguous zone (1–2).
-    Score 0   = clear FAST;  ≥3 = clear ARCHITECT;  1–2 = uncertain.
+    True when the heuristic score falls in the ambiguous zone (1 to ARCHITECT_THRESHOLD-1).
+    Score 0   = clear FAST;  ≥ARCHITECT_THRESHOLD = clear ARCHITECT;  in-between = uncertain.
     Only the ambiguous zone benefits from the extra LLM classification round-trip.
     """
-    return score in (1, 2)
+    return 0 < score < ARCHITECT_THRESHOLD
 
 
-def _log_decision(decision: "RouteDecision", user_text: str) -> None:
+def _log_decision(decision: "RouteDecision", user_text: str, processing_time_ms: float = 0.0) -> None:
     reasons = ",".join(decision.reasons[:8]) if decision.reasons else ""
     _LOG.info(
-        "route | brain=%s | score=%s | modality=%s | needs_search=%s | categories=%s | reasons=[%s] | input_chars=%s",
+        "route | brain=%s | score=%s | modality=%s | needs_search=%s | categories=%s | reasons=[%s] | input_chars=%s | processing_time_ms=%s",
         decision.brain, decision.score, decision.modality, decision.needs_search,
-        list(decision.search_categories), reasons, len(user_text),
+        list(decision.search_categories), reasons, len(user_text), processing_time_ms,
     )
     _LOG.info(
         "route_json %s",
         json.dumps({
-            "route":             decision.brain.lower(),
-            "score":             decision.score,
-            "modality":          decision.modality,
-            "reasons":           decision.reasons[:8],
-            "rag_needed":        decision.score >= 3 or decision.needs_search,
-            "search_used":       decision.needs_search,
-            "search_categories": list(decision.search_categories),
-            "music_used":        decision.needs_music,
-            "input_chars":       len(user_text),
+            "route":               decision.brain.lower(),
+            "score":               decision.score,
+            "modality":            decision.modality,
+            "reasons":             decision.reasons[:8],
+            "rag_needed":          decision.score >= ARCHITECT_THRESHOLD or decision.needs_search,
+            "search_used":         decision.needs_search,
+            "search_categories":   list(decision.search_categories),
+            "music_used":          decision.needs_music,
+            "input_chars":         len(user_text),
+            "processing_time_ms":  processing_time_ms,
         }),
     )
 
@@ -198,21 +207,23 @@ def route(
       - FAST      -> 5080 (Qwen2.5-Omni-7B Q8_0, multimodal)
       - ARCHITECT -> 5090 (Qwen3.5-27B-Uncensored Q6_K, thinking+multimodal)
 
-    voice_mode: when True, short queries (<150 chars) receive a -1 score bias
+    voice_mode: when True, short queries (<VOICE_BIAS_THRESHOLD chars) receive a -1 score bias
                 toward FAST, reflecting the conversational nature of voice input.
                 This prevents common depth-hint words like "explain" or "why"
                 from escalating brief voice questions to ARCHITECT.
 
     Also logs the decision to logs/sage_kaizen.log.
     """
+    _t0 = time.perf_counter()
+
     if not user_text:
         decision = RouteDecision(brain="FAST", reasons=["empty_input"], score=0)
-        _log_decision(decision, user_text)
+        _log_decision(decision, user_text, round((time.perf_counter() - _t0) * 1000, 2))
         return decision
 
     if force_architect:
         decision = RouteDecision(brain="ARCHITECT", reasons=["force_architect"], score=999)
-        _log_decision(decision, user_text)
+        _log_decision(decision, user_text, round((time.perf_counter() - _t0) * 1000, 2))
         return decision
 
     txt = user_text.lower()
@@ -231,17 +242,17 @@ def route(
 
     # Length heuristics
     n = len(txt)
-    if n > 2000:
+    if n > VERY_LONG_INPUT:
         score += 4
         reasons.append("very_long_input")
-    elif n > 800:
+    elif n > LONG_INPUT:
         score += 2
         reasons.append("long_input")
 
     # Voice-mode bias: short conversational queries lean FAST.
     # Voice input is inherently more concise than typed text; a brief spoken
     # question containing "explain" or "why" is typically FAST territory.
-    if voice_mode and n < 150:
+    if voice_mode and n < VOICE_BIAS_THRESHOLD:
         score -= 1
         reasons.append("voice_short_query")
 
@@ -285,7 +296,7 @@ def route(
             break
 
     # Final threshold
-    if score >= 3:
+    if score >= ARCHITECT_THRESHOLD:
         decision = RouteDecision(
             brain="ARCHITECT",
             reasons=reasons or ["score_threshold"],
@@ -294,7 +305,7 @@ def route(
             search_categories=search_categories,
             needs_music=needs_music,
         )
-        _log_decision(decision, user_text)
+        _log_decision(decision, user_text, round((time.perf_counter() - _t0) * 1000, 2))
         return decision
 
     decision = RouteDecision(
@@ -305,7 +316,7 @@ def route(
         search_categories=search_categories,
         needs_music=needs_music,
     )
-    _log_decision(decision, user_text)
+    _log_decision(decision, user_text, round((time.perf_counter() - _t0) * 1000, 2))
     return decision
 
 
@@ -314,11 +325,13 @@ def route(
 # ---------------------------------------------------
 
 _CLASSIFY_SYSTEM = (
-    "Route queries. Reply with ONE word only: FAST, ARCHITECT, or SEARCH.\n"
+    "Route queries. Reply with ONE label only: FAST, ARCHITECT, SEARCH, or ARCHITECT+SEARCH.\n"
     "FAST: simple questions, summaries, casual chat, quick facts, basic math, short creative tasks.\n"
     "ARCHITECT: deep analysis, code review, system design, multi-step reasoning, long writing.\n"
-    "SEARCH: needs live/current data — news, prices, scores, recent events, new releases.\n"
-    "No explanation. One word."
+    "SEARCH: needs live/current data (news, prices, scores, recent events) — no deep analysis required.\n"
+    "ARCHITECT+SEARCH: complex analysis that ALSO requires live current data "
+    "(e.g. 'deeply analyze today's AI news trends', 'compare this week's stock movements').\n"
+    "No explanation. One label."
 )
 
 
@@ -356,9 +369,11 @@ def llm_route(
 
     classify_messages = [
         {"role": "system", "content": _CLASSIFY_SYSTEM},
-        # Cap at 500 chars — the classifier only needs enough context to judge
-        {"role": "user", "content": user_text[:500]},
+        # Cap at LLM_CAP_CHARS — the classifier only needs enough context to judge
+        {"role": "user", "content": user_text[:LLM_CAP_CHARS]},
     ]
+
+    _t0 = time.perf_counter()
 
     try:
         chunks = list(stream_chat_completions(
@@ -367,29 +382,30 @@ def llm_route(
             messages=classify_messages,
             temperature=0.0,   # deterministic classification
             top_p=1.0,
-            max_tokens=10,     # we only need one word (1–2 tokens)
+            max_tokens=10,     # we only need one label (1–3 tokens)
             timeouts=timeouts,
         ))
         label = "".join(chunks).strip().upper()
 
-        # SEARCH classification: route to FAST brain (light/quick turn) but
-        # flag needs_search so context_injector runs a live web fetch.
-        # Infer categories from the query text for SEARCH labels.
-        needs_search   = "SEARCH" in label
+        # "ARCHITECT+SEARCH" → brain=ARCHITECT, needs_search=True
+        # "ARCHITECT"        → brain=ARCHITECT, needs_search=False
+        # "SEARCH"           → brain=FAST,      needs_search=True
+        # "FAST"             → brain=FAST,       needs_search=False
+        needs_search = "SEARCH" in label
+        brain        = "ARCHITECT" if "ARCHITECT" in label else "FAST"
+
         search_categories: Tuple[str, ...] = ()
         if needs_search:
             _, search_categories = _detect_search(user_text.lower())
             if not search_categories:
                 search_categories = _infer_categories(user_text.lower())
-            brain = "FAST"
-        else:
-            brain = "ARCHITECT" if "ARCHITECT" in label else "FAST"
 
         needs_music = _detect_music(user_text.lower())
+        processing_time_ms = round((time.perf_counter() - _t0) * 1000, 2)
 
         _LOG.info(
-            "llm_route | brain=%s | needs_search=%s | needs_music=%s | label=%r | input_chars=%s",
-            brain, needs_search, needs_music, label, len(user_text),
+            "llm_route | brain=%s | needs_search=%s | needs_music=%s | label=%r | input_chars=%s | processing_time_ms=%s",
+            brain, needs_search, needs_music, label, len(user_text), processing_time_ms,
         )
         score = 999 if brain == "ARCHITECT" else 0
         decision = RouteDecision(

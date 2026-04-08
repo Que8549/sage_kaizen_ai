@@ -556,3 +556,22 @@ That keeps the project:
 - multimodal-ready
 - compatible with current code
 - ready for the next `wiki_ingest.py` stage
+
+
+---
+
+🧰 Kiwix Tools (Recommended)
+Kiwix Desktop
+aria2c (fast multi-connection download)
+
+Example:
+aria2c https://download.kiwix.org/zim/wikisource/wikipedia_en_all_maxi_2026-02.zim
+
+PREFERRED
+Use multi-connection + resume support:
+aria2c ^
+  -d I:\llm_wiki_data_download ^
+  -o wikipedia_en_all_maxi_2026-02.zim ^
+  -x 16 -s 16 -k 1M -c ^
+  --file-allocation=trunc ^
+  https://download.kiwix.org/zim/wikipedia/wikipedia_en_all_maxi_2026-02.zim
