@@ -57,6 +57,12 @@ logging.getLogger("tornado.general").addFilter(_stop_race_filter)
 # ─────────────────────────────────────────────────────────────────────────────
 
 from chat_service import ChatService, MediaAttachment, TurnConfig
+from document_parser import (
+    ACCEPTED_EXTENSIONS as _DOC_ACCEPTED_EXTENSIONS,
+    DocumentAttachment,
+    parse_document,
+    PER_DOCUMENT_CHAR_LIMIT,
+)
 from input_guard import InjectionDetectedError, check_user_input
 from rag_v1.retrieve.citations import format_sources_markdown
 from inference_session import InferenceSession
@@ -281,6 +287,60 @@ def _render_attachments_preview(attachments: List[MediaAttachment]) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
+# Document upload helpers                                                      #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+# File size limit shown in the UI (soft warning, not a hard block — the
+# character cap inside parse_document handles oversized content gracefully).
+_DOC_SIZE_WARN_MB: float = 10.0
+_DOC_ACCEPT_LIST: list[str] = sorted(_DOC_ACCEPTED_EXTENSIONS)
+
+
+def _collect_doc_attachments(uploaded_files: list) -> List[DocumentAttachment]:
+    """
+    Parse Streamlit UploadedFile objects into DocumentAttachment list.
+
+    Skips unsupported file types with a UI warning.  Warns when a file
+    exceeds _DOC_SIZE_WARN_MB but still attempts parsing (content will be
+    truncated to PER_DOCUMENT_CHAR_LIMIT by document_parser).
+    """
+    attachments: List[DocumentAttachment] = []
+    for uf in uploaded_files:
+        raw = uf.read()
+        size_mb = len(raw) / (1024 * 1024)
+        if size_mb > _DOC_SIZE_WARN_MB:
+            st.warning(
+                f"'{uf.name}' is {size_mb:.1f} MB — content will be truncated to "
+                f"{PER_DOCUMENT_CHAR_LIMIT:,} chars ({PER_DOCUMENT_CHAR_LIMIT // 4:,} ~tokens)."
+            )
+
+        doc = parse_document(raw, uf.name)
+        if doc is None:
+            st.warning(f"'{uf.name}' — unsupported file type, skipped.")
+        else:
+            attachments.append(doc)
+
+    return attachments
+
+
+def _render_doc_attachments_preview(attachments: List[DocumentAttachment]) -> None:
+    """Show a compact preview of pending document attachments."""
+    if not attachments:
+        return
+
+    total_chars = sum(a.char_count for a in attachments)
+    st.markdown(
+        f"**{len(attachments)} document(s) ready** — "
+        f"{total_chars:,} total chars (~{total_chars // 4:,} tokens)"
+    )
+    for att in attachments:
+        trunc_note = " *(truncated)*" if att.truncated else ""
+        st.caption(
+            f"📄 `{att.filename}` — {att.doc_type} — {att.char_count:,} chars{trunc_note}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 # Page config                                                                  #
 # ─────────────────────────────────────────────────────────────────────────── #
 
@@ -338,7 +398,8 @@ if "q6_model_id"         not in st.session_state: st.session_state.q6_model_id  
 if "last_route"          not in st.session_state: st.session_state.last_route          = None
 if "fb_rated_ids"        not in st.session_state: st.session_state.fb_rated_ids        = set()
 if "fb_stats_dirty"      not in st.session_state: st.session_state.fb_stats_dirty      = True
-if "pending_attachments" not in st.session_state: st.session_state.pending_attachments = []
+if "pending_attachments"     not in st.session_state: st.session_state.pending_attachments     = []
+if "pending_doc_attachments" not in st.session_state: st.session_state.pending_doc_attachments = []
 if "tts_enabled"         not in st.session_state: st.session_state.tts_enabled         = True
 if "_is_streaming"       not in st.session_state: st.session_state._is_streaming       = False
 if "_greeting_played"    not in st.session_state: st.session_state._greeting_played    = False
@@ -594,10 +655,11 @@ with st.sidebar:
     )
 
     if st.button("New chat"):
-        st.session_state.messages            = []
-        st.session_state.last_thinking_time  = None
-        st.session_state.last_route          = None
-        st.session_state.pending_attachments = []
+        st.session_state.messages                = []
+        st.session_state.last_thinking_time      = None
+        st.session_state.last_route              = None
+        st.session_state.pending_attachments     = []
+        st.session_state.pending_doc_attachments = []
         st.rerun()
 
 
@@ -684,9 +746,9 @@ with st.expander(
         accept_multiple_files=True,
         key="media_uploader",
         help=(
-            "Images: PNG, JPG, WEBP, GIF, BMP  → ARCHITECT (Qwen3.5-27B vision mmproj)\n"
+            "Images: PNG, JPG, WEBP, GIF, BMP  → FAST (Qwen2.5-Omni audio+vision mmproj)\n"
             "Audio:  WAV, MP3, FLAC, OGG, M4A  → FAST (Qwen2.5-Omni audio encoder)\n"
-            "Video:  MP4, MOV, AVI, MKV, WEBM  → ARCHITECT (frames extracted; requires cv2)"
+            "Video:  MP4, MOV, AVI, MKV, WEBM  → FAST (frames extracted; requires cv2)"
         ),
     )
 
@@ -706,16 +768,52 @@ with st.expander(
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
+# Document upload (above chat input)                                           #
+# ─────────────────────────────────────────────────────────────────────────── #
+# Separate from media upload — documents are text-extracted and injected into
+# the user message as <document> blocks routed to ARCHITECT (128K context).
+
+with st.expander(
+    "📄 Attach documents (txt / code / docx / xlsx) — analyzed by Architect",
+    expanded=bool(st.session_state.pending_doc_attachments),
+):
+    uploaded_docs = st.file_uploader(
+        "Upload text, code, or Office files",
+        type=_DOC_ACCEPT_LIST,
+        accept_multiple_files=True,
+        key="doc_uploader",
+        help=(
+            "Supported: plain text, code (Python, C#, JS, Go, Rust, SQL, …), "
+            "Word (.docx), Excel (.xlsx).\n"
+            f"Content per file capped at {PER_DOCUMENT_CHAR_LIMIT:,} chars. "
+            "Always routed to Architect brain (128K context window)."
+        ),
+    )
+
+    if uploaded_docs:
+        new_doc_attachments = _collect_doc_attachments(uploaded_docs)
+        st.session_state.pending_doc_attachments = new_doc_attachments
+
+    _render_doc_attachments_preview(st.session_state.pending_doc_attachments)
+
+    if st.session_state.pending_doc_attachments:
+        if st.button("Clear documents"):
+            st.session_state.pending_doc_attachments = []
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 # Voice "new chat" command handler                                             #
 # ─────────────────────────────────────────────────────────────────────────── #
 # Processed before the normal chat input so the command is never forwarded
 # to the LLM.  Mirrors the "New chat" sidebar button exactly.
 
 if st.session_state.pop("_voice_new_chat", False):
-    st.session_state.messages            = []
-    st.session_state.last_thinking_time  = None
-    st.session_state.last_route          = None
-    st.session_state.pending_attachments = []
+    st.session_state.messages                = []
+    st.session_state.last_thinking_time      = None
+    st.session_state.last_route              = None
+    st.session_state.pending_attachments     = []
+    st.session_state.pending_doc_attachments = []
     st.session_state.pop("_voice_input", None)  # discard any voice input queued before the reset
     st.toast("\U0001F3A4 New chat started", icon="\U0001F5D1\uFE0F")
     st.rerun()
@@ -735,26 +833,34 @@ if user_text:
         st.error(f"Request blocked: {_inj}")
         st.stop()
 
-    # Snapshot attachments for this turn then clear the pending list
+    # Snapshot attachments for this turn then clear both pending lists.
+    # Documents and media are snapshotted atomically so mid-rerun state changes
+    # cannot cause one to be cleared while the other is still pending.
     turn_attachments: Tuple[MediaAttachment, ...] = tuple(
         st.session_state.pending_attachments
     )
-    st.session_state.pending_attachments = []
+    turn_doc_attachments: Tuple[DocumentAttachment, ...] = tuple(
+        st.session_state.pending_doc_attachments
+    )
+    st.session_state.pending_attachments     = []
+    st.session_state.pending_doc_attachments = []
 
     media_labels = [a.label for a in turn_attachments if a.label]
+    doc_labels   = [f"📄 {a.filename}" for a in turn_doc_attachments]
     if _pending_voice:
         media_labels = ["\U0001f3a4 Voice"] + media_labels
+    all_labels = media_labels + doc_labels
 
     # Store user message (text only for display; attachments shown via labels)
     st.session_state.messages.append({
         "role": "user",
         "content": user_text,
-        "media_labels": media_labels,
+        "media_labels": all_labels,
     })
     with st.chat_message("user"):
         st.markdown(user_text)
-        if media_labels:
-            st.caption("\U0001F4CE " + ", ".join(media_labels))
+        if all_labels:
+            st.caption("\U0001F4CE " + ", ".join(all_labels))
 
     cfg = TurnConfig(
         deep_mode=deep_mode,
@@ -773,6 +879,7 @@ if user_text:
         max_tokens_q6=int(max_tokens_q6),
         thinking_budget=int(thinking_budget),
         media_attachments=turn_attachments,
+        document_attachments=turn_doc_attachments,
     )
 
     session = InferenceSession.from_urls(
@@ -875,6 +982,7 @@ if user_text:
                 user_text, history, decision, templates,
                 wiki_enabled=st.session_state.get("wiki_enabled", True),
                 media_attachments=turn_attachments,
+                document_attachments=turn_doc_attachments,
             )
 
             # Snapshot tts_enabled once so the generator is not sensitive to
@@ -956,10 +1064,12 @@ if user_text:
                 f"\u23F1\uFE0F {elapsed:.2f}s \u2022 Brain: {brain_label} \u2022 "
                 f"Endpoint: {_endpoint}"
             )
-            if turn_attachments:
+            if turn_attachments or turn_doc_attachments:
+                _att_parts: list[str] = [a.kind for a in turn_attachments]
+                _att_parts += [f"doc:{a.doc_type}" for a in turn_doc_attachments]
                 st.caption(
-                    f"\U0001F4CE {len(turn_attachments)} attachment(s): "
-                    + ", ".join(a.kind for a in turn_attachments)
+                    f"\U0001F4CE {len(turn_attachments) + len(turn_doc_attachments)} attachment(s): "
+                    + ", ".join(_att_parts)
                 )
 
             st.session_state.messages.append({
@@ -977,7 +1087,7 @@ if user_text:
                     "prompt_messages": messages,
                     "model_id":        _model_id,
                     "ts":              time.time(),
-                    "has_media":       bool(turn_attachments),
+                    "has_media":       bool(turn_attachments) or bool(turn_doc_attachments),
                 },
                 "thumb": None,
             })
