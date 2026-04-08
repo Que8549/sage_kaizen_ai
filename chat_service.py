@@ -20,6 +20,7 @@ Multimodal support:
                                        ARCHITECT mmproj disabled — loading it kills speculative
                                        decoding, cache_reuse, and swa_full)
       - Audio                 → FAST (Qwen2.5-Omni audio encoder; Qwen3.5-27B has none)
+      - Documents (txt/code/docx/xlsx) → ARCHITECT (128K context; deep analysis)
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Iterator, List, Tuple
 
 import router as _router
+from document_parser import DocumentAttachment, format_document_context
 from inference_session import InferenceSession
 from openai_client import HttpTimeouts, LlamaServerError, stream_chat_completions
 from prompt_library import (
@@ -133,6 +135,10 @@ class TurnConfig:
     thinking_budget: int = -1
     # Multimodal attachments for this turn (empty tuple = text-only)
     media_attachments: Tuple[MediaAttachment, ...] = field(default_factory=tuple)
+    # Text-based document attachments (txt, code files, docx, xlsx).
+    # Content is extracted to plain text and injected into the user message.
+    # Presence of any document attachment forces routing to ARCHITECT (27B, 128K context).
+    document_attachments: Tuple[DocumentAttachment, ...] = field(default_factory=tuple)
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -186,8 +192,23 @@ class ChatService:
           5. Q5 is live → ask FAST brain to classify (LLM routing)
           6. Q5 not live → keyword-scoring heuristic (no server needed)
         """
-        if not user_text and not cfg.media_attachments:
+        if not user_text and not cfg.media_attachments and not cfg.document_attachments:
             return RouteDecision(brain="FAST", reasons=["empty_input"], score=0)
+
+        # Document routing:
+        #   Any text/code/Office document attachment → ARCHITECT (Qwen3.5-27B, 128K context).
+        #   FAST (Qwen2.5-Omni-7B) only has 16K context; large documents would overflow it.
+        #   Documents need deep analysis that ARCHITECT handles more reliably than FAST.
+        if cfg.document_attachments:
+            n_docs  = len(cfg.document_attachments)
+            total_c = sum(a.char_count for a in cfg.document_attachments)
+            types   = sorted({a.doc_type for a in cfg.document_attachments})
+            return RouteDecision(
+                brain="ARCHITECT",
+                reasons=[f"document_upload:{n_docs}_files", f"doc_chars:{total_c}"],
+                score=999,
+                modality=f"document:{','.join(types)}",
+            )
 
         # Multimodal routing:
         #   All media (image, video_frame, audio) → FAST (Qwen2.5-Omni-7B).
@@ -287,6 +308,7 @@ class ChatService:
         templates: Tuple[TemplateKey, ...],
         wiki_enabled: bool = True,
         media_attachments: Tuple[MediaAttachment, ...] = (),
+        document_attachments: Tuple[DocumentAttachment, ...] = (),
     ) -> Tuple[List[dict], list, list, object, str]:
         """
         Build the full OpenAI-style messages list for this turn.
@@ -295,6 +317,10 @@ class ChatService:
         list of content-part dicts (OpenAI vision / audio format) instead of
         a plain string.  llama-server (with --mmproj) routes these to the
         Qwen2.5-Omni encoders.
+
+        When document_attachments is non-empty, extracted document text is
+        prepended to the user message as <document> blocks so ARCHITECT has
+        the full file context before reading the user's question.
 
         Returns:
             (messages, rag_sources, wiki_images, search_evidence, music_context)
@@ -315,11 +341,27 @@ class ChatService:
         if history:
             messages.extend(history[:-1])
 
+        # Build document context block — prepended before the user query so the
+        # model has the full file content in view when it reads the question.
+        doc_context = format_document_context(document_attachments)
+        if doc_context:
+            _LOG.info(
+                "prepare_messages: injecting %d document(s), total ~%d chars",
+                len(document_attachments),
+                sum(a.char_count for a in document_attachments),
+            )
+
         # Build user content — plain string or multimodal content-part list
         if media_attachments:
-            user_content = _build_multimodal_content(user_text, media_attachments)
+            user_content = _build_multimodal_content(
+                user_text, media_attachments, doc_context=doc_context
+            )
         else:
-            user_content = user_text.strip()
+            # Prepend document blocks to the plain text query when documents are present
+            if doc_context:
+                user_content = doc_context + "\n\n" + user_text.strip()
+            else:
+                user_content = user_text.strip()
 
         messages.append({"role": "user", "content": user_content})
 
@@ -396,6 +438,8 @@ class ChatService:
 def _build_multimodal_content(
     user_text: str,
     attachments: Tuple[MediaAttachment, ...],
+    *,
+    doc_context: str = "",
 ) -> list:
     """
     Build an OpenAI-compatible multimodal content-part list.
@@ -403,6 +447,7 @@ def _build_multimodal_content(
     Images / video frames → image_url data URI (base64 JPEG/PNG).
     Audio → input_audio with base64 data and format string.
     Text → text part appended last so the model sees media first.
+    Document context → prepended to the text part when present.
 
     llama-server (with --mmproj) parses these parts and routes each to
     the appropriate encoder inside the mmproj GGUF.
@@ -432,8 +477,12 @@ def _build_multimodal_content(
         else:
             _LOG.warning("Unknown attachment kind %r — skipped", att.kind)
 
-    # Text always goes last so the model receives media context before the query
-    if user_text.strip():
-        parts.append({"type": "text", "text": user_text.strip()})
+    # Text always goes last so the model receives media context before the query.
+    # When documents are also attached, their content is prepended to the text part.
+    query_text = user_text.strip()
+    if doc_context:
+        query_text = doc_context + ("\n\n" + query_text if query_text else "")
+    if query_text:
+        parts.append({"type": "text", "text": query_text})
 
     return parts
