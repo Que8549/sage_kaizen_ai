@@ -79,32 +79,32 @@ class ZimJob:
 ZIM_JOBS: list[ZimJob] = [
     ZimJob(
         zim_path=Path(
-            r"C:\Users\Alquin\AppData\Roaming\kiwix-desktop"
-            r"\wikipedia_en_all_maxi_2025-08.zim"
-        ),
-        out_dir=Path(r"I:\llm_data\wikipedia_maxi_2025_08"),
-    ),
-    ZimJob(
-        zim_path=Path(
-            r"C:\Users\Alquin\AppData\Roaming\kiwix-desktop"
-            r"\wikipedia_en_all_nopic_2025-12.zim"
-        ),
-        out_dir=Path(r"I:\llm_data\wikipedia_nopic_2025_12"),
-    ),
-    ZimJob(
-        zim_path=Path(
-            r"C:\Users\Alquin\AppData\Roaming\kiwix-desktop"
+            r"C:\Users\Alquin\Desktop\wiki_download"
             r"\wikisource_en_all_maxi_2026-02.zim"
         ),
-        out_dir=Path(r"I:\llm_data\wikisource_maxi_2026_02"),
+        out_dir=Path(r"H:\llm_wiki_data"),
     ),
-    ZimJob(
-        zim_path=Path(
-            r"C:\Users\Alquin\AppData\Roaming\kiwix-desktop"
-            r"\wikisource_en_all_nopic_2026-02.zim"
-        ),
-        out_dir=Path(r"I:\llm_data\wikisource_nopic_2026_02"),
-    ),
+    # ZimJob(
+    #     zim_path=Path(
+    #         r"C:\Users\Alquin\AppData\Roaming\kiwix-desktop"
+    #         r"\wikipedia_en_all_nopic_2025-12.zim"
+    #     ),
+    #     out_dir=Path(r"I:\llm_data\wikipedia_nopic_2025_12"),
+    # ),
+    # ZimJob(
+    #     zim_path=Path(
+    #         r"C:\Users\Alquin\AppData\Roaming\kiwix-desktop"
+    #         r"\wikisource_en_all_maxi_2026-02.zim"
+    #     ),
+    #     out_dir=Path(r"I:\llm_data\wikisource_maxi_2026_02"),
+    # ),
+    # ZimJob(
+    #     zim_path=Path(
+    #         r"C:\Users\Alquin\AppData\Roaming\kiwix-desktop"
+    #         r"\wikisource_en_all_nopic_2026-02.zim"
+    #     ),
+    #     out_dir=Path(r"I:\llm_data\wikisource_nopic_2026_02"),
+    # ),
 ]
 
 

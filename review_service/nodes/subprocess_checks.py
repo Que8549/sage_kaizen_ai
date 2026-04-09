@@ -1,0 +1,82 @@
+"""
+review_service/nodes/subprocess_checks.py — Static analysis node (no LLM).
+
+Runs pyright, ruff, and pytest --collect-only against changed Python files
+in parallel via asyncio.gather + asyncio.create_subprocess_exec.
+
+Results are trimmed and fed to architect_reviewer as context.
+If any tool is not installed or times out, the node stores a
+"not installed / timed out" message and continues — these are optional checks.
+"""
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+from sk_logging import get_logger
+from ..state import ReviewState
+
+_LOG = get_logger("sage_kaizen.review_service.subprocess_checks")
+
+_MAIN_ROOT = Path("F:/Projects/sage_kaizen_ai")
+_TIMEOUT   = 60     # seconds per subprocess
+_MAX_OUT   = 3_000  # max chars per tool output (keeps ARCHITECT prompt lean)
+
+
+async def subprocess_checks_node(state: ReviewState) -> dict:
+    changed_py = [
+        f for f in state.get("changed_files", [])
+        if f.endswith(".py") and not f.startswith("[voice]")
+    ]
+    full_paths = [str(_MAIN_ROOT / f) for f in changed_py if (_MAIN_ROOT / f).exists()]
+
+    _LOG.info("review.subprocess_checks | py_files=%d", len(full_paths))
+
+    # Run pyright and ruff in parallel; pytest after (depends on file list)
+    pyright_task = _run("pyright",  ["pyright"] + (full_paths or ["."]), _TIMEOUT)
+    ruff_task    = _run("ruff",     ["ruff", "check", "--output-format=concise"] + (full_paths or ["."]), _TIMEOUT)
+
+    pyright_raw, ruff_raw = await asyncio.gather(pyright_task, ruff_task)
+
+    # pytest --collect-only: discover tests affected by changed modules
+    pytest_raw = await _run(
+        "pytest",
+        ["python", "-m", "pytest", "--collect-only", "-q", "--tb=no"]
+        + (full_paths or ["."]),
+        _TIMEOUT,
+    )
+
+    return {
+        "pyright_output": _trim(pyright_raw, _MAX_OUT),
+        "ruff_output":    _trim(ruff_raw,    _MAX_OUT),
+        "pytest_collect": _trim(pytest_raw,  _MAX_OUT),
+    }
+
+
+async def _run(tool: str, cmd: list[str], timeout_s: int) -> str:
+    """Run a subprocess and return combined stdout+stderr, trimmed."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(_MAIN_ROOT),
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            return stdout.decode("utf-8", errors="replace")
+        except asyncio.TimeoutError:
+            proc.kill()
+            return f"[{tool}: timed out after {timeout_s}s]"
+    except FileNotFoundError:
+        return f"[{tool}: not installed or not on PATH]"
+    except Exception as exc:
+        _LOG.warning("subprocess_checks.%s failed: %s", tool, exc)
+        return f"[{tool}: error — {exc}]"
+
+
+def _trim(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n... [{len(text) - max_chars} chars truncated]"

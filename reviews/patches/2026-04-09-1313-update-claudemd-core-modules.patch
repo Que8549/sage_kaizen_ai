@@ -1,0 +1,11 @@
+# Sage Kaizen Suggested Patch
+# Title: Update CLAUDE.md Core Modules
+# Date: 2026-04-09T13:13:36.960051
+# NOTE: Suggestion only — not applied automatically.
+
+### Core Modules
+  - chat_service/
+  - router/
+  - ...
++ - review_service/
++   - Description: LangGraph-based codebase review service triggered by chat phrases; generates ADRs, patches, and review reports using ARCHITECT brain

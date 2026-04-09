@@ -1,5 +1,5 @@
 F:\Projects\sage_kaizen_ai\llama.cpp\build\bin\Release\llama-server.exe --help
-version: 8639 (a1cfb6453) built with MSVC 19.44.35225.0 for x64
+version: 8683 (d0a6dfeb2) built with MSVC 19.44.35225.0 for x64
 
 ----- common params -----
 
@@ -208,7 +208,7 @@ version: 8639 (a1cfb6453) built with MSVC 19.44.35225.0 for x64
                                          - 3: info
                                          - 4: debug
                                         (default: 3)
-                                        
+
                                         (env: LLAMA_LOG_VERBOSITY)
 --log-prefix                            Enable prefix in log messages
                                         (env: LLAMA_LOG_PREFIX)
@@ -310,6 +310,9 @@ version: 8639 (a1cfb6453) built with MSVC 19.44.35225.0 for x64
                                         use single unified KV buffer shared across all sequences (default:
                                         enabled if number of slots is auto)
                                         (env: LLAMA_ARG_KV_UNIFIED)
+--clear-idle, --no-clear-idle           save and clear idle slots on new task (default: enabled, requires
+                                        unified KV and cache-ram)
+                                        (env: LLAMA_ARG_CLEAR_IDLE)
 --context-shift, --no-context-shift     whether to use context shift on infinite text generation (default:
                                         disabled)
                                         (env: LLAMA_ARG_CONTEXT_SHIFT)
@@ -460,12 +463,12 @@ version: 8639 (a1cfb6453) built with MSVC 19.44.35225.0 for x64
                                         bailing, bailing-think, bailing2, chatglm3, chatglm4, chatml,
                                         command-r, deepseek, deepseek-ocr, deepseek2, deepseek3, exaone-moe,
                                         exaone3, exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite,
-                                        granite-4.0, grok-2, hunyuan-dense, hunyuan-moe, kimi-k2, llama2,
-                                        llama2-sys, llama2-sys-bos, llama2-sys-strip, llama3, llama4, megrez,
-                                        minicpm, mistral-v1, mistral-v3, mistral-v3-tekken, mistral-v7,
-                                        mistral-v7-tekken, monarch, openchat, orion, pangu-embedded, phi3,
-                                        phi4, rwkv-world, seed_oss, smolvlm, solar-open, vicuna, vicuna-orca,
-                                        yandex, zephyr
+                                        granite-4.0, grok-2, hunyuan-dense, hunyuan-moe, hunyuan-ocr, kimi-k2,
+                                        llama2, llama2-sys, llama2-sys-bos, llama2-sys-strip, llama3, llama4,
+                                        megrez, minicpm, mistral-v1, mistral-v3, mistral-v3-tekken,
+                                        mistral-v7, mistral-v7-tekken, monarch, openchat, orion,
+                                        pangu-embedded, phi3, phi4, rwkv-world, seed_oss, smolvlm, solar-open,
+                                        vicuna, vicuna-orca, yandex, zephyr
                                         (env: LLAMA_ARG_CHAT_TEMPLATE)
 --chat-template-file JINJA_TEMPLATE_FILE
                                         set custom jinja chat template file (default: template taken from
@@ -477,12 +480,12 @@ version: 8639 (a1cfb6453) built with MSVC 19.44.35225.0 for x64
                                         bailing, bailing-think, bailing2, chatglm3, chatglm4, chatml,
                                         command-r, deepseek, deepseek-ocr, deepseek2, deepseek3, exaone-moe,
                                         exaone3, exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite,
-                                        granite-4.0, grok-2, hunyuan-dense, hunyuan-moe, kimi-k2, llama2,
-                                        llama2-sys, llama2-sys-bos, llama2-sys-strip, llama3, llama4, megrez,
-                                        minicpm, mistral-v1, mistral-v3, mistral-v3-tekken, mistral-v7,
-                                        mistral-v7-tekken, monarch, openchat, orion, pangu-embedded, phi3,
-                                        phi4, rwkv-world, seed_oss, smolvlm, solar-open, vicuna, vicuna-orca,
-                                        yandex, zephyr
+                                        granite-4.0, grok-2, hunyuan-dense, hunyuan-moe, hunyuan-ocr, kimi-k2,
+                                        llama2, llama2-sys, llama2-sys-bos, llama2-sys-strip, llama3, llama4,
+                                        megrez, minicpm, mistral-v1, mistral-v3, mistral-v3-tekken,
+                                        mistral-v7, mistral-v7-tekken, monarch, openchat, orion,
+                                        pangu-embedded, phi3, phi4, rwkv-world, seed_oss, smolvlm, solar-open,
+                                        vicuna, vicuna-orca, yandex, zephyr
                                         (env: LLAMA_ARG_CHAT_TEMPLATE_FILE)
 --skip-chat-parsing, --no-skip-chat-parsing
                                         force a pure content parser, even if a Jinja template is specified;
@@ -494,7 +497,7 @@ version: 8639 (a1cfb6453) built with MSVC 19.44.35225.0 for x64
                                         assistant message (default: prefill enabled)
                                         when this flag is set, if the last message is an assistant message
                                         then it will be treated as a full message and not prefilled
-                                        
+
                                         (env: LLAMA_ARG_PREFILL_ASSISTANT)
 -sps,  --slot-prompt-similarity SIMILARITY
                                         how much the prompt of a request must match the prompt of a slot in
@@ -531,7 +534,7 @@ version: 8639 (a1cfb6453) built with MSVC 19.44.35225.0 for x64
 --spec-type [none|ngram-cache|ngram-simple|ngram-map-k|ngram-map-k4v|ngram-mod]
                                         type of speculative decoding to use when no draft model is provided
                                         (default: none)
-                                        
+
                                         (env: LLAMA_ARG_SPEC_TYPE)
 --spec-ngram-size-n N                   ngram size N for ngram-simple/ngram-map speculative decoding, length
                                         of lookup n-gram (default: 12)
