@@ -73,6 +73,8 @@ from router import route as _heuristic_route, llm_route as _llm_route
 from router import RouteDecision
 from settings import CONFIG
 from voice_bridge import VoiceBridge
+from review_service import is_review_command, parse_review_command, ReviewRunner
+from streamlit_autorefresh import st_autorefresh
 
 # ── Thread pool for parallel LLM routing on voice input ─────────────────────
 # Shared for the lifetime of the Streamlit process; max_workers=2 because we
@@ -501,6 +503,65 @@ def _render_server_status() -> None:
 # stopping the response mid-stream.  Storing the value in session_state lets
 # the turn execution code snapshot it once at turn start.
 
+def _render_review_status() -> None:
+    """
+    Render the Architect Review status widget above the chat input.
+    Shown whenever a review is running, awaiting approval, done, rejected, or errored.
+    Polls every 2 seconds via st_autorefresh while running.
+    """
+    runner: Optional[ReviewRunner] = st.session_state.get("_review_runner")
+    if runner is None or runner.status == "idle":
+        return
+
+    status = runner.status
+
+    if status == "running":
+        st.info(
+            f"\u23F3 Architect Review in progress\u2026 (thread: `{runner.thread_id}`)\n\n"
+            "Running: scope collection \u2192 static analysis \u2192 web research \u2192 ARCHITECT analysis. "
+            "This takes 2\u20135 minutes."
+        )
+        st_autorefresh(interval=2000, key="review_autorefresh")
+
+    elif status == "awaiting_approval":
+        payload = runner.interrupt_payload or {}
+        synthesis = payload.get("synthesis", "_No synthesis available._")
+
+        st.markdown("---")
+        st.markdown("## \U0001F50D ARCHITECT Review \u2014 Awaiting Your Approval")
+        st.markdown(synthesis)
+        st.markdown("---")
+        st.markdown("**Approve to write findings to `reviews/` and `docs/03-DECISIONS/`. Reject to discard.**")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("\u2705 Approve \u2014 Write Files", key="review_approve", type="primary"):
+                runner.resume(approved=True)
+                st.rerun()
+        with col2:
+            if st.button("\u274C Reject \u2014 Discard", key="review_reject"):
+                runner.resume(approved=False)
+                st.rerun()
+
+    elif status == "done":
+        paths_md = "\n".join(f"- `{p}`" for p in runner.output_paths) or "_No files written._"
+        st.success(f"\u2705 Review complete. Files written:\n\n{paths_md}")
+        if st.button("Dismiss", key="review_dismiss_done"):
+            runner.reset()
+            st.rerun()
+
+    elif status == "rejected":
+        st.info("\U0001F5D1\uFE0F Review discarded. No files were written.")
+        if st.button("Dismiss", key="review_dismiss_rejected"):
+            runner.reset()
+            st.rerun()
+
+    elif status == "error":
+        st.error(f"\u26A0\uFE0F Review error: {runner.error}")
+        if st.button("Dismiss", key="review_dismiss_error"):
+            runner.reset()
+            st.rerun()
+
+
 @st.fragment
 def _tts_toggle() -> None:
     val = st.toggle(
@@ -819,6 +880,13 @@ if st.session_state.pop("_voice_new_chat", False):
     st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────── #
+# Architect Review status widget                                               #
+# Rendered above the chat input so it is always visible during a review run.  #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+_render_review_status()
+
+# ─────────────────────────────────────────────────────────────────────────── #
 # Chat input + turn execution                                                  #
 # ─────────────────────────────────────────────────────────────────────────── #
 
@@ -826,6 +894,61 @@ _pending_voice = st.session_state.pop("_voice_input", None)
 user_text = _pending_voice or st.chat_input("Ask Sage Kaizen\u2026", key="chat_input")
 
 if user_text:
+    # ── Architect Review trigger — intercept BEFORE injection guard ──────
+    # Review phrases are known-safe internal commands; they bypass check_user_input.
+    if is_review_command(user_text):
+        cmd = parse_review_command(user_text)
+
+        if "_review_runner" not in st.session_state:
+            st.session_state["_review_runner"] = ReviewRunner()
+        _runner: ReviewRunner = st.session_state["_review_runner"]
+
+        if _runner.is_busy():
+            st.warning(
+                f"A review is already in progress (status: `{_runner.status}`, "
+                f"thread: `{_runner.thread_id}`). Wait for it to complete."
+            )
+            st.stop()
+
+        # Ensure ARCHITECT is running — auto-start if needed (uses existing logic)
+        with st.status("Checking ARCHITECT brain\u2026", expanded=False) as _rs:
+            _sess = InferenceSession.from_urls(
+                q5_url=q5_url,
+                q6_url=q6_url,
+                embed_url=embed_url,
+                q5_model_id=st.session_state.q5_model_id,
+                q6_model_id=st.session_state.q6_model_id,
+            )
+            _ok6, _msg6 = _sess.ensure_q6_ready()
+            if not _ok6:
+                _rs.update(label="ARCHITECT not ready \u274C", state="error")
+                st.error(f"ARCHITECT brain failed to start: {_msg6}")
+                st.stop()
+            _rs.update(label="\u2705 ARCHITECT ready", state="complete")
+
+        # Show confirmation in chat history
+        _mode_label = {
+            "full": "full repo", "staged": "staged changes",
+            "file": f"file `{cmd.target}`", "regression": "regression audit",
+        }.get(cmd.mode, cmd.mode)
+        st.session_state.messages.append({
+            "role": "user",
+            "content": user_text,
+            "media_labels": [],
+        })
+        _tid = _runner.start(mode=cmd.mode, target=cmd.target)
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": (
+                f"\U0001F50D Architect Review started ({_mode_label} mode).\n\n"
+                f"Thread ID: `{_tid}`\n\n"
+                "Running scope collection \u2192 static analysis \u2192 web research "
+                "\u2192 ARCHITECT analysis \u2192 synthesis.\n\n"
+                "This takes 2\u20135 minutes. The review will appear above when ready."
+            ),
+        })
+        st.rerun()
+
     # Hard-reject structural injection patterns before any processing
     try:
         check_user_input(user_text)

@@ -135,6 +135,16 @@ yacs==0.1.8
 
 
 
+# ── Architect Review Service ─────────────────────────────────────────────────
+# LangGraph state machine + PostgreSQL checkpoints + LangChain OpenAI binding
+# pip install "langgraph>=1.1.6" "langgraph-checkpoint-postgres>=3.0.5" "langchain-openai>=0.3.0" "langchain-core>=0.3.0" "streamlit-autorefresh>=1.0.1"
+# psycopg and psycopg-binary already listed above.
+langgraph>=1.1.6
+langgraph-checkpoint-postgres>=3.0.5
+langchain-openai>=0.3.0
+langchain-core>=0.3.0
+
+
 # ── Wiki multimodal ingest + retrieval (jina-clip-v2 embed service) ──────────
 # Install with: pip install fastapi "uvicorn[standard]" transformers accelerate timm sentencepiece
 # Pin versions after install and update lines below.
