@@ -1,0 +1,8 @@
+# Sage Kaizen Suggested Patch
+# Title: Update 01-ARCHITECTURE.md Module Boundaries
+# Date: 2026-04-09T13:13:36.960051
+# NOTE: Suggestion only — not applied automatically.
+
+| Module | Responsibility |
+  | ... | ... |
++ | review_service/ | Codebase review orchestration, ADR/patch generation, LangGraph state machine |

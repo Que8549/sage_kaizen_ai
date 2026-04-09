@@ -8,8 +8,25 @@ import queue
 import re
 import threading
 import time
+import warnings
 from typing import List, Optional, Tuple
 from uuid import uuid4
+
+# ── Suppress Pydantic v1 / Python 3.14 compatibility noise ───────────────────
+# langchain_core._api.deprecation imports pydantic.v1 which emits a UserWarning
+# on Python 3.14+: "Core Pydantic V1 functionality isn't compatible with
+# Python 3.14 or greater."  The import succeeds and works correctly — this is
+# a noisy upstream warning during LangChain's migration away from pydantic v1.
+# Suppress it here so it never appears in Streamlit's console output.
+warnings.filterwarnings(
+    "ignore",
+    message="Core Pydantic V1 functionality isn't compatible with Python 3.14",
+    category=UserWarning,
+    # No module= filter: the warning is emitted from pydantic.v1.__init__ with
+    # stacklevel=2, so the attributed module is the importing caller (e.g.
+    # langchain_core._api.deprecation) — not predictable. Match by message only.
+)
+# ─────────────────────────────────────────────────────────────────────────────
 
 import streamlit as st
 
@@ -73,8 +90,9 @@ from router import route as _heuristic_route, llm_route as _llm_route
 from router import RouteDecision
 from settings import CONFIG
 from voice_bridge import VoiceBridge
-from review_service import is_review_command, parse_review_command, ReviewRunner
-from streamlit_autorefresh import st_autorefresh
+# review_service and streamlit_autorefresh are imported lazily (inside
+# _render_review_status and the trigger intercept) to avoid adding ~2.6s
+# of langchain_core startup cost to every Streamlit page load.
 
 # ── Thread pool for parallel LLM routing on voice input ─────────────────────
 # Shared for the lifetime of the Streamlit process; max_workers=2 because we
@@ -508,14 +526,18 @@ def _render_review_status() -> None:
     Render the Architect Review status widget above the chat input.
     Shown whenever a review is running, awaiting approval, done, rejected, or errored.
     Polls every 2 seconds via st_autorefresh while running.
+
+    Imports are lazy — langchain_core is only loaded the first time a review
+    is active, never during normal Streamlit startup.
     """
-    runner: Optional[ReviewRunner] = st.session_state.get("_review_runner")
+    runner = st.session_state.get("_review_runner")
     if runner is None or runner.status == "idle":
         return
 
     status = runner.status
 
     if status == "running":
+        from streamlit_autorefresh import st_autorefresh  # lazy — only when needed
         st.info(
             f"\u23F3 Architect Review in progress\u2026 (thread: `{runner.thread_id}`)\n\n"
             "Running: scope collection \u2192 static analysis \u2192 web research \u2192 ARCHITECT analysis. "
@@ -896,12 +918,20 @@ user_text = _pending_voice or st.chat_input("Ask Sage Kaizen\u2026", key="chat_i
 if user_text:
     # ── Architect Review trigger — intercept BEFORE injection guard ──────
     # Review phrases are known-safe internal commands; they bypass check_user_input.
-    if is_review_command(user_text):
-        cmd = parse_review_command(user_text)
+    #
+    # Import strategy (preserves fast time-to-first-render):
+    #   trigger.py  — no langchain deps; safe to import on every user message (~0ms)
+    #   runner.py   — pulls langchain_core (~2.6s); only imported when review fires
+    from review_service.trigger import is_review_command as _is_review_cmd, \
+                                       parse_review_command as _parse_review_cmd
+
+    if _is_review_cmd(user_text):
+        from review_service.runner import ReviewRunner as _ReviewRunner
+        cmd = _parse_review_cmd(user_text)
 
         if "_review_runner" not in st.session_state:
-            st.session_state["_review_runner"] = ReviewRunner()
-        _runner: ReviewRunner = st.session_state["_review_runner"]
+            st.session_state["_review_runner"] = _ReviewRunner()
+        _runner = st.session_state["_review_runner"]
 
         if _runner.is_busy():
             st.warning(

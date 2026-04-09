@@ -82,7 +82,7 @@ ZIM_JOBS: list[ZimJob] = [
             r"C:\Users\Alquin\Desktop\wiki_download"
             r"\wikisource_en_all_maxi_2026-02.zim"
         ),
-        out_dir=Path(r"I:\wikipedia_en_all_maxi_2026-02"),
+        out_dir=Path(r"H:\llm_wiki_data"),
     ),
     # ZimJob(
     #     zim_path=Path(
