@@ -143,6 +143,9 @@ langgraph>=1.1.6
 langgraph-checkpoint-postgres>=3.0.5
 langchain-openai>=0.3.0
 langchain-core>=0.3.0
+# Dead code detection for full-mode code quality review
+# pip install "vulture>=2.11"
+vulture==2.16
 
 
 # ── Wiki multimodal ingest + retrieval (jina-clip-v2 embed service) ──────────

@@ -43,6 +43,12 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
   - `rag_v1/embed/` — BGE-M3 embed client (wraps port 8020)
   - `rag_v1/retrieve/` — retriever + citation formatting
 - **Docs Generator v1**: repo scan → README + Mermaid diagrams (planned)
+- **Review Service**: LangGraph-based codebase review service triggered by chat phrases; generates ADRs, patches, and review reports using ARCHITECT brain
+  - `review_service/graph.py` — sequential StateGraph: scope → subprocess_checks → web_researcher → architect_reviewer → flags_sanity → docs_drift → synthesizer → human_gate → output_writer
+  - `review_service/runner.py` — ReviewRunner; background daemon thread with isolated asyncio event loop
+  - `review_service/checkpointer.py` — AsyncPostgresSaver using pg_settings.py DSN; dedicated `langgraph` schema
+  - `review_service/trigger.py` — `is_review_command()` heuristic; called by router.py
+  - `review_service/output/` — review_writer, adr_writer, patch_writer (write to `reviews/`, `docs/03-DECISIONS/`, `patches/`)
 - Review `config/brains/brains.yaml` for latest AI models and all server settings
 
 ### Service / Port Inventory
@@ -129,6 +135,10 @@ These are **hard constraints**:
 4. Paths must be **fully expanded** before Python uses them
    - No `%ROOT%`, no environment variable expansion assumptions
 
+5. **Review service uses the existing PostgreSQL connection (`pg_settings.py`) for LangGraph checkpoint persistence**
+   - Tables live in the `langgraph` schema (not `public`) — run `scripts/setup_langgraph_schema.sql` once as superuser before first review run
+   - Do not introduce a separate database connection for the review service
+
 ---
 
 ## 6) CURRENT HARDWARE (Authoritative)
@@ -149,6 +159,7 @@ This section is the navigation hub. When uncertain, start with **01-ARCHITECTURE
 - `docs/01-ARCHITECTURE.md` — system overview, data/control flow, module boundaries ✓
 - `docs/02-ARCH-PATTERNS.md` — patterns used (dual brain, tool router, agent transport, RAG) ✓
 - `docs/03-DECISIONS/` — ADRs (architecture decision records) ✓
+- `docs/Architect_Reviewer.md` — Review Service: design, trigger phrases, workflow, output artifacts ✓
 
 ### Runbooks + Operations (planned — not yet created)
 - `docs/10-RUNBOOKS/01-LLAMA-SERVERS.md` — starting/stopping, logs, flags, ports
