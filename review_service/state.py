@@ -29,6 +29,9 @@ class ReviewState(TypedDict):
     pyright_output: str
     ruff_output: str
     pytest_collect: str
+    # full-mode only — set by subprocess_checks, consumed by code_quality_reviewer
+    vulture_output: str       # dead code detected across entire source trees
+    ruff_quality_output: str  # extended ruff rules: C90,B,SIM,UP,PERF,RUF,PIE
 
     # ── Web research output ───────────────────────────────────────────────
     web_research: str              # SearXNG results formatted as context block
@@ -37,6 +40,7 @@ class ReviewState(TypedDict):
     architect_findings: str        # structured: risks, design, naming, GPU, RAG/schema
     flags_findings: str            # brains.yaml flag sanity
     docs_findings: str             # docs/ drift vs code
+    code_quality_findings: str     # ARCHITECT: smells, dead code, optimizations (full only)
 
     # ── Synthesis + human gate ────────────────────────────────────────────
     synthesis: str                 # final merged markdown from synthesizer
@@ -63,10 +67,13 @@ def default_state(mode: str, target: str = "") -> ReviewState:
         pyright_output="",
         ruff_output="",
         pytest_collect="",
+        vulture_output="",
+        ruff_quality_output="",
         web_research="",
         architect_findings="",
         flags_findings="",
         docs_findings="",
+        code_quality_findings="",
         synthesis="",
         approved=False,
         output_paths=[],

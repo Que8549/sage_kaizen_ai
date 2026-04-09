@@ -1,0 +1,10 @@
+# Sage Kaizen Suggested Patch
+# Title: Optimize Thread Count for Ryzen 9950X3D
+# Date: 2026-04-09T15:46:37.064211
+# NOTE: Suggestion only — not applied automatically.
+
+# BEFORE
+  threads: 10
+  
+  # AFTER
+  threads: 12

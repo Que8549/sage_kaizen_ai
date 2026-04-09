@@ -70,6 +70,12 @@ flowchart TD
     J --> L
     K --> L
     L --> M
+
+    C -->|"is_review_command()"| N["Review Service\nreview_service/\nReviewRunner + LangGraph"]
+    N --> O["Human Gate\ninterrupt() — awaits approval"]
+    O -->|"approved"| P["Output Writer\nreviews/ · ADRs · patches/"]
+    O -->|"rejected"| Q["END (no files written)"]
+    P --> M
 ```
 
 ## Module Boundaries
@@ -87,6 +93,7 @@ flowchart TD
 | Config | `settings.py` | Typed frozen dataclass, loaded from `.env` |
 | Logging | `sk_logging.py` | Rotating file logger factory |
 | Agents | `agents/` | ZeroMQ Pi transport *(planned)* |
+| Review | `review_service/` | Codebase review orchestration, ADR/patch generation, LangGraph state machine |
 
 ---
 
@@ -103,6 +110,7 @@ ui_streamlit_server.py
 chat_service.py → decide_route()
   │  Q5 up? → llm_route() asks FAST brain to classify complexity
   │  Q5 down? → heuristic route() (keyword scoring)
+  │  is_review_command()? → ReviewRunner.start() (background thread, isolated event loop)
   │
   ▼
 inference_session.py → ensure_q5_ready() / ensure_q6_ready()
@@ -175,6 +183,7 @@ Config source: config/brains/brains.yaml (no .bat files)
 | Rotating logs | App + server stdout | `logs/` (5 MB × 5 backups) |
 | Streamlit session | Chat history, route, model IDs | In-memory, lost on refresh |
 | `.env` | Secrets + tuning knobs | Project root (not committed) |
+| PostgreSQL (`langgraph` schema) | LangGraph checkpoint blobs for review service | `localhost:5432/sage_kaizen` — same DSN as RAG, separate schema |
 
 Conversation persistence to PostgreSQL is **planned but not yet implemented**.
 

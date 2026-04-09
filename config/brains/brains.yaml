@@ -55,7 +55,7 @@ fast:
     batch_size: 2048          # larger batch improves image-token prefill speed
     ubatch_size: 1024         # 1024 halves GPU kernel dispatch rounds vs 512 during RAG prefill
 
-    threads: 10
+    threads: 12
     threads_batch: 10
     threads_http: 6
 

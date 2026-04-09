@@ -1,0 +1,10 @@
+# Sage Kaizen Suggested Patch
+# Title: Align Model Path with VRAM Budget
+# Date: 2026-04-09T15:46:37.064211
+# NOTE: Suggestion only — not applied automatically.
+
+# BEFORE
+  model: "E:/Qwen2.5-Omni-7B-GGUF/Qwen2.5-Omni-7B-Q6_K.gguf"
+  
+  # AFTER (If Q8_0 is intended)
+  model: "E:/Qwen2.5-Omni-7B-GGUF/Qwen2.5-Omni-7B-Q8_0.gguf"

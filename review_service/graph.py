@@ -4,9 +4,12 @@ review_service/graph.py — LangGraph state machine for the Architect Review Ser
 Graph topology (all edges sequential — ARCHITECT port 8012 has parallel: 1):
 
     scope_collector
-        → subprocess_checks   (pyright / ruff / pytest-collect — no LLM)
-        → web_researcher      (SearXNG: performance, library updates)
-        → architect_reviewer  (ARCHITECT: risks, design, naming, GPU, RAG/schema)
+        → subprocess_checks      (pyright / ruff / pytest-collect — no LLM;
+                                   full mode: vulture + extended ruff on both project roots)
+        → code_quality_reviewer  (ARCHITECT: dead code, smells, optimizations,
+                                   best practices, performance antipatterns — full mode only)
+        → web_researcher         (SearXNG: performance, library updates)
+        → architect_reviewer     (ARCHITECT: risks, design, naming, GPU, RAG/schema)
         → flags_sanity        (ARCHITECT: brains.yaml flag correctness)
         → docs_drift          (ARCHITECT: docs/ vs code divergence)
         → synthesizer         (ARCHITECT: merge all findings → final markdown)
@@ -30,6 +33,7 @@ from .nodes.scope_collector import scope_collector_node
 from .nodes.subprocess_checks import subprocess_checks_node
 from .nodes.web_researcher import web_researcher_node
 from .nodes.architect_reviewer import make_architect_reviewer_node
+from .nodes.code_quality_reviewer import make_code_quality_reviewer_node
 from .nodes.flags_sanity import make_flags_sanity_node
 from .nodes.docs_drift import make_docs_drift_node
 from .nodes.synthesizer import make_synthesizer_node
@@ -74,6 +78,7 @@ def build_review_graph(checkpointer) -> "CompiledStateGraph":  # type: ignore[na
     builder.add_node("scope_collector",   scope_collector_node)
     builder.add_node("subprocess_checks", subprocess_checks_node)
     builder.add_node("web_researcher",    web_researcher_node)
+    builder.add_node("code_quality_reviewer", make_code_quality_reviewer_node(architect))
     builder.add_node("architect_reviewer", make_architect_reviewer_node(architect))
     builder.add_node("flags_sanity",      make_flags_sanity_node(architect))
     builder.add_node("docs_drift",        make_docs_drift_node(architect))
@@ -84,7 +89,8 @@ def build_review_graph(checkpointer) -> "CompiledStateGraph":  # type: ignore[na
     # ── Edges — sequential pipeline ───────────────────────────────────────
     builder.set_entry_point("scope_collector")
     builder.add_edge("scope_collector",    "subprocess_checks")
-    builder.add_edge("subprocess_checks",  "web_researcher")
+    builder.add_edge("subprocess_checks",     "code_quality_reviewer")
+    builder.add_edge("code_quality_reviewer", "web_researcher")
     builder.add_edge("web_researcher",     "architect_reviewer")
     builder.add_edge("architect_reviewer", "flags_sanity")
     builder.add_edge("flags_sanity",       "docs_drift")

@@ -1,8 +1,8 @@
 # Architect Reviewer — Service Guide
 
-**Version**: 1.0  
+**Version**: 1.1  
 **Owner**: Sage Kaizen  
-**Updated**: 2026-04-08  
+**Updated**: 2026-04-09  
 **Module**: `review_service/`
 
 ---
@@ -48,12 +48,15 @@ The Architect Reviewer has access to all three Sage Kaizen projects:
 
 ```
 scope_collector
-    └─ subprocess_checks   (pyright, ruff, pytest-collect — no LLM)
-        └─ web_researcher  (SearXNG: performance, library updates, known issues)
-            └─ architect_reviewer   (ARCHITECT: risks, design, naming, GPU, RAG)
-                └─ flags_sanity     (ARCHITECT: brains.yaml flag correctness)
-                    └─ docs_drift   (ARCHITECT: docs/ vs code divergence)
-                        └─ synthesizer  (ARCHITECT: merge → final markdown)
+    └─ subprocess_checks        (pyright, ruff, pytest-collect — no LLM;
+    │                            full mode: vulture + extended ruff on both project roots)
+    └─ code_quality_reviewer    (ARCHITECT: dead code, smells, optimizations,
+    │                            best practices, performance antipatterns — full mode only)
+        └─ web_researcher       (SearXNG: performance, library updates, known issues)
+            └─ architect_reviewer      (ARCHITECT: risks, design, naming, GPU, RAG)
+                └─ flags_sanity        (ARCHITECT: brains.yaml flag correctness)
+                    └─ docs_drift      (ARCHITECT: docs/ vs code divergence)
+                        └─ synthesizer (ARCHITECT: merge → final markdown)
                             └─ human_gate   (interrupt — awaits approval)
                                 └─ output_writer  (reviews/, adr/, patches/)
 ```
@@ -96,6 +99,35 @@ Read file content up to a **70,000 char budget** for diff material:
 **Phase 4 — Overflow Chunk** (if changed files > budget):
 - Store remaining files as `overflow_files` list in state
 - Synthesizer notes overflow in the report: "N files not reviewed due to context budget"
+
+---
+
+## 5b. Code Quality Review (Full Mode Only)
+
+In `full` mode, `subprocess_checks` runs two additional static analysis tools across **both project roots** (`sage_kaizen_ai` and `sage_kaizen_ai_voice`), excluding external vendored directories (`llama.cpp`, `flash-attention`, `__pycache__`, `.venv`):
+
+### Tools
+
+| Tool | Command | Purpose |
+|---|---|---|
+| `vulture` | `vulture <roots> --min-confidence 80 --exclude <ext_dirs>` | Detect unused functions, classes, methods, variables |
+| `ruff` (extended) | `ruff check --select=C90,B,SIM,UP,PERF,RUF,PIE --output-format=concise` | Code smells, bugbear, simplification, pyupgrade, performance antipatterns |
+
+Output is capped at 4,000 chars each and stored as `vulture_output` and `ruff_quality_output` in `ReviewState`.
+
+### Code Quality Reviewer Node
+
+A dedicated ARCHITECT LLM pass (`code_quality_reviewer`) consumes both outputs and produces `code_quality_findings` covering these sections:
+
+| Section | What it checks |
+|---|---|
+| `dead_code` | Confirmed unused symbols from vulture; false positives filtered (LangGraph callbacks, TypedDict fields, pytest fixtures, Streamlit callbacks) |
+| `code_smells` | Cyclomatic complexity > 10, functions > 50 lines, magic numbers, God classes, deep nesting, long parameter lists |
+| `optimization_opportunities` | Missing `asyncio.gather`, import-time ML cost, redundant computation, `lru_cache` candidates |
+| `best_practice_violations` | Missing type annotations on public APIs, bare `except:`, mutable defaults, deprecated patterns (UP rules) |
+| `performance_antipatterns` | Blocking I/O in async, missing connection reuse, unguarded tensor ops, Streamlit render-loop cost |
+
+The node **skips immediately** (returns empty findings) for non-full modes (`staged`, `file`, `regression`).
 
 ---
 

@@ -1,8 +1,8 @@
 """
 review_service/nodes/synthesizer.py — Final synthesis node.
 
-Merges all findings from architect_reviewer, flags_sanity, docs_drift,
-and subprocess checks into a single coherent markdown report.
+Merges all findings from code_quality_reviewer, architect_reviewer, flags_sanity,
+docs_drift, and subprocess checks into a single coherent markdown report.
 
 This is the final ARCHITECT call before the human gate.
 The output (state["synthesis"]) is displayed to the user verbatim.
@@ -39,6 +39,17 @@ Each finding:
 
 ## Medium Findings
 Same format as above.
+
+## Code Quality Findings
+Findings from the code quality pass (dead code, smells, optimizations, best practices,
+performance antipatterns). Only present for full-mode reviews.
+Group under sub-headings:
+  - Dead Code (confirmed removals only; skip likely false positives)
+  - Code Smells
+  - Optimization Opportunities
+  - Best Practice Violations
+  - Performance Antipatterns
+Tag each item [CRITICAL] / [HIGH] / [MEDIUM] / [LOW].
 
 ## Low / Style Findings
 Brief bullets only.
@@ -89,7 +100,6 @@ def make_synthesizer_node(llm: ChatOpenAI):
 
     return synthesizer_node
 
-
 def _build_context(state: ReviewState) -> str:
     parts: list[str] = []
 
@@ -101,6 +111,9 @@ def _build_context(state: ReviewState) -> str:
 
     if state.get("docs_findings"):
         parts.append(f"<docs_findings>\n{state['docs_findings']}\n</docs_findings>")
+
+    if state.get("code_quality_findings"):
+        parts.append(f"<code_quality_findings>\n{state['code_quality_findings']}\n</code_quality_findings>")
 
     static_parts: list[str] = []
     if state.get("pyright_output") and "error" in state["pyright_output"].lower():
@@ -128,5 +141,6 @@ def _raw_dump(state: ReviewState) -> str:
     return (
         f"architect_findings:\n{state.get('architect_findings', '[empty]')}\n\n"
         f"flags_findings:\n{state.get('flags_findings', '[empty]')}\n\n"
-        f"docs_findings:\n{state.get('docs_findings', '[empty]')}\n"
+        f"docs_findings:\n{state.get('docs_findings', '[empty]')}\n\n"
+        f"code_quality_findings:\n{state.get('code_quality_findings', '[empty]')}\n"
     )
