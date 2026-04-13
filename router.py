@@ -59,14 +59,30 @@ _SEARCH_TEMPORAL_HINTS: Tuple[str, ...] = (
     "today's news", "latest news", "breaking news",
     "current events", "right now", "this week's", "this month's",
     "just announced", "recently announced", "just released", "newly released",
-    "trending now", "live score", "live results", "stock price", "current price", 
-    # Weather — always live data; no static knowledge can answer these
+    "trending now", "live score", "live results", "stock price", "current price",
+    # Weather — present tense; no static model can answer these
     "current weather", "weather right now", "weather outside",
     "current temperature", "temperature right now", "temperature outside",
     "is it raining", "is it snowing", "is it hot", "is it cold",
     "what is the weather", "what's the weather", "how's the weather",
     "weather in", "weather for", "weather near", "weather at",
     "temperature in", "temperature for",
+    # Weather — future/forecast; no static model can answer these either
+    "tomorrow's weather", "weather tomorrow",
+    "will it rain", "will it snow", "will it be cold", "will it be hot", "will it be warm",
+    "is it going to rain", "is it going to snow",
+    "weekend weather", "this weekend's weather", "next week's weather",
+    "what will the weather be",
+    "chance of rain", "chance of snow",
+    "hourly forecast", "7-day forecast", "10-day forecast",
+    # Sports results — outcome is always live data
+    "final score", "game results", "match results", "who won",
+    "today's game", "tonight's game", "yesterday's game",
+    # Finance — live market/energy data
+    "bitcoin price", "crypto price", "gas price", "oil price",
+    "exchange rate", "market today", "stock market today",
+    # News — recent past and ongoing updates
+    "what happened yesterday", "latest on",
 )
 
 # Explicit search-intent phrases — user is clearly asking for a web search.
@@ -77,19 +93,26 @@ _SEARCH_INTENT_HINTS: Tuple[str, ...] = (
     "any news on", "any updates on", "what's happening with", "top stories",
     "today's weather", "weather forecast", "what happened today",
     "weather today", "forecast today", "forecast for", "current",
+    # Version/release queries — always live data
+    "latest version of", "current version of", "newest version of",
 )
 
 # Keyword → category mapping for category inference.
 # Only maps when the keyword is specific enough to imply a category.
 _CATEGORY_KEYWORDS: dict[str, Tuple[str, ...]] = {
     "news":       ("news", "headlines", "breaking", "politics", "election",
-                   "current events", "latest events"),
+                   "current events", "latest events",
+                   "final score", "game results", "match results", "who won",
+                   "today's game", "tonight's game"),
     "science":    ("arxiv", "research paper", "scientific study", "journal article",
                    "nasa discovery", "new study", "new research"),
     "technology": ("tech news", "software release", "github release", "hardware release",
-                   "ai news", "product launch", "new update", "new version released"),
+                   "ai news", "product launch", "new update", "new version released",
+                   "latest version of", "current version of"),
     "general":    ("weather", "temperature", "forecast", "rain", "snow",
-                   "humidity", "wind speed", "uv index"),
+                   "humidity", "wind speed", "uv index",
+                   "bitcoin", "crypto", "gas price", "oil price", "exchange rate",
+                   "stock market"),
 }
 
 _DEFAULT_SEARCH_CATEGORIES: Tuple[str, ...] = ("general", "news")

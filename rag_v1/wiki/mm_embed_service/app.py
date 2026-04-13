@@ -5,7 +5,9 @@ FastAPI service that loads jina-clip-v2 once at startup from a local directory
 and exposes text and image embedding endpoints in a shared 1024-dim vector space.
 
 Configuration is read from config/brains/brains.yaml (wiki_embed: section).
-No environment variables are required.
+The project-root .env file is loaded at startup so that HF_TOKEN is available
+to huggingface_hub before transformers is imported (suppresses unauthenticated
+request warning even when local_files_only=True).
 
 Run standalone:
     python -m rag_v1.wiki.mm_embed_service.app
@@ -27,7 +29,21 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
+
+# ── Load .env BEFORE any HuggingFace/transformers import ────────────────────
+# huggingface_hub checks for HF_TOKEN at module-initialisation time and emits
+# "unauthenticated requests" warning if the token is absent — even when
+# local_files_only=True and no network calls are made.  Loading .env here (the
+# only place guaranteed to run before `from transformers import …`) silences it.
+# override=False: existing env vars (e.g. set by the parent process) take
+# precedence so the service can still be launched with a different token.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[3] / ".env", override=False)
+except Exception:
+    pass  # python-dotenv not installed or .env missing — not a hard failure
 
 # ── Verbosity gate ──────────────────────────────────────────────────────────
 # Must be evaluated before any import that triggers tqdm or warnings.

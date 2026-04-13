@@ -2,7 +2,6 @@ accelerate==1.12.0
 altair==6.0.0
 annotated-doc==0.0.4
 annotated-types==0.7.0
-anthropic==0.94.1
 anyio==4.12.1
 attrs==25.4.0
 audioop-lts==0.2.2
@@ -20,11 +19,7 @@ colorama==0.4.6
 ctranslate2==4.7.1
 decorator==5.2.1
 diskcache==5.6.3
-distro==1.9.0
-docstring_parser==0.17.0
-dydantic==0.0.8
 einops==0.8.2
-et_xmlfile==2.0.0
 fastapi==0.135.1
 filelock==3.20.3
 fsspec==2026.2.0
@@ -42,29 +37,12 @@ huggingface_hub==1.4.0
 idna==3.11
 iopath==0.1.10
 Jinja2==3.1.6
-jiter==0.13.0
 joblib==1.5.3
-jsonpatch==1.33
-jsonpointer==3.1.1
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
-langchain==1.2.15
-langchain-anthropic==1.4.0
-langchain-core==1.2.28
-langchain-openai==1.1.12
-langgraph==1.1.6
-langgraph-checkpoint==4.0.1
-langgraph-checkpoint-postgres==3.0.5
-langgraph-prebuilt==1.0.9
-langgraph-sdk==0.3.13
-# Phase 1 LangMem bridge 
-langmem==0.0.30
-langsmith==0.7.28
 lazy-loader==0.5
 librosa==0.11.0
 libzim==3.8.0
-# Editable install with no version control (llama_cpp_python==0.3.16)
--e f:\projects\sage_kaizen_ai\llama-cpp-python
 llvmlite==0.47.0
 lxml==6.0.2
 lyricsgenius==3.11.0
@@ -79,11 +57,8 @@ ninja==1.13.0
 numba==0.65.0
 numpy==2.4.2
 nvidia-ml-py==13.590.48
-openai==2.31.0
 opencv-python-headless==4.13.0.92
 openpyxl==3.1.5
-orjson==3.11.8
-ormsgpack==1.12.2
 packaging==26.0
 pandas==2.3.3
 parameterized==0.9.0
@@ -97,7 +72,6 @@ protobuf==6.33.5
 psutil==7.2.2
 psycopg==3.3.2
 psycopg-binary==3.3.2
-psycopg-pool==3.3.0
 pyarrow==23.0.0
 pycparser==3.0
 pydantic==2.12.5
@@ -115,7 +89,6 @@ pyzmq==27.1.0
 referencing==0.37.0
 regex==2026.2.28
 requests==2.32.5
-requests-toolbelt==1.0.0
 rpds-py==0.30.0
 safetensors==0.7.0
 scikit-learn==1.8.0
@@ -125,7 +98,6 @@ setuptools==82.0.1
 shellingham==1.5.4
 six==1.17.0
 smmap==5.0.2
-sniffio==1.3.1
 soundfile==0.13.1
 soupsieve==2.8.3
 soxr==1.0.0
@@ -140,7 +112,6 @@ tabulate==0.10.0
 tenacity==9.1.3
 termcolor==3.3.0
 threadpoolctl==3.6.0
-tiktoken==0.12.0
 timm==1.0.25
 tokenizers==0.22.2
 toml==0.10.2
@@ -150,25 +121,38 @@ torchvision==0.25.0+cu130
 tornado==6.5.4
 tqdm==4.67.3
 transformers==5.2.0
-trustcall==0.0.39
 typer-slim==0.21.1
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 tzdata==2025.3
 urllib3==2.6.3
-uuid_utils==0.14.1
 uvicorn==0.41.0
-vulture==2.16
 watchdog==6.0.0
 watchfiles==1.1.1
 websockets==16.0
 wheel==0.46.3
-xxhash==3.6.0
 yacs==0.1.8
-zstandard==0.25.0
 
 
 
+# ── Architect Review Service ─────────────────────────────────────────────────
+# LangGraph state machine + PostgreSQL checkpoints + LangChain OpenAI binding
+# pip install "langgraph>=1.1.6" "langgraph-checkpoint-postgres>=3.0.5" "langchain-openai>=0.3.0" "langchain-core>=0.3.0" "streamlit-autorefresh>=1.0.1"
+# psycopg and psycopg-binary already listed above.
+langgraph>=1.1.6
+langgraph-checkpoint-postgres>=3.0.5
+langchain-openai>=0.3.0
+langchain-core>=0.3.0
+# Dead code detection for full-mode code quality review
+# pip install "vulture>=2.11"
+vulture==2.16
+
+
+# ── Memory Service ───────────────────────────────────────────────────────────
+# psycopg and psycopg-binary already listed above (psycopg==3.3.2).
+# psycopg-pool is required for the hot-path ConnectionPool in repository.py.
+# Install: pip install "psycopg-pool>=3.2"
+psycopg-pool>=3.2
 #
 # Phase 1 LangMem bridge (optional — install to evaluate before full custom service):
 # pip install "langmem>=0.0.30"
@@ -203,4 +187,3 @@ zstandard==0.25.0
 #         Requires: soundfile (already listed above)
 #         Service:  python -m rag_v1.media.clap_embed_service.app
 # Video embedding deferred (no cross-modal video model in current stack).
-

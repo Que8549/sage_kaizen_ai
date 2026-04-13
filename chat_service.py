@@ -25,12 +25,16 @@ Multimodal support:
 from __future__ import annotations
 
 import base64
+import threading
 from dataclasses import dataclass, field
-from typing import Iterator, List, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import router as _router
 from document_parser import DocumentAttachment, format_document_context
 from inference_session import InferenceSession
+from memory.bundle_builder import format_bundle_prompt
+from memory.models import EpisodeWriteRequest, MemoryContextRequest
+from memory.writer import write_episode
 from openai_client import HttpTimeouts, LlamaServerError, stream_chat_completions
 from prompt_library import (
     TemplateKey,
@@ -43,6 +47,38 @@ from router import RouteDecision, route as heuristic_route, heuristic_is_ambiguo
 from sk_logging import get_logger
 
 _LOG = get_logger("sage_kaizen.chat_service")
+
+# ---------------------------------------------------------------------------
+# Memory service — lazy singleton with graceful degradation.
+# If the memory schema has not been applied yet (scripts/memory_schema.sql),
+# MemoryService() will fail on first use.  The singleton catches that and
+# disables memory for the session rather than crashing the app.
+# ---------------------------------------------------------------------------
+_MEMORY_SVC: Optional["MemoryService"] = None  # type: ignore[name-defined]
+_MEMORY_DISABLED = False   # set True after a failed init so we don't retry every turn
+_MEMORY_LOCK = threading.Lock()
+
+
+def _get_memory() -> Optional[object]:
+    global _MEMORY_SVC, _MEMORY_DISABLED
+    if _MEMORY_DISABLED:
+        return None
+    if _MEMORY_SVC is not None:
+        return _MEMORY_SVC
+    with _MEMORY_LOCK:
+        # Double-checked locking: another thread may have initialised while we waited.
+        if _MEMORY_SVC is None and not _MEMORY_DISABLED:
+            try:
+                from memory.service import MemoryService
+                _MEMORY_SVC = MemoryService()
+                _LOG.info("memory | MemoryService initialised")
+            except Exception as exc:
+                _MEMORY_DISABLED = True
+                _LOG.warning(
+                    "memory | MemoryService unavailable — memory disabled for this session. "
+                    "Apply scripts/memory_schema.sql to enable. Error: %s", exc,
+                )
+    return _MEMORY_SVC
 
 # Thinking-token cap applied automatically to creative writing turns when the
 # user has not set an explicit budget (thinking_budget == -1).  Creative tasks
@@ -309,6 +345,8 @@ class ChatService:
         wiki_enabled: bool = True,
         media_attachments: Tuple[MediaAttachment, ...] = (),
         document_attachments: Tuple[DocumentAttachment, ...] = (),
+        session_id: Optional[str] = None,
+        user_id: str = "alquin",
     ) -> Tuple[List[dict], list, list, object, str]:
         """
         Build the full OpenAI-style messages list for this turn.
@@ -333,6 +371,35 @@ class ChatService:
             core_prompt=core,
             templates=templates,
         )
+
+        # Memory injection — retrieve bundle and prepend to system message.
+        # Token caps: FAST=600, ARCHITECT=1500 (enforced inside bundle_builder).
+        # Gracefully skipped if MemoryService is unavailable (schema not applied).
+        memory_svc = _get_memory()
+        if memory_svc is not None and user_text:
+            try:
+                mem_req = MemoryContextRequest(
+                    user_id=user_id,
+                    project_id="sage_kaizen",
+                    session_id=session_id,
+                    query_text=user_text,
+                    route_target=decision.brain.lower(),
+                )
+                bundle = memory_svc.get_memory_bundle(mem_req)
+                memory_segment = format_bundle_prompt(bundle)
+                if memory_segment:
+                    system_content = memory_segment + "\n\n" + system_content if system_content else memory_segment
+                    _LOG.debug(
+                        "prepare_messages | memory injected: %d items ~%d tokens",
+                        bundle.total_items, bundle.estimated_tokens,
+                    )
+            except Exception as exc:
+                _LOG.warning("prepare_messages | memory retrieval failed (non-fatal): %s", exc)
+                err_str = str(exc).lower()
+                if "permission denied" in err_str or "does not exist" in err_str:
+                    global _MEMORY_DISABLED
+                    _MEMORY_DISABLED = True
+                    _LOG.warning("prepare_messages | memory disabled (schema not accessible); will not retry")
 
         messages: List[dict] = []
         if system_content:
@@ -377,6 +444,57 @@ class ChatService:
             summarizer_model_id=self._session.summarizer_model_id or None,
         )
         return messages, rag_sources, wiki_images, search_evidence, music_context
+
+    # ------------------------------------------------------------------ #
+    # Post-turn memory write                                               #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def write_episode_background(
+        user_text: str,
+        assistant_text: str,
+        decision: RouteDecision,
+        session_id: Optional[str] = None,
+        user_id: str = "alquin",
+    ) -> None:
+        """
+        Fire-and-forget post-turn episodic memory write.
+
+        Runs in a daemon thread so it never blocks the UI.
+        Applies the selective write policy (memory/policy.py) — short acks
+        and greetings are dropped automatically.
+
+        Call this after collecting all streamed chunks:
+
+            for chunk in service.stream_response(...):
+                accumulated += chunk
+            ChatService.write_episode_background(user_text, accumulated, decision,
+                                                 session_id=session_id, user_id=user_id)
+        """
+        memory_svc = _get_memory()
+        if memory_svc is None:
+            return
+
+        def _bg() -> None:
+            try:
+                req = EpisodeWriteRequest(
+                    user_id=user_id,
+                    project_id="sage_kaizen",
+                    session_id=session_id,
+                    scope="project",
+                    event_type="general",
+                    summary_text=user_text,        # full text — policy enforces selective write
+                    raw_excerpt=assistant_text,    # full assistant response
+                    importance=0.5,
+                    confidence=0.6,
+                )
+                result = write_episode(req)
+                if result:
+                    _LOG.debug("memory | episode written id=%s brain=%s", result, decision.brain)
+            except Exception as exc:
+                _LOG.warning("memory | post-turn episode write failed (non-fatal): %s", exc)
+
+        threading.Thread(target=_bg, name="memory-episode-write", daemon=True).start()
 
     # ------------------------------------------------------------------ #
     # Streaming                                                            #
