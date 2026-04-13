@@ -8,73 +8,223 @@ You are implementing a production-ready local **Memory Service** for the Sage Ka
 
 Read and follow `/docs/04-Memory_Service.md` exactly.
 
-Your task is to implement the memory system in the existing Sage Kaizen codebase using the project’s current architecture and invariants.
+Your task is to implement the memory system in the existing Sage Kaizen codebase using the project's current architecture and invariants.
 
 ## Non-negotiable project requirements
 
 1. Target **Python 3.14.3**
 2. Keep everything **fully local**
-3. Use **PostgreSQL + pgvector**
+3. Use **PostgreSQL + pgvector >= 0.8.2** (CVE-2026-3172 security fix)
 4. Do **not** introduce beta or deprecated dependencies
-5. Preserve Sage Kaizen modularity
-6. Preserve the current dual-brain design
-7. Do not break current router, RAG, or server orchestration behavior
-8. Use Windows-safe commands and paths
-9. Prefer typed, maintainable, production-grade code
-10. Add tests and logging with the first implementation pass
+5. Do **not** add asyncpg — use **psycopg3** (`psycopg[binary]`) which is already installed
+6. Preserve Sage Kaizen modularity
+7. Preserve the current dual-brain design
+8. Do not break current router, RAG, or server orchestration behavior
+9. Use Windows-safe commands and paths
+10. Prefer typed, maintainable, production-grade code
+11. Add tests and logging with the first implementation pass
 
 ## Existing project context you must respect
 
 - Sage Kaizen uses a dual-brain architecture:
-  - Fast Brain for low-latency tasks
-  - Architect Brain for deep reasoning and consolidation
+  - Fast Brain (port 8011) for low-latency tasks
+  - Architect Brain (port 8012) for deep reasoning and consolidation
 - PostgreSQL + pgvector is already part of the project stack
 - Existing RAG flow must continue working
-- The new Memory Service must be a separate reusable module, not tangled into model-serving code
+- The new Memory Service is at `memory/` at the project root (NOT `sage/memory/`)
+- SQL schema files go in `scripts/` (NOT `sql/`) — follow the `scripts/setup_langgraph_schema.sql` pattern
 - Existing project conventions prefer modular replacement-friendly components
 - The router should retrieve memory before final prompt assembly
+- The memory embedder MUST reuse `rag_v1/embed/embed_client.py` (BGE-M3 port 8020, 1024-dim)
+  Do NOT introduce a second embedding client or model
+- pgvector 0.8.x: enable `hnsw.iterative_scan = relaxed_order` in all filtered vector queries
+  to prevent silent under-retrieval when user_id filters are selective
+- Use psycopg3 ConnectionPool for the sync hot path — not asyncpg, not raw connections
 
-## Deliverables you must create
+## Per-brain token budget (CRITICAL)
 
-Create or update the following:
+Memory bundles MUST be sized for the receiving brain:
 
-1. `docs/04-Memory_Service.md`
-   - If `04-Memory_Service.md` already exists at repo root, also copy or move it into `docs/` only if that fits the repo structure cleanly.
-   - Do not silently delete the original.
+| Brain | Max bundle tokens |
+|-------|-------------------|
+| FAST (Qwen2.5-Omni-7B, 16K ctx) | 600 tokens |
+| ARCHITECT (Qwen3.5-27B, 64K ctx) | 1,500 tokens |
 
-2. SQL schema / migration file:
-   - `sql/memory_schema.sql`
+The bundle_builder.py must enforce these caps. Drop lowest-scored episodes first.
 
-3. Python package:
-   - `sage/memory/__init__.py`
-   - `sage/memory/models.py`
-   - `sage/memory/schemas.py`
-   - `sage/memory/repository.py`
-   - `sage/memory/embedder.py`
-   - `sage/memory/retriever.py`
-   - `sage/memory/ranker.py`
-   - `sage/memory/bundle_builder.py`
-   - `sage/memory/writer.py`
-   - `sage/memory/consolidator.py`
-   - `sage/memory/policy.py`
-   - `sage/memory/audit.py`
-   - `sage/memory/service.py`
+## Selective episode write policy
 
-4. Integration updates
-   - patch the router so memory retrieval happens after route selection and before final prompt assembly
-   - patch post-turn flow so episodic memory is written after each completed turn
-   - add a maintenance entry point for reflection / promotion / pruning
+Do NOT write an episode for every turn. Write only when:
+- user corrected or rejected a recommendation (`was_user_correction=True`)
+- user stated an explicit preference (`was_explicit_preference=True`)
+- event_type is in the ALWAYS_WRITE_EVENTS set (see policy.py)
+- turn length > 200 tokens AND estimated importance > 0.4
 
-5. Tests
-   - `tests/test_memory_repository.py`
-   - `tests/test_memory_retriever.py`
-   - `tests/test_memory_bundle_builder.py`
-   - `tests/test_memory_policy.py`
-   - add integration tests if the repo already has a compatible test structure
+See `memory/policy.py:should_write_episode()`.
 
-6. Optional but preferred
-   - a small Streamlit panel or debug view to inspect the active memory bundle for the current turn
-   - a manual forget / pin / lock mechanism if there is already a suitable UI pattern
+## Files already implemented (do not recreate)
+
+The following files were created by a prior implementation pass:
+
+- `scripts/memory_schema.sql` — full DDL, all tables in `memory` schema
+- `memory/__init__.py`
+- `memory/models.py` — Pydantic DTOs
+- `memory/schemas.py` — DB row dataclasses
+- `memory/embedder.py` — wraps rag_v1/embed/embed_client.py
+- `memory/repository.py` — psycopg3 CRUD with iterative scan
+- `memory/ranker.py` — RRF fusion + multi-signal scoring
+- `memory/retriever.py` — hybrid FTS + HNSW retrieval
+- `memory/bundle_builder.py` — token-budgeted bundle assembly + prompt format
+- `memory/writer.py` — write paths A–D
+- `memory/policy.py` — promotion thresholds, selective write policy, decay
+- `memory/audit.py` — audit log writes
+- `memory/consolidator.py` — Architect-brain reflection + rule promotion
+- `memory/service.py` — MemoryService facade
+- `memory/langmem_bridge.py` — Phase 1 LangMem + LangGraph shortcut
+
+## Remaining deliverables
+
+### 1. Apply SQL schema
+
+```bash
+psql -U <user> -d <db> -f scripts/memory_schema.sql
+```
+
+Verify with:
+```sql
+\dn memory
+\dt memory.*
+SELECT extname, extversion FROM pg_extension WHERE extname IN ('vector','pg_trgm');
+```
+
+pgvector should show >= 0.8.2.
+
+### 2. Router integration
+
+Patch `router.py` to retrieve memory between route selection and final prompt assembly.
+
+Add the MemoryService singleton:
+```python
+from memory.service import MemoryService
+from memory.models import MemoryContextRequest
+from memory.bundle_builder import format_bundle_prompt
+
+_MEMORY: Optional[MemoryService] = None
+
+def _get_memory() -> MemoryService:
+    global _MEMORY
+    if _MEMORY is None:
+        _MEMORY = MemoryService()
+    return _MEMORY
+```
+
+### 3. Chat service integration
+
+In `chat_service.py`, after route is decided and before prompt assembly:
+
+```python
+from memory.models import MemoryContextRequest
+from memory.bundle_builder import format_bundle_prompt
+
+# In prepare_messages() or equivalent:
+mem_req = MemoryContextRequest(
+    user_id="alquin",
+    project_id="sage_kaizen",
+    session_id=session_id,
+    query_text=user_text,
+    intent_label=intent_label,
+    route_target=decision.brain.lower(),
+)
+bundle = _get_memory().get_memory_bundle(mem_req)
+memory_segment = format_bundle_prompt(bundle)
+
+# Prepend memory_segment to the system prompt (or inject as a user message)
+# ONLY if non-empty — don't add empty blocks
+```
+
+### 4. Post-turn episode write
+
+After the model response is complete, write an episode asynchronously:
+
+```python
+from memory.models import EpisodeWriteRequest
+from memory.writer import write_episode
+import threading
+
+def _write_episode_bg(user_text: str, assistant_text: str, session_id: str) -> None:
+    req = EpisodeWriteRequest(
+        user_id="alquin",
+        session_id=session_id,
+        event_type="general",   # classifier can set this; start with "general"
+        summary_text=user_text[:300],
+        raw_excerpt=assistant_text[:200],
+        importance=0.5,
+    )
+    write_episode(req)
+
+# Fire-and-forget from the turn handler:
+threading.Thread(target=_write_episode_bg, args=(user_text, assistant_text, session_id), daemon=True).start()
+```
+
+### 5. Phase 1 LangMem bridge (optional evaluation path)
+
+To evaluate LangMem as a Phase 1 shortcut alongside the custom service:
+
+```python
+from memory.langmem_bridge import get_langmem_bridge
+
+bridge = get_langmem_bridge()
+bridge.start()   # once at app startup
+
+# Per-turn (non-blocking, background extraction):
+bridge.submit_turn(messages=conversation_messages, user_id="alquin")
+
+# Before prompt assembly (synchronous retrieval):
+segment = bridge.get_memory_prompt(query=user_text, user_id="alquin")
+```
+
+First install langmem:
+```bash
+pip install "langmem>=0.0.30"
+```
+
+### 6. Maintenance runner
+
+Add a CLI entry point for reflection and pruning:
+
+```bash
+python -m memory.consolidator  # or a dedicated scripts/run_memory_reflection.py
+```
+
+The consolidator.run_reflection() can be called:
+- End of session (mode="lightweight", lookback_hours=2)
+- Nightly batch (mode="deep", lookback_hours=24)
+
+### 7. Tests
+
+Create:
+- `tests/test_memory_repository.py` — profile upsert, episode insert, rule insert
+- `tests/test_memory_retriever.py` — lexical retrieval, vector retrieval, RRF fusion
+- `tests/test_memory_bundle_builder.py` — token cap enforcement per brain
+- `tests/test_memory_policy.py` — selective write policy, promotion thresholds, decay
+
+Test pattern (use repo's existing psycopg3 + pytest style):
+
+```python
+import pytest
+from memory.policy import should_write_episode
+
+def test_should_not_write_greeting():
+    assert should_write_episode("greeting", "hi", "", False, False, 0.1) is False
+
+def test_should_write_correction():
+    assert should_write_episode("general", "...", "...", True, False, 0.5) is True
+
+def test_bundle_respects_fast_brain_cap():
+    from memory.bundle_builder import build_bundle
+    # build a large set of items and verify estimated_tokens <= 600
+    ...
+```
 
 ## Implementation strategy
 
@@ -83,159 +233,71 @@ Follow these steps in order.
 ### Step 1 — inspect the repository
 
 Before making changes:
-- inspect the current router
-- inspect the current RAG integration
-- inspect existing database helpers
-- inspect project configuration patterns
-- inspect existing logging approach
-- inspect current tests
-- inspect any existing prompt assembly logic
-- inspect whether a `docs/` and `sql/` folder already exists
+- Read `docs/04-Memory_Service.md` (already updated)
+- Inspect `router.py` and `chat_service.py` for the exact integration points
+- Read `memory/service.py` and `memory/bundle_builder.py` to understand the interface
+- Run `psql -f scripts/memory_schema.sql` to apply the schema
 
-Then write a short implementation plan in the terminal output explaining:
-- which files you will create
-- which files you will patch
-- how you will avoid breaking current behavior
+### Step 2 — apply SQL schema
 
-### Step 2 — implement the SQL schema
+```bash
+psql -U <user> -d <db> -f scripts/memory_schema.sql
+```
 
-Create `sql/memory_schema.sql` with:
-- `CREATE EXTENSION IF NOT EXISTS vector;`
-- `CREATE EXTENSION IF NOT EXISTS pg_trgm;`
-- tables:
-  - `memory_profiles`
-  - `memory_episodes`
-  - `memory_rules`
-  - `memory_reflections`
-  - `memory_links`
-  - `memory_audit_log`
-- indexes for:
-  - vector retrieval
-  - metadata filtering
-  - full-text search
-- use idempotent DDL where practical
+### Step 3 — router + chat_service integration
 
-Also add a brief header comment describing:
-- purpose
-- required PostgreSQL extensions
-- safe re-run expectations
+Patch `chat_service.py`:
+- Add `_get_memory()` singleton
+- Add memory bundle retrieval after route decision
+- Inject `format_bundle_prompt(bundle)` into the system prompt (prepend, non-empty only)
+- Add post-turn episode write (background thread)
 
-### Step 3 — implement typed schemas and domain models
+Preserve ALL existing routing logic, RAG retrieval, wiki retrieval, and logging.
 
-Implement Pydantic DTOs and typed repository-facing models for:
-- memory context request
-- profile item
-- episode item
-- rule item
-- reflection result
-- bundle
-- promotion decision
+### Step 4 — install langmem (for Phase 1 evaluation)
 
-Keep the code Pylance-friendly and explicit.
+```bash
+pip install "langmem>=0.0.30"
+```
 
-### Step 4 — implement repository layer
+Verify `memory/langmem_bridge.py` loads without error:
+```bash
+python -c "from memory.langmem_bridge import LangMemBridge; print('OK')"
+```
 
-Create a repository that:
-- uses the project’s existing PostgreSQL access pattern if one exists
-- otherwise uses a clean local abstraction that can be swapped later
-- supports:
-  - upsert profile
-  - insert episode
-  - insert reflection
-  - insert / update rule
-  - fetch active profiles
-  - fetch rule candidates
-  - lexical episode search
-  - vector episode search
-  - audit writes
-  - prune operations
+### Step 5 — add tests
 
-Make SQL readable and well logged.
+Create tests/ files listed above. Use pytest.
 
-### Step 5 — implement retrieval and ranking
+### Step 6 — smoke test
 
-Implement:
-- metadata filtering first
-- full-text retrieval
-- vector retrieval
-- reciprocal rank fusion or similarly simple deterministic fusion
-- contradiction filtering
-- duplicate suppression
-- top-k trimming
-- token-budget-aware bundle creation
+Start the app:
+```bash
+streamlit run ui_streamlit_server.py
+```
 
-If there is already an embedding service helper, reuse it.
-If not, create a small embedding adapter interface instead of hardwiring one provider.
+Send a test turn and verify:
+1. Memory bundle latency appears in logs (`sage_kaizen.memory.service`)
+2. Episode write appears in logs (`sage_kaizen.memory.writer`)
+3. Bundle segment appears in prompt logs if any profile rows exist
 
-### Step 6 — implement write paths
+## pgvector 0.8.x compatibility notes
 
-Implement:
-- explicit profile write path
-- episodic write path
-- reflection write path
-- procedural rule promotion path
+The schema and retriever are written for pgvector >= 0.8.0:
 
-Rules:
-- explicit user preferences may write directly to profile memory
-- inferred preferences must go through thresholds
-- procedural rules require promotion gating
-- sensitive or ambiguous memory must not auto-promote
+1. **Iterative scan** (`hnsw.iterative_scan = relaxed_order`) — applied via
+   `SET LOCAL` inside each vector query transaction in `repository.py`.
+   This prevents under-retrieval when user filters are selective.
 
-### Step 7 — implement consolidation
+2. **HNSW parameters** — `m=16, ef_construction=128` are good defaults for
+   1024-dim BGE-M3 embeddings.  Tune ef_construction upward for better recall
+   if build time allows.
 
-Create a consolidator that can:
-- read recent episodes for a session or time window
-- generate profile candidates
-- generate rule candidates
-- detect contradictions
-- generate pruning suggestions
-- write a reflection record
+3. **CVE-2026-3172** — upgrade to pgvector 0.8.2+ before running parallel
+   HNSW index builds.  No schema changes needed; just a binary upgrade.
 
-Make the consolidator usable in two modes:
-- lightweight mode for fast-brain-assisted extraction
-- deep mode for architect-brain review
-
-Do not make model selection hardcoded if the project already has routing helpers.
-
-### Step 8 — integrate into router
-
-Patch the router so the flow becomes:
-
-- normalize user input / intent
-- decide brain route
-- request memory bundle
-- request RAG bundle if applicable
-- assemble final prompt
-- run model
-- write episodic memory after response
-- optionally queue reflection
-
-Preserve current routing logic and logging.
-
-### Step 9 — add tests
-
-Add tests for:
-- profile upsert
-- episode insert
-- lexical retrieval
-- vector retrieval path abstraction
-- bundle assembly
-- rule promotion thresholds
-- contradiction filtering
-- current-turn-overrides-history logic
-- stale memory pruning rules
-
-Use the repo’s existing test framework and style if available.
-
-### Step 10 — write developer documentation
-
-Update or create a short developer section that explains:
-- how to apply the SQL schema
-- required env vars
-- how memory retrieval works
-- how reflection runs
-- how to disable memory if needed
-- how to inspect bundle logs
+4. **No schema changes between 0.8.0, 0.8.1, 0.8.2** — the DDL in
+   `scripts/memory_schema.sql` is compatible with all 0.8.x versions.
 
 ## Coding constraints
 
@@ -246,21 +308,22 @@ Update or create a short developer section that explains:
 - Avoid giant god classes
 - Avoid tight coupling to UI or model runtime internals
 - Preserve replaceability of the memory backend and embedding adapter
+- psycopg3 only — no asyncpg
 
 ## Acceptance criteria
 
 You are done only when all of the following are true:
 
-1. The schema file exists
-2. The memory package exists
-3. The router is patched to retrieve memory before final prompt assembly
-4. Post-turn episodic write exists
-5. Reflection / consolidation entry point exists
-6. Tests exist and are runnable
-7. Existing behavior is preserved
-8. Logging exists
-9. The code is type-friendly
-10. A concise implementation summary is produced at the end
+1. `scripts/memory_schema.sql` applied successfully
+2. `memory/` package imports without error
+3. Router / chat_service retrieves memory before prompt assembly
+4. Post-turn episodic write is implemented (selective policy enforced)
+5. Reflection / consolidation entry point exists and runs
+6. Phase 1 LangMem bridge (`memory/langmem_bridge.py`) installs and initialises
+7. Tests exist and pass
+8. Existing RAG, wiki, and search behavior is preserved
+9. Logs emit `memory_bundle_latency_ms` and `memory_episode_write_latency_ms`
+10. Type annotations are Pylance-clean
 
 ## Final output format
 
@@ -269,13 +332,16 @@ At the end of the work, provide:
 1. A concise summary of what you changed
 2. A file-by-file list of created and modified files
 3. Any assumptions you made
-4. Any follow-up work recommended for phase 2
+4. Any follow-up work recommended for Phase 2 (hybrid scoring tuning, contradiction detection, UI panel)
 5. Exact commands to:
    - apply the SQL schema
+   - install langmem (Phase 1)
    - run tests
-   - run the app or service paths touched by this change
+   - run the app
 
 ## Important instruction
 
 Do not stop after planning. Implement the files and patches directly.
-If you encounter ambiguity, make the safest production-ready choice consistent with `04-Memory_Service.md` and the existing repository conventions. Provide a summary of the choice you made and why.
+If you encounter ambiguity, make the safest production-ready choice consistent
+with `docs/04-Memory_Service.md` and the existing repository conventions.
+Provide a summary of the choice you made and why.

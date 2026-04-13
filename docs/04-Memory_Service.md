@@ -8,7 +8,8 @@ The design is optimized for the current Sage Kaizen baseline:
 
 - Windows 11 Pro
 - Python 3.14.3
-- PostgreSQL + pgvector
+- PostgreSQL + pgvector **>= 0.8.2** (see Security Note below)
+- psycopg3 (`psycopg[binary]`) — already installed; do NOT add asyncpg
 - local llama.cpp / llama-server inference
 - dual-brain architecture
   - **Fast Brain**: low-latency routing / extraction / lightweight reflection
@@ -26,6 +27,32 @@ This Memory Service is designed to be:
 
 ---
 
+## pgvector Version Notes
+
+### pgvector 0.8.0 (October 2024)
+- Added **iterative index scan** (`hnsw.iterative_scan`, `ivfflat.iterative_scan`) — prevents silent under-retrieval when WHERE filters are selective. **Required for memory retrieval** because queries always filter by `user_id`, `project_id`, and `is_active`.
+- Improved query planner's index selection under filters.
+
+### pgvector 0.8.1 (September 2025)
+- Bug-fix release. No schema DDL changes.
+
+### pgvector 0.8.2 (2026)
+- **Security fix: CVE-2026-3172** — buffer overflow in parallel HNSW index builds; can leak data or crash the server.
+- **Upgrade to 0.8.2+ before running any HNSW index builds in production.**
+- No schema DDL changes; all 0.8.x schemas are compatible.
+
+### Iterative scan — required configuration
+Enable per-query in retriever code before filtered vector searches:
+
+```sql
+SET LOCAL hnsw.iterative_scan = relaxed_order;
+SET LOCAL hnsw.max_scan_tuples = 20000;
+```
+
+`relaxed_order` returns approximate results ordered by score (fastest). `strict_order` returns exact top-k but scans more tuples. For memory retrieval, `relaxed_order` is correct — we rerank anyway.
+
+---
+
 ## Design goals
 
 1. Persist useful user-specific knowledge across sessions.
@@ -33,7 +60,7 @@ This Memory Service is designed to be:
 3. Adapt output style and persona to the user's specific norms.
 4. Avoid dumping raw transcript history into every prompt.
 5. Separate stable preferences from transient episodes.
-6. Add a controlled “self-improving” loop via reflection and consolidation.
+6. Add a controlled "self-improving" loop via reflection and consolidation.
 7. Preserve explainability, provenance, and reversibility.
 8. Integrate cleanly into the current Sage Kaizen router and RAG flow.
 
@@ -50,6 +77,29 @@ Reason:
 - supports strict filtering by user / project / scope
 - supports hybrid retrieval with vector + lexical search
 - makes governance, pruning, and review easier
+
+### Phase 1 shortcut: LangMem + LangGraph
+
+For rapid iteration before the full custom service is built, a production-ready **LangMem bridge** is provided at `memory/langmem_bridge.py`. It uses:
+
+- `langmem` SDK (`create_memory_store_manager`, `ReflectionExecutor`)
+- `AsyncPostgresStore` from `langgraph.store.postgres` (already installed via `langgraph-checkpoint-postgres`)
+- Local BGE-M3 embed service (port 8020) as the embedding function
+- ARCHITECT brain (port 8012) as the memory extraction LLM
+
+**Trade-offs vs. full custom service:**
+
+| Aspect | LangMem bridge | Custom service |
+|--------|----------------|----------------|
+| Time to implement | Hours | Days–weeks |
+| Governance / promotion thresholds | LLM-driven, less controlled | Fully explicit thresholds |
+| Four-class memory model | Single `store` table, JSON docs | Typed tables per class |
+| Contradiction detection | Not built-in | Explicit in policy.py |
+| Audit log | Not built-in | Full audit_log table |
+| Hybrid retrieval (FTS + vector) | Vector only | Vector + FTS + RRF |
+| Token budget per brain | Manual | Explicit per-brain caps |
+
+**Decision**: Use LangMem bridge for Phase 1 evaluation. Migrate to full custom service in Phase 2 once usage patterns are understood.
 
 ---
 
@@ -86,6 +136,15 @@ Examples:
 - prior architectural decision for this project
 
 These are retrieved on demand.
+
+**Selective write policy** — write an episode only when:
+- user corrected or rejected a recommendation
+- user stated an explicit preference
+- user approved a design decision
+- turn involved a code change, architecture decision, or model selection
+- turn length > 200 tokens AND estimated importance > 0.4
+
+Do NOT write a new episode for short acknowledgements, greetings, or trivial clarifications.
 
 ### 3. Procedural Rule Memory (retrieved + selectively pinned)
 
@@ -130,6 +189,19 @@ Every memory item must have a scope.
 For Sage Kaizen, the common default is:
 - project and workspace scoped for engineering decisions
 - user scoped for stable stylistic preferences
+
+---
+
+## Token budget per brain
+
+Memory bundles must be sized for the receiving brain's context window.
+
+| Brain | Max bundle tokens | Reason |
+|-------|-------------------|--------|
+| FAST (Qwen2.5-Omni-7B) | 600 | 16K total; 1 image ≈ 1,280 tokens; need headroom |
+| ARCHITECT (Qwen3.5-27B) | 1,500 | 64K total; deep context is fine |
+
+The bundle builder must enforce these caps by priority: profiles → rules → episodes (drop lowest-scored episodes first).
 
 ---
 
@@ -183,25 +255,25 @@ Inputs:
 ### Step 2 — load always-on profile
 
 Retrieve:
-- active `memory_profiles` rows for the user and project
+- active `memory.profiles` rows for the user and project
 - locked procedural rules
 - user-confirmed norms
 
 Budget target:
-- 300 to 1200 tokens after formatting
+- 300 to 600 tokens after formatting (FAST brain limit)
 
 ### Step 3 — episodic candidate retrieval
 
 Use hybrid retrieval:
-1. metadata filter first
-2. lexical / full-text retrieval
-3. vector retrieval
+1. metadata filter first (`user_id`, `project_id`, `is_active`)
+2. lexical / full-text retrieval (generated tsvector)
+3. vector retrieval (HNSW with **iterative scan enabled**)
 4. reciprocal rank fusion
 5. optional rerank
 6. policy trimming
 
 Return:
-- top 3 to 8 episodic items
+- top 3 to 6 episodic items
 
 ### Step 4 — procedural memory retrieval
 
@@ -211,7 +283,7 @@ Retrieve:
 - project-specific architecture norms
 
 Return:
-- top 2 to 6 rules
+- top 2 to 5 rules
 
 ### Step 5 — contradiction and freshness filtering
 
@@ -230,6 +302,8 @@ Bundle structure:
 3. relevant procedural rules
 4. top episodic lessons
 5. optional recent corrections
+
+Enforce per-brain token caps (see Token budget section above).
 
 ### Step 7 — inject into prompt
 
@@ -263,321 +337,146 @@ Sage Kaizen must support:
 - metadata filters for user / project / workspace / confidence / freshness
 
 Therefore, retrieval should combine:
-- PostgreSQL full-text search
-- pgvector similarity
+- PostgreSQL full-text search (generated tsvector)
+- pgvector similarity (HNSW with iterative scan)
 - metadata filters
-- rank fusion
+- rank fusion (RRF)
 - optional reranking
+
+**Important**: Always apply metadata filters before vector search. pgvector 0.8.0+ improves planner behavior under filters, and enabling `hnsw.iterative_scan = relaxed_order` prevents silent under-retrieval when the filter is highly selective (e.g., a single user's memories).
+
+**Future optimization**: BGE-M3 natively supports sparse vector retrieval (SPLADE-style), which can replace `pg_trgm` for exact technical term matching (model names, ports, flags). Defer to Phase 3.
 
 ---
 
 ## Storage model
 
-The design uses five primary tables and one optional audit table.
+The design uses five primary tables and one optional audit table, all in the `memory` schema.
 
-### 1. `memory_profiles`
+### 1. `memory.profiles`
 
 Stores stable user and project profile facts.
 
-Recommended contents:
-- style preferences
-- environment assumptions
-- trusted sources
-- persistent norms
-- explicit preferences
-- pinned project invariants
-
-### 2. `memory_episodes`
+### 2. `memory.episodes`
 
 Stores prior interaction events and lessons.
 
-Recommended contents:
-- short text summary
-- event type
-- normalized intent
-- tags
-- embedding
-- importance
-- confidence
-- sentiment or correction markers
-
-### 3. `memory_rules`
+### 3. `memory.rules`
 
 Stores procedural rules and operational norms.
 
-Recommended contents:
-- rule text
-- rule kind
-- scope
-- promotion source
-- confidence
-- locked / review flags
-
-### 4. `memory_reflections`
+### 4. `memory.reflections`
 
 Stores session-level and batch consolidation outputs.
 
-Recommended contents:
-- reflection summary
-- extracted preference candidates
-- contradiction findings
-- promotion candidates
-- pruning suggestions
-
-### 5. `memory_links`
+### 5. `memory.links`
 
 Optional relation table linking memories to each other.
 
-Recommended contents:
-- parent memory id
-- child memory id
-- relation type
-- strength
-
-### 6. `memory_audit_log` (optional but recommended)
+### 6. `memory.audit_log` (recommended)
 
 Tracks writes, updates, merges, promotions, demotions, and deletes.
 
 ---
 
-## PostgreSQL schema recommendation
+## PostgreSQL schema
 
 Use UUID keys, JSONB metadata, generated tsvector for lexical search, and vector columns for semantic retrieval.
 
 ### Extension requirements
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS vector;    -- pgvector >= 0.8.2 recommended
+CREATE EXTENSION IF NOT EXISTS pg_trgm;   -- trigram similarity for exact-ish matching
 ```
 
-### Example DDL
-
-```sql
-CREATE TABLE IF NOT EXISTS memory_profiles (
-    id UUID PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    project_id TEXT,
-    workspace_id TEXT,
-    scope TEXT NOT NULL CHECK (scope IN ('user','project','workspace','global_system')),
-    profile_type TEXT NOT NULL,
-    key TEXT NOT NULL,
-    value_text TEXT NOT NULL,
-    value_json JSONB,
-    confidence REAL NOT NULL DEFAULT 1.0,
-    source_type TEXT NOT NULL,
-    is_pinned BOOLEAN NOT NULL DEFAULT TRUE,
-    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_confirmed_at TIMESTAMPTZ,
-    expires_at TIMESTAMPTZ,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    UNIQUE (user_id, COALESCE(project_id, ''), COALESCE(workspace_id, ''), scope, profile_type, key)
-);
-
-CREATE TABLE IF NOT EXISTS memory_episodes (
-    id UUID PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    project_id TEXT,
-    workspace_id TEXT,
-    session_id TEXT,
-    scope TEXT NOT NULL CHECK (scope IN ('user','project','workspace','session')),
-    event_type TEXT NOT NULL,
-    intent_label TEXT,
-    summary_text TEXT NOT NULL,
-    raw_excerpt TEXT,
-    tags JSONB NOT NULL DEFAULT '[]'::jsonb,
-    importance REAL NOT NULL DEFAULT 0.5,
-    confidence REAL NOT NULL DEFAULT 0.6,
-    sentiment REAL,
-    was_user_correction BOOLEAN NOT NULL DEFAULT FALSE,
-    was_explicit_preference BOOLEAN NOT NULL DEFAULT FALSE,
-    contradiction_group TEXT,
-    embedding vector(1024),
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_accessed_at TIMESTAMPTZ,
-    last_retrieved_at TIMESTAMPTZ,
-    expires_at TIMESTAMPTZ
-);
-
-CREATE TABLE IF NOT EXISTS memory_rules (
-    id UUID PRIMARY KEY,
-    user_id TEXT,
-    project_id TEXT,
-    workspace_id TEXT,
-    scope TEXT NOT NULL CHECK (scope IN ('user','project','workspace','global_system')),
-    rule_kind TEXT NOT NULL,
-    rule_text TEXT NOT NULL,
-    rationale TEXT,
-    confidence REAL NOT NULL DEFAULT 0.7,
-    promotion_count INT NOT NULL DEFAULT 0,
-    source_type TEXT NOT NULL,
-    source_memory_id UUID,
-    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    review_status TEXT NOT NULL DEFAULT 'proposed',
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at TIMESTAMPTZ
-);
-
-CREATE TABLE IF NOT EXISTS memory_reflections (
-    id UUID PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    project_id TEXT,
-    workspace_id TEXT,
-    session_id TEXT,
-    reflection_type TEXT NOT NULL,
-    summary_text TEXT NOT NULL,
-    extracted_profile_candidates JSONB NOT NULL DEFAULT '[]'::jsonb,
-    extracted_rule_candidates JSONB NOT NULL DEFAULT '[]'::jsonb,
-    contradictions JSONB NOT NULL DEFAULT '[]'::jsonb,
-    pruning_suggestions JSONB NOT NULL DEFAULT '[]'::jsonb,
-    confidence REAL NOT NULL DEFAULT 0.7,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
-);
-
-CREATE TABLE IF NOT EXISTS memory_links (
-    id UUID PRIMARY KEY,
-    from_memory_id UUID NOT NULL,
-    to_memory_id UUID NOT NULL,
-    relation_type TEXT NOT NULL,
-    strength REAL NOT NULL DEFAULT 0.5,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
-);
-
-CREATE TABLE IF NOT EXISTS memory_audit_log (
-    id UUID PRIMARY KEY,
-    memory_table TEXT NOT NULL,
-    memory_id UUID NOT NULL,
-    action_type TEXT NOT NULL,
-    actor_type TEXT NOT NULL,
-    actor_id TEXT,
-    old_value JSONB,
-    new_value JSONB,
-    reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
+See `scripts/memory_schema.sql` for full DDL.
 
 ---
 
-## Indexing recommendation
+## Indexing
 
-### Lexical search
-
-Add generated `tsvector` columns or materialized search columns on text-heavy tables.
-
-Example:
+### Vector search — HNSW (pgvector 0.8.x)
 
 ```sql
-ALTER TABLE memory_episodes
-ADD COLUMN IF NOT EXISTS search_tsv tsvector
-GENERATED ALWAYS AS (
-    to_tsvector('english', coalesce(summary_text, '') || ' ' || coalesce(raw_excerpt, ''))
+CREATE INDEX ... USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 128);
+```
+
+- `m = 16`: graph connectivity; 16 is a good balance for 1024-dim memory embeddings
+- `ef_construction = 128`: build-time search depth; higher = better recall, slower build
+- `vector_cosine_ops`: correct for BGE-M3 L2-normalized 1024-dim embeddings
+- Enable iterative scan per-query with `SET LOCAL hnsw.iterative_scan = relaxed_order`
+
+### Lexical search — generated tsvector
+
+```sql
+ADD COLUMN search_tsv tsvector GENERATED ALWAYS AS (
+    to_tsvector('english', coalesce(summary_text,'') || ' ' || coalesce(raw_excerpt,''))
 ) STORED;
-
-CREATE INDEX IF NOT EXISTS idx_memory_episodes_search_tsv
-ON memory_episodes
-USING GIN (search_tsv);
+CREATE INDEX ... USING GIN (search_tsv);
 ```
 
-Recommended:
-- similar generated columns for `memory_rules.rule_text`
-- optional trigram indexes for exact-ish string matching on command and model names
+### Metadata filters
 
-### Vector search
+Composite B-tree indexes on `(user_id, project_id, scope, is_active)` for fast pre-filtering before vector search.
 
-Use HNSW on `embedding`.
+---
 
-```sql
-CREATE INDEX IF NOT EXISTS idx_memory_episodes_embedding_hnsw
-ON memory_episodes
-USING hnsw (embedding vector_cosine_ops);
-```
+## Embedding source
 
-### Metadata filtering
+**The memory embedder (`memory/embedder.py`) must reuse the existing BGE-M3 embed client.**
 
-```sql
-CREATE INDEX IF NOT EXISTS idx_memory_episodes_scope_user_project
-ON memory_episodes (user_id, project_id, workspace_id, scope);
+- Do not introduce a second embedding client or a second embedding model.
+- Wraps `rag_v1/embed/embed_client.py` — calls BGE-M3 at `http://127.0.0.1:8020`.
+- 1024-dimensional L2-normalized vectors.
+- Use `psycopg3` (sync) on the hot retrieval path; `httpx.AsyncClient` for batch async consolidation.
 
-CREATE INDEX IF NOT EXISTS idx_memory_rules_scope_user_project
-ON memory_rules (user_id, project_id, workspace_id, scope, is_active);
+---
 
-CREATE INDEX IF NOT EXISTS idx_memory_profiles_scope_user_project
-ON memory_profiles (user_id, project_id, workspace_id, scope, is_active);
-```
+## Connection pooling
+
+The memory service is called on every turn. Without a connection pool, each retrieval opens a new PostgreSQL connection, adding 5–20 ms latency.
+
+**The `MemoryService` must use a shared connection pool.**
+
+- Use psycopg3 `ConnectionPool` (sync) for the hot path.
+- Initialize the pool once at `MemoryService` construction.
+- Share the pool across all repository calls.
+
+Do **not** use asyncpg. psycopg3 is already installed and used by the review service.
 
 ---
 
 ## Write-path design
 
-The system uses four write paths.
-
 ### Path A — explicit profile write
 
-Trigger:
-- user explicitly states a stable preference or rule
+Trigger: user explicitly states a stable preference or rule.
 
-Examples:
-- "Use official docs first"
-- "Avoid beta components"
-- "Prefer Windows commands"
-- "Keep Sage Kaizen modular"
+Action: write directly to `memory.profiles`; if operational, also create a locked `memory.rules` row.
 
-Action:
-- write directly to `memory_profiles`
-- if operational, also consider a locked `memory_rules` row
+### Path B — episodic write (selective)
 
-### Path B — episodic write
+Trigger: completed turn that passes the selective write policy (see Episodic Memory section).
 
-Trigger:
-- every completed turn or selected turns
-
-Action:
-- summarize the interaction into an event
-- assign type, tags, importance, and confidence
-- embed and store in `memory_episodes`
+Action: summarize the interaction into an event; assign type, tags, importance, confidence; embed and store.
 
 ### Path C — reflection write
 
-Trigger:
-- end of session
-- idle window
-- nightly batch
-- explicit maintenance run
+Trigger: end of session, idle window, nightly batch, or explicit maintenance run.
 
-Action:
-- generate consolidated findings
-- propose profile updates
-- propose rule promotions
-- suggest contradictions and pruning
-- write to `memory_reflections`
+Action: generate consolidated findings; propose profile updates; propose rule promotions; suggest contradictions and pruning; write to `memory.reflections`.
 
 ### Path D — rule promotion
 
-Trigger:
-- repeated evidence
-- user confirmation
-- high-confidence reflection outcome
+Trigger: repeated evidence, user confirmation, or high-confidence reflection outcome.
 
-Action:
-- create or update `memory_rules`
-- increment promotion count
-- optionally lock if user-approved
+Action: create or update `memory.rules`; increment promotion count; optionally lock if user-approved.
 
 ---
 
 ## Promotion policy
-
-Use thresholds to prevent noisy auto-learning.
 
 ### Promote to profile memory when
 
@@ -607,27 +506,15 @@ All are true:
 
 ## Decay and pruning policy
 
-Memory must not grow forever.
-
-### Suggested defaults
-
-#### Profiles
-- no decay by default
-- require explicit confirmation or contradiction to change
-
-#### Episodes
+### Episodes
 - score decays over time
 - stronger recency decay for low-importance events
 - retain high-importance decisions longer
 
-#### Rules
+### Rules
 - periodic review every 30–90 days
 - demote if contradicted repeatedly
 - keep locked rules until manually changed
-
-#### Reflections
-- retain for audit and maintenance
-- low retrieval priority
 
 ### Deletion policy
 
@@ -641,10 +528,6 @@ Delete or archive:
 
 ## Scoring model
 
-Final retrieval score should combine multiple signals.
-
-### Example formula
-
 ```text
 final_score =
     0.35 * semantic_score
@@ -655,102 +538,77 @@ final_score =
   + 0.10 * scope_match_score
 ```
 
-### Additional penalties
-
-Subtract penalties for:
-- contradiction
-- staleness
-- duplication
-- oversaturation from the same session
-- low provenance quality
+Additional penalties for contradiction, staleness, duplication, oversaturation from the same session.
 
 ---
 
 ## API design
 
-Create a local Python service layer, not necessarily a separate network service at first.
-
-Suggested module path:
+Module path: `memory/` at the project root (following existing conventions: `search/`, `rag_v1/`, `review_service/`).
 
 ```text
-sage/
-  memory/
-    __init__.py
-    models.py
-    schemas.py
-    repository.py
-    embedder.py
-    retriever.py
-    ranker.py
-    bundle_builder.py
-    writer.py
-    consolidator.py
-    policy.py
-    audit.py
-    service.py
+memory/
+  __init__.py
+  models.py          # Pydantic DTOs — MemoryBundle, MemoryContextRequest, etc.
+  schemas.py         # DB row types (dataclasses matching table columns)
+  repository.py      # psycopg3 CRUD — profiles, episodes, rules, reflections
+  embedder.py        # wraps rag_v1/embed/embed_client.py (BGE-M3 port 8020)
+  retriever.py       # hybrid FTS + HNSW + RRF; iterative scan enabled
+  ranker.py          # scoring formula, contradiction filter, duplicate suppression
+  bundle_builder.py  # assembles prompt-ready MemoryBundle within token budget
+  writer.py          # write paths A–D (explicit profile, episodic, reflection, rule)
+  consolidator.py    # reflection job, promotion decision, pruning suggestions
+  policy.py          # promotion thresholds, decay rules, selective write policy
+  audit.py           # audit_log writes
+  service.py         # MemoryService facade
+  langmem_bridge.py  # Phase 1: LangMem + LangGraph shortcut
 ```
 
 ### Core service interface
 
 ```python
 class MemoryService:
-    def get_memory_bundle(...)
-    def write_explicit_profile(...)
-    def write_episode(...)
-    def run_reflection(...)
-    def promote_rules(...)
-    def prune_memories(...)
-    def explain_bundle(...)
+    def get_memory_bundle(self, request: MemoryContextRequest) -> MemoryBundle
+    def write_explicit_profile(self, user_id: str, key: str, value: str, ...) -> None
+    def write_episode(self, user_id: str, summary: str, ...) -> None
+    def run_reflection(self, user_id: str, session_id: str) -> ReflectionResult
+    def promote_rules(self, user_id: str) -> list[PromotionDecision]
+    def prune_memories(self, user_id: str) -> int
+    def explain_bundle(self, bundle: MemoryBundle) -> str
 ```
-
-### Recommended DTOs
-
-- `MemoryContextRequest`
-- `MemoryBundle`
-- `ProfileMemoryItem`
-- `EpisodeMemoryItem`
-- `RuleMemoryItem`
-- `ReflectionResult`
-- `PromotionDecision`
-
-Use Pydantic models and typed repository methods.
 
 ---
 
 ## Integration points in Sage Kaizen
 
-### 1. Router integration
+### Router integration
 
-Insert memory retrieval between:
-- route decision
-- final prompt assembly
-
-Flow:
+Insert memory retrieval between route decision and final prompt assembly:
 
 ```text
 user input
   -> router intent normalization
-  -> route selection
-  -> memory bundle retrieval
+  -> route selection (fast / architect)
+  -> memory bundle retrieval        ← NEW
   -> RAG retrieval (if needed)
   -> prompt assembly
   -> model call
-  -> post-turn memory write
+  -> post-turn memory write         ← NEW (selective)
 ```
 
-### 2. UI integration
+### UI integration (Phase 4)
 
 Add optional controls in Streamlit:
 - show active memory profile
 - show retrieved memory bundle for current turn
 - allow pin / unpin / forget
-- allow “why did you remember this?”
+- allow "why did you remember this?"
 - allow review of promoted rules
 
-### 3. Background maintenance integration
+### Background maintenance
 
-Add a scheduler or maintenance command:
-- session reflection
+Add scheduler or maintenance command:
+- session reflection (end of session)
 - nightly consolidation
 - pruning
 - contradiction scan
@@ -762,10 +620,9 @@ Add a scheduler or maintenance command:
 
 ### Fast Brain responsibilities
 - classify intent
-- extract explicit preferences
-- create lightweight episode summaries
-- generate embeddings
-- do first-pass reflection candidate extraction
+- extract explicit preferences (lightweight, low-latency)
+- create lightweight episode summaries (post-turn, background)
+- generate embeddings via BGE-M3 service (not model inference)
 
 ### Architect Brain responsibilities
 - deep consolidation
@@ -774,24 +631,17 @@ Add a scheduler or maintenance command:
 - merge / split profile facts
 - maintenance and governance reports
 
-This reduces latency on the live path while preserving quality for long-term learning.
-
 ---
 
 ## Prompting guidance for memory-aware turns
-
-Do not dump raw memory into the prompt.
-
-Use a compact normalized form.
-
-### Recommended format
 
 ```text
 You have access to structured prior memory about this user and project.
 
 Use the following memories only as guidance if relevant to the current request.
 Prefer current user instructions over past memory.
-If current instructions conflict with past memory, follow the current instructions and mark the old memory for review.
+If current instructions conflict with past memory, follow the current instructions
+and mark the old memory for review.
 
 [USER PROFILE]
 - ...
@@ -815,11 +665,9 @@ If current instructions conflict with past memory, follow the current instructio
 
 ## Observability
 
-The Memory Service should emit structured logs for:
-
-- bundle retrieval count
+Emit structured logs for:
+- bundle retrieval count and latency
 - bundle token size
-- query latency
 - vector hit count
 - lexical hit count
 - promotion decisions
@@ -827,13 +675,11 @@ The Memory Service should emit structured logs for:
 - contradiction detections
 - reflection job status
 
-Suggested metrics:
+Key metrics:
 - `memory_bundle_latency_ms`
 - `memory_episode_write_latency_ms`
 - `memory_reflection_job_latency_ms`
 - `memory_bundle_items_count`
-- `memory_profile_items_count`
-- `memory_rule_items_count`
 - `memory_promotion_total`
 - `memory_pruned_total`
 
@@ -842,64 +688,48 @@ Suggested metrics:
 ## Safety and failure modes
 
 ### Risk: persona drift
-Mitigation:
-- pinned profile memory
-- promotion thresholds
-- contradiction checks
-- user-confirmed locks
+Mitigation: pinned profile memory, promotion thresholds, contradiction checks, user-confirmed locks.
 
 ### Risk: stale technical preferences
-Mitigation:
-- recency weighting
-- review timestamps
-- contradiction-aware demotion
+Mitigation: recency weighting, review timestamps, contradiction-aware demotion.
 
 ### Risk: privacy over-collection
-Mitigation:
-- typed memory classes
-- explicit scope
-- opt-out delete / forget support
-- avoid storing raw transcript unless needed
+Mitigation: typed memory classes, explicit scope, opt-out delete / forget support, selective episode write policy.
 
 ### Risk: retrieval overload
-Mitigation:
-- strict top-k budgets
-- score thresholding
-- duplicate suppression
-- compact memory formatting
+Mitigation: strict top-k budgets, per-brain token caps, score thresholding, duplicate suppression.
 
 ### Risk: learning the wrong lesson
-Mitigation:
-- architect-only promotion for important rules
-- audit log
-- review queue for low-confidence candidates
+Mitigation: architect-only promotion for important rules, audit log, review queue for low-confidence candidates.
+
+### Risk: pgvector under-retrieval under filter (pgvector 0.8.x)
+Mitigation: enable `hnsw.iterative_scan = relaxed_order` in all filtered vector queries. See retriever.py.
 
 ---
 
 ## Recommended implementation phases
 
-### Phase 1 — foundations
-- create tables and indexes
-- create typed repository layer
-- create explicit profile write path
-- create episodic write path
-- implement memory bundle retrieval
-- integrate into router
+### Phase 1 — LangMem bridge (fast path)
+- apply `scripts/memory_schema.sql` for custom tables
+- deploy `memory/langmem_bridge.py` using `AsyncPostgresStore` + LangMem
+- integrate bridge into router for memory retrieval and background write
+- evaluate recall quality and latency
 
-### Phase 2 — hybrid ranking
-- add lexical + vector fusion
+### Phase 2 — custom hybrid retrieval
+- implement full custom service (`memory/` package)
+- add lexical + vector fusion (RRF)
 - add contradiction filtering
-- add scope-aware scoring
-- add compact prompt formatter
+- add compact prompt formatter with per-brain token caps
 
 ### Phase 3 — reflection and promotion
-- implement reflection jobs
-- implement promotion policy
+- implement reflection jobs (Architect brain consolidation)
+- implement promotion policy with thresholds
 - implement rule demotion and pruning
 - add audit log
+- add BGE-M3 sparse retrieval (replaces pg_trgm for technical terms)
 
 ### Phase 4 — UI and governance
-- add memory review controls
+- add memory review controls in Streamlit
 - add explainability panel
 - add manual forget / pin / lock
 - add maintenance dashboard
@@ -908,16 +738,14 @@ Mitigation:
 
 ## File and code conventions for this project
 
-Implementation must follow Sage Kaizen conventions:
-
 - Python 3.14.3
 - Windows-safe paths and commands
-- modular components
-- no beta or deprecated dependencies
-- official docs preferred for technical behavior
-- PostgreSQL + pgvector remain the memory backend
-- fully local processing by default
-- architect and fast brain roles remain replaceable
+- modular components, no beta or deprecated dependencies
+- `memory/` at project root (not `sage/memory/`)
+- SQL files at `scripts/memory_schema.sql` (not `sql/`)
+- psycopg3 only (no asyncpg)
+- reuse `rag_v1/embed/embed_client.py` for BGE-M3 embeddings
+- pgvector >= 0.8.2 (CVE-2026-3172 security fix)
 
 ---
 
@@ -926,10 +754,10 @@ Implementation must follow Sage Kaizen conventions:
 A production-acceptable v1 must:
 
 1. persist explicit user preferences
-2. persist episodic memories with embeddings
+2. persist episodic memories with embeddings (selective write policy enforced)
 3. retrieve hybrid top-k memory per turn
-4. inject memory bundle before model inference
-5. perform post-turn episodic write
+4. inject memory bundle before model inference (within per-brain token caps)
+5. perform post-turn episodic write (selective)
 6. support nightly reflection
 7. support rule promotion with thresholds
 8. support forget / disable / lock
@@ -950,37 +778,37 @@ A production-acceptable v1 must:
 - rule promotion thresholds
 - decay scoring
 - prompt bundle formatting
+- token budget enforcement per brain
 
 ### Integration tests
 - router + memory bundle path
-- post-turn write path
+- post-turn selective write
 - reflection job path
 - forget flow
 - locked rule protection
-
-### Behavioral tests
-- user preference learned and reused
-- current-turn override works
-- stale preference demotes correctly
-- duplicate memories do not flood prompt
-- memory bundle remains within token budget
+- iterative scan fallback behavior
 
 ---
 
 ## Recommended next deliverables
 
-1. `memory_schema.sql`
-2. `sage/memory/models.py`
-3. `sage/memory/schemas.py`
-4. `sage/memory/repository.py`
-5. `sage/memory/retriever.py`
-6. `sage/memory/bundle_builder.py`
-7. `sage/memory/writer.py`
-8. `sage/memory/consolidator.py`
-9. `sage/memory/service.py`
-10. router integration patch
-11. tests
-12. Streamlit memory review panel
+1. `scripts/memory_schema.sql`
+2. `memory/models.py`
+3. `memory/schemas.py`
+4. `memory/repository.py`
+5. `memory/embedder.py`
+6. `memory/retriever.py`
+7. `memory/ranker.py`
+8. `memory/bundle_builder.py`
+9. `memory/writer.py`
+10. `memory/policy.py`
+11. `memory/audit.py`
+12. `memory/consolidator.py`
+13. `memory/service.py`
+14. `memory/langmem_bridge.py` ← Phase 1 LangMem shortcut
+15. router integration patch
+16. tests
+17. Streamlit memory review panel (Phase 4)
 
 ---
 
@@ -994,16 +822,19 @@ When implementing:
 - use deterministic repository methods and typed DTOs
 - add migration-safe SQL and idempotent schema creation
 - include logging and tests from the first implementation pass
+- enable `hnsw.iterative_scan = relaxed_order` in all filtered vector queries
+- use `memory/` at project root, SQL at `scripts/`
+- use psycopg3 connection pool — not asyncpg
 
 ---
 
-## References used to shape this design
-
-These references influenced the architecture and should be reviewed during implementation:
+## References
 
 - Anthropic Claude Code memory model: `CLAUDE.md` + auto memory
-- Anthropic Claude Code extension patterns, hooks, and settings
 - LangGraph long-term memory model: semantic / episodic / procedural
-- Letta memory blocks and archival memory
-- Letta sleep-time agents
-- pgvector hybrid retrieval recommendations
+- LangMem SDK: `langmem` — `create_memory_store_manager`, `ReflectionExecutor`
+- Letta sleep-time agents for background consolidation pattern
+- pgvector hybrid retrieval: [Building Hybrid Search for RAG](https://dev.to/lpossamai/building-hybrid-search-for-rag-combining-pgvector-and-full-text-search-with-reciprocal-rank-fusion-6nk)
+- pgvector 0.8.0 release notes: [pgvector 0.8.0 Released](https://www.postgresql.org/about/news/pgvector-080-released-2952/)
+- pgvector 0.8.2 security: [CVE-2026-3172 fix](https://www.postgresql.org/about/news/pgvector-082-released-3245/)
+- BGE-M3 multi-functionality: [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3)

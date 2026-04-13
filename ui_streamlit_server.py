@@ -412,6 +412,8 @@ timeouts_status = HttpTimeouts(connect_s=0.5, read_s=1.0)
 # ─────────────────────────────────────────────────────────────────────────── #
 
 if "messages"            not in st.session_state: st.session_state.messages            = []
+if "session_id"          not in st.session_state: st.session_state.session_id          = str(uuid4())
+if "user_id"             not in st.session_state: st.session_state.user_id             = "alquin"
 if "last_thinking_time"  not in st.session_state: st.session_state.last_thinking_time  = None
 if "q5_model_id"         not in st.session_state: st.session_state.q5_model_id         = CONFIG.q5_model_id
 if "q6_model_id"         not in st.session_state: st.session_state.q6_model_id         = CONFIG.q6_model_id
@@ -1136,6 +1138,8 @@ if user_text:
                 wiki_enabled=st.session_state.get("wiki_enabled", True),
                 media_attachments=turn_attachments,
                 document_attachments=turn_doc_attachments,
+                session_id=st.session_state.get("session_id"),
+                user_id=st.session_state.get("user_id", "alquin"),
             )
 
             # Snapshot tts_enabled once so the generator is not sensitive to
@@ -1172,6 +1176,17 @@ if user_text:
         st.session_state.last_thinking_time = elapsed
         final    = full_streamed.strip()
         _thinking, _clean = _parse_response(final)
+
+        # Post-turn memory write — fire-and-forget daemon thread.
+        # Applies selective write policy; short acks are silently dropped.
+        if final and user_text:
+            chat_svc.write_episode_background(
+                user_text=user_text,
+                assistant_text=final,
+                decision=decision,
+                session_id=st.session_state.get("session_id"),
+                user_id=st.session_state.get("user_id", "alquin"),
+            )
         _sources_md = format_sources_markdown(rag_sources)
         if _sources_md:
             _clean = _clean + "\n\n" + _sources_md
