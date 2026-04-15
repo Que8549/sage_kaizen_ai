@@ -404,6 +404,28 @@ def _auto_start_servers() -> None:
 
 _auto_start_servers()
 
+
+@st.cache_resource
+def _start_news_scheduler() -> None:
+    """
+    Start the APScheduler news pipeline scheduler once per Streamlit process.
+
+    Uses @st.cache_resource so this runs exactly once regardless of reruns or
+    additional browser tabs.  Failures are caught and logged so a misconfigured
+    news DB never prevents the app from starting.
+    """
+    try:
+        from news.scheduler.news_scheduler import NewsScheduler
+        NewsScheduler.start()
+    except Exception as _exc:
+        import logging as _l
+        _l.getLogger("sage_kaizen.ui").warning(
+            "News scheduler failed to start (news pipeline disabled): %s", _exc
+        )
+
+
+_start_news_scheduler()
+
 timeouts        = HttpTimeouts(connect_s=CONFIG.connect_timeout_s, read_s=CONFIG.read_timeout_s)
 timeouts_status = HttpTimeouts(connect_s=0.5, read_s=1.0)
 
@@ -597,6 +619,94 @@ def _tts_toggle() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
+# News pipeline — "Get News" button + live progress fragment                   #
+# ─────────────────────────────────────────────────────────────────────────── #
+
+try:
+    from news.pipeline_runner import get_state as _news_get_state, run_pipeline_async as _news_run
+    _NEWS_PIPELINE_AVAILABLE = True
+except ImportError:
+    _NEWS_PIPELINE_AVAILABLE = False
+
+
+@st.fragment(run_every=1.0)
+def _render_news_pipeline_status() -> None:
+    """
+    Poll the news pipeline state every second and render progress.
+
+    Renders nothing when the pipeline is idle and no run has occurred yet.
+    Shows a progress bar + stage label while running.
+    Shows a summary (metrics per stage, elapsed time, warnings) after completion.
+
+    Called inside `with st.sidebar:` so all rendered elements appear in the
+    sidebar.  The 1-second poll interval is negligible overhead when idle
+    (no DB calls — just a dict read).
+    """
+    if not _NEWS_PIPELINE_AVAILABLE:
+        return
+
+    s = _news_get_state()
+    running      = s["running"]
+    stage_num    = s["stage_num"]
+    stage_label  = s["stage_label"]
+    started_at   = s["started_at"]
+    finished_at  = s["finished_at"]
+    all_metrics  = s["all_metrics"]
+    error        = s["error"]
+    fast_ok      = s["fast_ok"]
+    arch_ok      = s["arch_ok"]
+    fast_warn    = s["fast_warn"]
+    arch_warn    = s["arch_warn"]
+    total        = 6  # TOTAL_STAGES
+
+    # ── Brain warnings (show immediately after button press) ───────────────
+    if started_at is not None:
+        if fast_warn:
+            st.warning(fast_warn, icon="⚠️")
+        if arch_warn:
+            st.warning(arch_warn, icon="⚠️")
+
+    # ── Running state: progress bar ────────────────────────────────────────
+    if running and stage_num > 0:
+        # Progress represents stages COMPLETED; the current stage is in flight.
+        progress = (stage_num - 1) / total
+        st.progress(progress, text=f"Stage {stage_num}/{total}: {stage_label}…")
+        if started_at:
+            import datetime as _dt
+            elapsed = (_dt.datetime.now(_dt.timezone.utc) - started_at).total_seconds()
+            st.caption(f"Elapsed: {elapsed:.0f}s")
+        return  # don't show results while still running
+
+    # ── Completed state: full progress bar + per-stage summary ────────────
+    if finished_at is not None and started_at is not None:
+        elapsed_total = (finished_at - started_at).total_seconds()
+
+        if error:
+            st.progress(1.0, text="Pipeline finished with errors")
+            st.error(f"Pipeline error: {error}", icon="❌")
+        else:
+            st.progress(1.0, text="Pipeline complete ✓")
+
+        st.caption(f"Finished in {elapsed_total:.0f}s at {finished_at.strftime('%H:%M UTC')}")
+
+        if all_metrics:
+            with st.expander("Stage results", expanded=False):
+                for label, metrics in all_metrics:
+                    if "error" in metrics:
+                        st.caption(f"❌ {label}: {metrics['error']}")
+                    elif metrics.get("skipped") == "chat_active":
+                        st.caption(f"⏭ {label}: skipped (chat active)")
+                    else:
+                        # Build a compact one-line summary from the metrics dict.
+                        parts = []
+                        for k, v in metrics.items():
+                            if k not in ("duration_s",) and v != 0:
+                                parts.append(f"{k}={v}")
+                        summary = ", ".join(parts) if parts else "ok"
+                        st.caption(f"✅ {label}: {summary}")
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 # Sidebar                                                                      #
 # ─────────────────────────────────────────────────────────────────────────── #
 
@@ -738,6 +848,31 @@ with st.sidebar:
         min_value=1, max_value=16, value=8,
         help="Hard cap on frames extracted per video file to limit context token usage.",
     )
+
+    # ── News pipeline ──────────────────────────────────────────────────────
+    st.subheader("News")
+    if _NEWS_PIPELINE_AVAILABLE:
+        _pipeline_running = _news_get_state()["running"]
+        if _pipeline_running:
+            st.button("Get News", disabled=True, help="Pipeline is already running…")
+        else:
+            if st.button(
+                "Get News",
+                help=(
+                    "Run the full 6-stage news pipeline on demand:\n"
+                    "1. Collect articles from SearXNG\n"
+                    "2. Enrich articles (full-text + embeddings)\n"
+                    "3. Cluster related stories\n"
+                    "4. Summarize articles (FAST brain)\n"
+                    "5. Summarize clusters (FAST/ARCHITECT brain)\n"
+                    "6. Finalize daily + 7-day briefs (ARCHITECT brain)"
+                ),
+            ):
+                _news_run()
+                st.rerun()
+        _render_news_pipeline_status()
+    else:
+        st.caption("News pipeline unavailable (import error — check logs).")
 
     if st.button("New chat"):
         st.session_state.messages                = []
