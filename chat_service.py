@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import threading
+import time as _time
 from dataclasses import dataclass, field
 from typing import Iterator, List, Optional, Tuple
 
@@ -57,6 +58,27 @@ _LOG = get_logger("sage_kaizen.chat_service")
 _MEMORY_SVC: Optional["MemoryService"] = None  # type: ignore[name-defined]
 _MEMORY_DISABLED = False   # set True after a failed init so we don't retry every turn
 _MEMORY_LOCK = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Off-peak guard — shared with news summarizers.
+# article_summarizer.py and cluster_summarizer.py import last_chat_activity_ts()
+# to decide whether to run while chat is idle.  record_chat_activity() is called
+# at the start of every streaming turn so the timestamp stays current.
+# ---------------------------------------------------------------------------
+_last_chat_ts: float = 0.0
+_CHAT_TS_LOCK = threading.Lock()
+
+
+def record_chat_activity() -> None:
+    """Update the global last-chat timestamp. Called at the start of each turn."""
+    global _last_chat_ts
+    with _CHAT_TS_LOCK:
+        _last_chat_ts = _time.time()
+
+
+def last_chat_activity_ts() -> float:
+    """Return the monotonic time of the last chat turn start (0.0 if never)."""
+    return _last_chat_ts
 
 
 def _get_memory() -> Optional[object]:
@@ -516,6 +538,7 @@ class ChatService:
 
         Raises LlamaServerError if the server returns an HTTP error.
         """
+        record_chat_activity()
         base_url = self._session.url_for_brain(decision.brain)
         model_id = self._session.model_id_for_brain(decision.brain)
         is_arch = decision.brain == "ARCHITECT"

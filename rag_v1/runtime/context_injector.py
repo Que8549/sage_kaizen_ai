@@ -35,8 +35,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 # Module-level executor — threads are kept alive for the process lifetime so
 # thread creation cost is paid once, not on every chat turn.
-# max_workers=4 covers the four parallel fetches: doc-RAG, wiki-RAG, search, music.
-_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rag_par")
+# max_workers=5 covers the five parallel fetches: doc-RAG, wiki-RAG, search, music, news.
+_POOL = ThreadPoolExecutor(max_workers=5, thread_name_prefix="rag_par")
 
 from env_utils import env_bool, env_int
 from input_guard import sanitize_chunk
@@ -78,6 +78,16 @@ except ImportError as _music_err:
     _MUSIC_AVAILABLE = False
     import logging as _l; _l.getLogger("sage_kaizen.context_injector").warning(
         "Music retrieval unavailable (ImportError: %s) — music search disabled", _music_err
+    )
+
+# News resolver — optional dependency
+try:
+    from news.retrieval.news_resolver import resolve_news_context
+    _NEWS_AVAILABLE = True
+except ImportError as _news_err:
+    _NEWS_AVAILABLE = False
+    import logging as _l; _l.getLogger("sage_kaizen.context_injector").warning(
+        "News resolver unavailable (ImportError: %s) — news context disabled", _news_err
     )
 
 if TYPE_CHECKING:
@@ -396,6 +406,36 @@ def _fetch_music_result(
         return ""
 
 
+def _fetch_news_result(user_text: str) -> str:
+    """
+    Resolve news context for the user message.
+
+    Checks for market queries (yfinance point-in-time lookup) and news-intent
+    queries (DB-first brief retrieval with stale fallback).  Returns a formatted
+    <news_context> XML block, or "" if the query is not news-related or the
+    news pipeline is unavailable.
+    """
+    if not _NEWS_AVAILABLE:
+        return ""
+
+    if not user_text:
+        return ""
+
+    try:
+        ctx = resolve_news_context(user_text)
+        if ctx is None:
+            return ""
+        block = ctx.to_xml_block()
+        _LOG.info(
+            "news_rag | source=%s stale=%s chars=%d",
+            ctx.source, ctx.is_stale, len(block),
+        )
+        return block
+    except Exception:
+        _LOG.exception("News resolver failed; continuing without news context")
+        return ""
+
+
 def apply_rag_and_wiki_parallel(
     messages: List[Dict[str, Any]],
     user_text: str,
@@ -441,13 +481,14 @@ def apply_rag_and_wiki_parallel(
         summarizer_base_url, summarizer_model_id,
     )
     music_fut  = _POOL.submit(_fetch_music_result, user_text, decision)
+    news_fut   = _POOL.submit(_fetch_news_result, user_text)
 
     # Per-worker timeout: prevents a hung SearXNG fetch, slow jina-clip GPU
     # restore, or stalled DB query from blocking the turn indefinitely.
     # Values are generous (doc-RAG: 15 s, wiki: 20 s, search+summarize: 30 s,
-    # music: 10 s) — real work is much faster; these are safety ceilings.
+    # music: 10 s, news: 10 s) — real work is much faster; these are safety ceilings.
     # TimeoutError is caught and logged; the turn continues with partial context.
-    _WORKER_TIMEOUTS = {"rag": 15, "wiki": 20, "search": 30, "music": 10}
+    _WORKER_TIMEOUTS = {"rag": 15, "wiki": 20, "search": 30, "music": 10, "news": 10}
 
     try:
         rag_messages, rag_sources = rag_fut.result(timeout=_WORKER_TIMEOUTS["rag"])
@@ -472,6 +513,12 @@ def apply_rag_and_wiki_parallel(
     except Exception:
         _LOG.exception("Music worker timed out or failed; continuing without music context")
         music_ctx_block = ""
+
+    try:
+        news_ctx_block = news_fut.result(timeout=_WORKER_TIMEOUTS["news"])
+    except Exception:
+        _LOG.exception("News worker timed out or failed; continuing without news context")
+        news_ctx_block = ""
 
     # ── Token budget guardrails ────────────────────────────────────────────
     # Trim wiki and search context blocks before injection so that a single
@@ -505,6 +552,7 @@ def apply_rag_and_wiki_parallel(
             "wiki_chars":        len(wiki_ctx_block) if wiki_ctx_block else 0,
             "search_chars":      len(search_ctx_block) if search_ctx_block else 0,
             "music_chars":       len(music_ctx_block) if music_ctx_block else 0,
+            "news_chars":        len(news_ctx_block) if news_ctx_block else 0,
             "wiki_images":       len(wiki_images),
             "wiki_trimmed":      bool(wiki_ctx_block and len(wiki_ctx_block) >= wiki_max),
             "search_trimmed":    bool(search_ctx_block and len(search_ctx_block) >= search_max),
@@ -533,6 +581,14 @@ def apply_rag_and_wiki_parallel(
         for i in reversed(range(len(out))):
             if out[i].get("role") == "user":
                 prefix = f"{music_ctx_block}\n\n"
+                out[i] = {**out[i], "content": _prepend_context(out[i]["content"], prefix)}
+                break
+
+    # Inject news context outermost (closest to the user question; only when triggered)
+    if news_ctx_block:
+        for i in reversed(range(len(out))):
+            if out[i].get("role") == "user":
+                prefix = f"{news_ctx_block}\n\n"
                 out[i] = {**out[i], "content": _prepend_context(out[i]["content"], prefix)}
                 break
 
