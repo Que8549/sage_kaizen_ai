@@ -123,6 +123,95 @@ _CATEGORY_KEYWORDS: dict[str, Tuple[str, ...]] = {
 _DEFAULT_SEARCH_CATEGORIES: Tuple[str, ...] = ("general", "news")
 
 # ---------------------------------------------------------------------------
+# News-aware brain routing
+# ---------------------------------------------------------------------------
+# These are separate from the live-search detection above.  _SEARCH_TEMPORAL_HINTS
+# tells the router to fire a SearXNG fetch; the news signals below tell the router
+# *which brain* should synthesise the answer once the <news_context> brief has been
+# injected.  The distinction matters: a query like "summarize today's top news" needs
+# a search AND should go to FAST; "detailed analysis of last week's war coverage" needs
+# a search AND should go to ARCHITECT.
+
+# Lightweight signals that confirm the query is about news content (not weather/finance).
+_NEWS_CONTENT_SIGNALS: Tuple[str, ...] = (
+    "news",              # "Iran war news", "news today", "news about"
+    "headlines",         # "today's headlines"
+    "top stories",       # "top stories today"
+    "briefing",          # "daily briefing", "news briefing"
+    "news brief",        # "news brief for today"
+    "news summary",      # "news summary for the week"
+    "breaking",          # "breaking news"
+    "current events",    # "current events in..."
+    "what's happening",  # "what's happening in..."
+    "what happened",     # "what happened in Iran"
+    "latest on",         # "latest on the war"
+    "news about",        # "news about the election"
+    "news on",           # "news on the ceasefire"
+    "news of",           # "news of the war"
+    "news from",         # "news from the Middle East"
+    "news since",        # "news since last week"
+    "stories about",     # "stories about the conflict"
+    "stories on",        # "stories on Iran"
+    "coverage of",       # "coverage of the war"
+    "coverage on",       # "coverage on the summit"
+    "coverage from",     # "coverage from the past week"
+    "war coverage",      # "Iran war coverage", "coverage of the war"
+    "reporting on",      # "reporting on the conflict"
+    "the latest",        # "the latest on the ceasefire" — news-intent shorthand
+)
+
+# Signals that the user wants deep, comprehensive, or multi-day news coverage.
+# When detected alongside a news-content signal, ARCHITECT is selected regardless
+# of FAST_HINTS counterweights (e.g. "detailed summary" cancels out to 0 without
+# this block; with it, the +3 push ensures ARCHITECT is selected).
+_NEWS_DEPTH_HINTS: Tuple[str, ...] = (
+    # Explicit depth/quality signals
+    "detailed",                  # "detailed summary", "detailed coverage"
+    "in detail",                 # "explain in detail"
+    "in-depth",                  # "in-depth analysis"
+    "in depth",                  # same, no hyphen
+    "comprehensive",             # "comprehensive summary"
+    "thorough",                  # "thorough breakdown"
+    "elaborate",                 # "elaborate on the news"
+    "full summary",              # "full summary of this week"
+    "full breakdown",            # "full breakdown of events"
+    "full coverage",             # "full coverage of the war"
+    "full picture",              # "give me the full picture"
+    "analyze",                   # "analyze the war coverage"
+    "analysis",                  # "analysis of current events"
+    "breakdown",                 # "breakdown of the week"
+    "compare",                   # "compare the stories"
+    "everything that happened",  # broad temporal scope
+    "what's been happening",     # ongoing multi-day coverage
+    "what has been happening",   # same, uncontracted
+    "all the news",              # "all the news from this week"
+    # Time-span signals — imply rolling-7-day brief (more synthesis required)
+    "last week",                 # "last week's news", "news from last week"
+    "past week",                 # "past week's events"
+    "this week",                 # "this week in news" (span, not "today")
+    "7 days",                    # "past 7 days"
+    "7-day",                     # "7-day summary"
+    "week in review",            # "week in review"
+    "week's news",               # "this week's news"
+    "past few days",             # "past few days of coverage"
+    "last few days",             # "last few days of events"
+    "since yesterday",           # "what's changed since yesterday"
+    "since last",                # "news since last Monday"
+)
+
+
+def _is_news_query(txt: str) -> bool:
+    """
+    Lightweight check: does this query ask about news *content*?
+
+    Uses exact substring match only (no fuzzy) — fast-path for routing.
+    Deliberately conservative: only fires on clear news terminology so
+    finance/weather/sports queries don't accidentally pick up the +3 news-depth boost.
+    """
+    return any(s in txt for s in _NEWS_CONTENT_SIGNALS)
+
+
+# ---------------------------------------------------------------------------
 # Fuzzy phrase matching — catches paraphrases the exact lists miss
 # ---------------------------------------------------------------------------
 # Threshold calibration:
@@ -354,6 +443,17 @@ def route(
             score -= 2
             reasons.append(f"fast_intent:{k}")
             break
+
+    # News-aware depth routing
+    # Applied after all other scoring so it can override FAST_HINTS cancellations.
+    # Example: "detailed summary of last week's news" scores:
+    #   FAST_HINTS("summary") → -2, DEPTH_HINTS("detailed") → +2, net = 0 (FAST)
+    #   But: _is_news_query + "detailed" in _NEWS_DEPTH_HINTS → +3, final = 3 → ARCHITECT
+    # Simple news queries ("today's top news", "summarize today's brief") are unaffected
+    # because they contain no _NEWS_DEPTH_HINTS terms and already route to FAST by default.
+    if _is_news_query(txt) and any(h in txt for h in _NEWS_DEPTH_HINTS):
+        score += 3
+        reasons.append("news:depth_query")
 
     # Final threshold
     if score >= ARCHITECT_THRESHOLD:
