@@ -40,7 +40,7 @@ from tenacity import (
 from news.news_settings import get_news_settings
 from sk_logging import get_logger
 
-_LOG = get_logger("sage_kaizen.news.searxng_client")
+_LOG = get_logger("sage_kaizen.news.searxng_client", file_name="news_agent.log")
 
 # ---------------------------------------------------------------------------
 # Tracking / analytics query parameters stripped before hashing.

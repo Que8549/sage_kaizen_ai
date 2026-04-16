@@ -42,7 +42,7 @@ from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecut
 from news.news_settings import get_news_settings
 from sk_logging import get_logger
 
-_LOG = get_logger("sage_kaizen.news.scheduler")
+_LOG = get_logger("sage_kaizen.news.scheduler", file_name="news_agent.log")
 
 
 class NewsScheduler:

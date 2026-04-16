@@ -39,7 +39,7 @@ from news.summaries.base_summarizer import BasePipelineJob
 from rag_v1.db.pg import conn_ctx
 from sk_logging import get_logger
 
-_LOG = get_logger("sage_kaizen.news.article_summarizer")
+_LOG = get_logger("sage_kaizen.news.article_summarizer", file_name="news_agent.log")
 
 # Timeout for article summarization calls.
 # read_s=120 allows ~1000-token articles with some headroom; individual

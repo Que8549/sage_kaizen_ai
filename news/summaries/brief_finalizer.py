@@ -36,7 +36,7 @@ from news.summaries.base_summarizer import BasePipelineJob
 from rag_v1.db.pg import conn_ctx
 from sk_logging import get_logger
 
-_LOG = get_logger("sage_kaizen.news.brief_finalizer")
+_LOG = get_logger("sage_kaizen.news.brief_finalizer", file_name="news_agent.log")
 
 # Timeout for brief finalization calls.
 # read_s=300 allows ARCHITECT to write multi-paragraph prose briefs (2048 tokens)

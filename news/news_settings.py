@@ -26,15 +26,37 @@ from functools import cached_property
 
 from pg_settings import PgSettings
 from pydantic import field_validator
-from pydantic_settings import SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# ---------------------------------------------------------------------------
+# Module-level PgSettings singleton
+# ---------------------------------------------------------------------------
+# NewsSettings uses env_prefix="NEWS_" for its own fields.  If it inherited
+# PgSettings directly that prefix would apply to the inherited PG_ fields too
+# (pydantic-settings applies model_config env_prefix to ALL fields), causing
+# it to look for NEWS_PG_USER instead of PG_USER.  We avoid the conflict by
+# keeping NewsSettings as a plain BaseSettings subclass and delegating pg_dsn
+# to a separate PgSettings instance that has no prefix.
+_pg_settings: PgSettings | None = None
+_pg_settings_lock = threading.Lock()
 
 
-class NewsSettings(PgSettings):
+def _get_pg_settings() -> PgSettings:
+    global _pg_settings
+    if _pg_settings is None:
+        with _pg_settings_lock:
+            if _pg_settings is None:
+                _pg_settings = PgSettings()
+    return _pg_settings
+
+
+class NewsSettings(BaseSettings):
     """
     News runtime configuration.
 
-    Inherits PgSettings so PostgreSQL DSN is available on the same object.
-    Add NEWS_ env vars to override any field without touching this file.
+    PG credentials are read from PG_USER / PG_PASSWORD / PG_HOST / PG_PORT /
+    PG_DB env vars (no NEWS_ prefix) via the shared PgSettings class.
+    All other news fields accept NEWS_* env vars or the project-root .env file.
     """
 
     model_config = SettingsConfigDict(
@@ -44,6 +66,11 @@ class NewsSettings(PgSettings):
         extra="ignore",
         env_prefix="NEWS_",
     )
+
+    @property
+    def pg_dsn(self) -> str:
+        """PostgreSQL DSN built from PG_* env vars (no NEWS_ prefix)."""
+        return _get_pg_settings().pg_dsn
 
     # ── Image storage ──────────────────────────────────────────────────────────
     image_storage_path: str = r"H:\article_images"

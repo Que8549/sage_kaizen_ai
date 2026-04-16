@@ -64,7 +64,7 @@ from news.news_settings import get_news_settings
 from rag_v1.db.pg import conn_ctx
 from sk_logging import get_logger
 
-_LOG = get_logger("sage_kaizen.news.base_summarizer")
+_LOG = get_logger("sage_kaizen.news.base_summarizer", file_name="news_agent.log")
 
 # ---------------------------------------------------------------------------
 # Compiled regex — strips <think>…</think> blocks from all brain responses.

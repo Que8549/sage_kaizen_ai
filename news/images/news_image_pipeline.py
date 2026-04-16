@@ -38,7 +38,7 @@ from rag_v1.db.pg import conn_ctx
 from rag_v1.wiki.mm_embed_client import MmEmbedClient
 from sk_logging import get_logger
 
-_LOG = get_logger("sage_kaizen.news.image_pipeline")
+_LOG = get_logger("sage_kaizen.news.image_pipeline", file_name="news_agent.log")
 
 # ---------------------------------------------------------------------------
 # SQL

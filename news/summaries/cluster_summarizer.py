@@ -35,7 +35,7 @@ from news.summaries.base_summarizer import BasePipelineJob
 from rag_v1.db.pg import conn_ctx
 from sk_logging import get_logger
 
-_LOG = get_logger("sage_kaizen.news.cluster_summarizer")
+_LOG = get_logger("sage_kaizen.news.cluster_summarizer", file_name="news_agent.log")
 
 # Timeout for cluster summarization calls.
 # read_s=180 allows time for ARCHITECT to synthesize large clusters (>5 articles)

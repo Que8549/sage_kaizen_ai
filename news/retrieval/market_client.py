@@ -19,7 +19,7 @@ from typing import Optional
 
 from sk_logging import get_logger
 
-_LOG = get_logger("sage_kaizen.news.market_client")
+_LOG = get_logger("sage_kaizen.news.market_client", file_name="news_agent.log")
 
 # ---------------------------------------------------------------------------
 # Ticker normalization map — common names → ticker symbols

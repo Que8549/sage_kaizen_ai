@@ -6,6 +6,8 @@ import re
 import time
 from typing import List, Tuple
 
+from rapidfuzz import fuzz as _fuzz
+
 from openai_client import HttpTimeouts, stream_chat_completions
 from sk_logging import get_logger
 
@@ -83,6 +85,9 @@ _SEARCH_TEMPORAL_HINTS: Tuple[str, ...] = (
     "exchange rate", "market today", "stock market today",
     # News — recent past and ongoing updates
     "what happened yesterday", "latest on",
+    # News — natural "top news" variants that don't use "today's news" word order
+    "top news", "today's top", "what's the news", "what is the news",
+    "what's happening today", "what's going on today",
 )
 
 # Explicit search-intent phrases — user is clearly asking for a web search.
@@ -116,6 +121,44 @@ _CATEGORY_KEYWORDS: dict[str, Tuple[str, ...]] = {
 }
 
 _DEFAULT_SEARCH_CATEGORIES: Tuple[str, ...] = ("general", "news")
+
+# ---------------------------------------------------------------------------
+# Fuzzy phrase matching — catches paraphrases the exact lists miss
+# ---------------------------------------------------------------------------
+# Threshold calibration:
+#   76 is the lowest value that avoids the most common false positive:
+#   "latest Python version" (token_set_ratio vs "latest news" ≈ 73).
+#   It still catches clear paraphrases like "what's today's top news?" vs
+#   "top news" (ratio = 100 when one phrase's tokens are a full subset).
+_FUZZY_SEARCH_THRESHOLD = 76
+
+
+def _fuzzy_matches_any(
+    txt: str,
+    phrases: Tuple[str, ...],
+    threshold: int = _FUZZY_SEARCH_THRESHOLD,
+) -> bool:
+    """
+    Two-stage phrase match against a tuple of reference phrases.
+
+    Stage 1 — exact substring (zero overhead, handles all pre-enumerated phrases).
+    Stage 2 — token_set_ratio fuzzy match, applied only to phrases with ≥ 2 words.
+      Single-word phrases are excluded from fuzzy to prevent false positives
+      (e.g. "current" matching "current best practice").
+
+    token_set_ratio splits both strings into word tokens, sorts them, and
+    computes the ratio of the sorted-intersection vs. sorted-remainder pairs.
+    When one phrase's tokens are fully contained in the other, the score is 100,
+    making it ideal for catching word-order variants and natural extensions
+    (e.g. "today's top news stories" matching "top news").
+    """
+    for phrase in phrases:
+        if phrase in txt:
+            return True
+    for phrase in phrases:
+        if len(phrase.split()) >= 2 and _fuzz.token_set_ratio(txt, phrase) >= threshold:
+            return True
+    return False
 
 # ---------------------------------------------------------------------------
 # Music query detection
@@ -195,19 +238,13 @@ def _detect_search(txt: str) -> Tuple[bool, Tuple[str, ...]]:
     SearXNG categories to query.
 
     Returns (needs_search, search_categories).
-    Conservative by design — only triggers on clear signals to avoid
-    unnecessary latency on every turn.
+    Uses two-stage matching: exact substring first, then token-set fuzzy
+    match for multi-word phrases (see _fuzzy_matches_any).
     """
-    for phrase in _SEARCH_TEMPORAL_HINTS:
-        if phrase in txt:
-            categories = _infer_categories(txt)
-            return True, categories
-
-    for phrase in _SEARCH_INTENT_HINTS:
-        if phrase in txt:
-            categories = _infer_categories(txt)
-            return True, categories
-
+    if _fuzzy_matches_any(txt, _SEARCH_TEMPORAL_HINTS) or \
+       _fuzzy_matches_any(txt, _SEARCH_INTENT_HINTS):
+        categories = _infer_categories(txt)
+        return True, categories
     return False, ()
 
 

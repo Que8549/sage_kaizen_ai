@@ -39,7 +39,7 @@ from pg_settings import PgSettings
 from rag_v1.db.pg import conn_ctx
 from sk_logging import get_logger
 
-_LOG = get_logger("sage_kaizen.news.topic_collector")
+_LOG = get_logger("sage_kaizen.news.topic_collector", file_name="news_agent.log")
 
 # ---------------------------------------------------------------------------
 # SQL constants

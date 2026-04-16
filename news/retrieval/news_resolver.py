@@ -30,11 +30,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from rapidfuzz import fuzz as _fuzz
+
 from news.news_settings import get_news_settings
 from rag_v1.db.pg import conn_ctx
 from sk_logging import get_logger
 
-_LOG = get_logger("sage_kaizen.news.resolver")
+_LOG = get_logger("sage_kaizen.news.resolver", file_name="news_agent.log")
 
 # ---------------------------------------------------------------------------
 # Query classification
@@ -53,6 +55,14 @@ _NEWS_INTENT_PHRASES: tuple[str, ...] = (
     "news of the war", "news since",
     "last 7 days", "past week news", "this week's news",
     "news summary",
+    # Natural variants not covered by the phrases above
+    "top news",           # "what's today's top news?", "top news stories"
+    "today's top",        # "today's top news", "today's top stories" (redundant but safe)
+    "what's the news",    # "what's the news today?", "what's the news this week?"
+    "what is the news",   # same, uncontracted
+    "what's happening today", "what's going on today",
+    "give me the news", "tell me the news",
+    "catch me up", "catch up on the news",
 )
 
 # Phrases that indicate a market / price lookup.
@@ -68,6 +78,9 @@ _MARKET_PHRASES: tuple[str, ...] = (
 
 # Common ticker patterns in user messages (e.g. "NVDA", "BTC-USD").
 _TICKER_PATTERN = re.compile(r"\b([A-Z]{1,5}(?:-[A-Z]{2,3})?)\b")
+
+# Fuzzy match threshold (same calibration as router.py — see comments there).
+_FUZZY_THRESHOLD = 76
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -187,9 +200,21 @@ class NewsResolver:
     # ------------------------------------------------------------------
 
     def _is_news_query(self, txt: str) -> bool:
-        return any(p in txt for p in _NEWS_INTENT_PHRASES)
+        # Stage 1: exact substring (zero cost, handles all enumerated phrases).
+        for p in _NEWS_INTENT_PHRASES:
+            if p in txt:
+                return True
+        # Stage 2: fuzzy — catches paraphrases not in the list.
+        # Only applied to multi-word phrases; single words are too short to
+        # fuzzy-match reliably without false positives.
+        for p in _NEWS_INTENT_PHRASES:
+            if len(p.split()) >= 2 and _fuzz.token_set_ratio(txt, p) >= _FUZZY_THRESHOLD:
+                return True
+        return False
 
     def _is_market_query(self, txt: str) -> bool:
+        # Market queries contain specific financial terms — keep strict matching
+        # to avoid false positives on queries like "how much is this worth".
         return any(p in txt for p in _MARKET_PHRASES)
 
     # ------------------------------------------------------------------

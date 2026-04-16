@@ -39,7 +39,7 @@ from typing import Any, Optional
 
 from sk_logging import get_logger
 
-_LOG = get_logger("sage_kaizen.news.pipeline_runner")
+_LOG = get_logger("sage_kaizen.news.pipeline_runner", file_name="news_agent.log")
 
 # ---------------------------------------------------------------------------
 # Stage definitions
@@ -130,7 +130,16 @@ def _check_brains() -> tuple[bool, str, bool, str]:
 
 def _stage_collect() -> dict:
     from news.collectors.topic_collector import TopicCollector
-    return TopicCollector().run_once() or {}
+    r = TopicCollector().run_once()
+    # CollectionResult is a dataclass — convert to plain dict for the UI.
+    return {
+        "topics_run":     r.topics_run,
+        "topics_ok":      r.topics_ok,
+        "topics_failed":  r.topics_failed,
+        "new_articles":   r.total_new,
+        "updated":        r.total_updated,
+        "duration_s":     round(r.duration_s, 2),
+    }
 
 
 def _stage_enrich() -> dict:
