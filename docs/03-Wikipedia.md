@@ -49,7 +49,7 @@ For the English Wikipedia full corpus with images, the current configured baseli
 - **Input ZIM**
   - `C:\Users\Alquin\AppData\Roaming\kiwix-desktop\wikipedia_en_all_maxi_2025-08.zim`
 - **Output root**
-  - `I:\llm_data\wikipedia_maxi_2025_08`
+  - `H:\llm_wiki_data`
 
 This is taken directly from the current implementation in `zim_dump.py`.
 
@@ -282,7 +282,7 @@ The output tree is bucketed as:
 Example:
 
 ```text
-I:\llm_data\wikipedia_maxi_2025_08\
+H:\llm_wiki_data\
     A\
         alb\
             Albert_Einstein\
@@ -570,7 +570,7 @@ aria2c https://download.kiwix.org/zim/wikisource/wikipedia_en_all_maxi_2026-02.z
 PREFERRED
 Use multi-connection + resume support:
 aria2c ^
-  -d I:\llm_wiki_data_download ^
+  -d C:\Users\Alquin\Desktop\wiki_download ^
   -o wikipedia_en_all_maxi_2026-02.zim ^
   -x 16 -s 16 -k 1M -c ^
   --file-allocation=trunc ^

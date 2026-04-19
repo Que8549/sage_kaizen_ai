@@ -32,16 +32,22 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 
 ### Core modules (v1)
 - **Dual brains** (two llama-server instances):
-  - FAST brain (default): `Qwen2.5-Omni-7B-Q8_0` (port 8011, RTX 5080/CUDA1) — multimodal: text + image + audio input via mmproj encoder
-  - ARCHITECT brain (on demand): `Qwen3.5-27B-Q6_K` (port 8012, RTX 5090/CUDA0) — 64K context, reasoning mode (`<think>` tokens), hybrid DeltaNet+attention
-- **Router**: selects brain, applies templates, escalates to ARCHITECT when needed
-- **Streamlit UI**: chat interface, status, templates visible, debugging-friendly
-- **Pi Agent Transport**: ZeroMQ messaging to Raspberry Pi agents (device orchestrator)
-- **RAG v1**: ingest (folder + RSS + web) into PostgreSQL + pgvector; query-time retrieval
+  - FAST brain (default): `Qwen2.5-Omni-7B-Q6_K` (port 8011, RTX 5080/CUDA1) — multimodal: text + image + audio input via mmproj encoder
+  - ARCHITECT brain (on demand): `Qwen3.5-27B-Q6_K` (port 8012, RTX 5090/CUDA0) — **128K context**, reasoning mode (`<think>` tokens), speculative decoding (ngram-map-k), hybrid DeltaNet+attention
+  - Summarizer (lightweight): `Qwen2.5-3B-Q8_0` (port 8013, CPU-only) — search evidence summarization before context injection
+- **Router**: selects brain, applies templates, escalates to ARCHITECT when needed (`router.py`)
+- **Streamlit UI**: chat interface, status, templates visible, debugging-friendly (`ui_streamlit_server.py`)
+- **Chat Service**: full turn lifecycle — route → memory → prompt → parallel RAG → stream (`chat_service.py`)
+- **Pi Agent Transport**: ZeroMQ messaging to Raspberry Pi agents (`voice_bridge.py` owns host ZMQ; `agents/` planned)
+- **RAG v1**: ingest (folder + RSS + web + ZIM) into PostgreSQL + pgvector; parallel query-time retrieval
   - `rag_v1/wiki/` — Wikipedia multimodal RAG (jina-clip-v2 embeddings, text + image)
   - `rag_v1/media/` — Cross-modal ingest: images (jina-clip-v2, 1024-dim) + audio (CLAP, 512-dim)
   - `rag_v1/embed/` — BGE-M3 embed client (wraps port 8020)
   - `rag_v1/retrieve/` — retriever + citation formatting
+  - `rag_v1/runtime/context_injector.py` — parallel 5-worker assembly (doc-RAG · wiki · search · music · news)
+  - `rag_v1/runtime/router_integration.py` — `RagInjector` wires router decisions to context_injector
+- **Memory Service**: persistent episode memory, user profiles, learned rules (`memory/service.py`); lazy singleton with graceful degradation
+- **News Module**: news collection, clustering, enrichment, image pipeline (`news/`)
 - **Docs Generator v1**: repo scan → README + Mermaid diagrams (planned)
 - **Review Service**: LangGraph-based codebase review service triggered by chat phrases; generates ADRs, patches, and review reports using ARCHITECT brain
   - `review_service/graph.py` — sequential StateGraph: scope → subprocess_checks → web_researcher → architect_reviewer → flags_sanity → docs_drift → synthesizer → human_gate → output_writer
@@ -49,17 +55,28 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
   - `review_service/checkpointer.py` — AsyncPostgresSaver using pg_settings.py DSN; dedicated `langgraph` schema
   - `review_service/trigger.py` — `is_review_command()` heuristic; called by router.py
   - `review_service/output/` — review_writer, adr_writer, patch_writer (write to `reviews/`, `docs/03-DECISIONS/`, `patches/`)
+- **Supporting root-level modules**:
+  - `document_parser.py` — multi-format doc extraction (docx, xlsx, csv, code, txt, etc.)
+  - `input_guard.py` — prompt-injection defense for all external content (RAG chunks, web snippets)
+  - `env_utils.py` — per-call env var accessors (`env_bool`, `env_int`, `env_float`, `env_str`); re-read every turn
+  - `mermaid_streamlit.py` — Mermaid diagram detection and rendering
+  - `sk_logging.py` — centralized rotating log configuration
+  - `pg_settings.py` — Pydantic BaseSettings for PostgreSQL DSN
+  - `voice_bridge.py` — ZMQ bridge binding ports 5790/5791/5792 for the voice app
 - Review `config/brains/brains.yaml` for latest AI models and all server settings
 
 ### Service / Port Inventory
 | Service | Model | Port | GPU | Purpose |
 |---------|-------|------|-----|---------|
-| FAST brain | Qwen2.5-Omni-7B-Q8_0 | 8011 | CUDA1 (5080) | Multimodal chat |
-| ARCHITECT brain | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (5090) | Deep reasoning |
+| FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (5080) | Multimodal chat (text + image + audio via mmproj) |
+| ARCHITECT brain | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (5090) | Deep reasoning; 128K ctx; `<think>` tokens |
+| Summarizer | Qwen2.5-3B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
 | BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA0 (5090) | RAG text embeddings (1024-dim) |
-| Wiki embed (jina-clip-v2) | jina-clip-v2 | 8031 | CUDA0 (5090) | Wikipedia multimodal embeddings (1024-dim) |
+| Wiki embed A | jina-clip-v2 | 8031 | CUDA0 (5090) | Wikipedia multimodal embeddings (normal operation) |
+| Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (5080) | Wikipedia ingest only (2nd worker; FAST brain must be stopped) |
 | CLAP embed | clap-htsat-unfused | 8040 | CUDA1 (5080) | Audio embeddings (512-dim) |
 | SearXNG | (metasearch) | 8080 | Docker Desktop | Live web search JSON API |
+| Voice STT/TTS | Whisper distil-large-v3.5 + Kokoro-82M | ZMQ 5790/5791/5792 | CPU (ONNX) | Voice: transcript in, token stream out, barge-in |
 
 ### Live Web Search (`search/`)
 - `search/models.py` — `WebResult` + `SearchEvidence` normalized citation schema
@@ -70,12 +87,6 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 - Router sets `needs_search=True` + `search_categories` on `RouteDecision` when live data is needed
 - `context_injector.apply_rag_and_wiki_parallel()` runs a 3rd parallel worker; injects `<search_context>` block; returns 4-tuple `(messages, rag_sources, wiki_images, search_evidence)`
 - SearXNG Docker instance: `F:\Projects\searxng\` — configured with JSON format enabled, limiter disabled, CORS open
-
-### Supporting modules (root-level)
-- `mermaid_streamlit.py` — Mermaid diagram detection and rendering in the chat UI
-- `sk_logging.py` — centralized rotating log configuration
-- `pg_settings.py` — Pydantic BaseSettings for PostgreSQL DSN (feedback dataset DB)
-- `voice_bridge.py` — ZMQ bridge binding ports 5790/5791/5792 for the voice app
 
 ### User-facing behaviors
 - Creative writing (stories, poems)
@@ -217,40 +228,34 @@ If a commit message says "reverted", "removed", "uninstalled", or describes a fa
 
 ---
 
-## 11) FAST Brain Model — Upgrade Research Log (2026-04-07)
+## 11) FAST Brain Model — Upgrade Research Log (2026-04-07, updated 2026-04-19)
 
-### Current State (as of 2026-04-07)
-- **Model**: `Qwen2.5-Omni-7B-Q8_0` — the only viable audio-capable model for the RTX 5080 in llama.cpp
-- **llama.cpp build**: b8639 (early April 2025) — outdated; rebuild recommended
+### Current State (as of 2026-04-19)
+- **Model**: `Qwen2.5-Omni-7B-Q6_K` — **Q6_K downquant applied**; saves ~1.85 GB VRAM vs Q8_0 with negligible quality loss (~0.1–0.2 PPL)
+- **llama.cpp build**: b8639 (early April 2025) — outdated; rebuild recommended for SM_120 Blackwell kernel optimizations
 - **Known limitation**: Mid-response Chinese language code-switching during long-form generation (confirmed Qwen2.5-Omni-7B training data bias; see QwenLM/Qwen2.5 issue #347)
-- **Workaround applied**: `router.py` now routes creative writing (`CREATIVE_HINTS`) to ARCHITECT (score +3); `prompt_library.py` `sage_fast_core` includes English-only instruction
+- **Workaround applied**: `router.py` routes creative writing (`CREATIVE_HINTS`) to ARCHITECT (score +3); `prompt_library.py` `sage_fast_core` includes English-only instruction
 
-### Why No Upgrade Is Possible Yet
-Audio file upload support (`kind="audio"` in `chat_service.py`) depends on llama.cpp's mmproj audio encoder. In the llama.cpp ecosystem (as of 2026-04-07), **only Qwen2.5-Omni-7B** combines all three capabilities: audio input + image/video input + general text reasoning. Every other capable model fails on at least one requirement:
+### Q6_K VRAM Budget (Applied)
+```
+Model weights:   ~6.25 GB
+mmproj F16:      ~2.64 GB
+KV cache q8_0:   ~0.45 GB
+Compute buffer:  ~0.50 GB
+Total:           ~9.84 GB   (headroom: ~6.2 GB on RTX 5080's 16 GB)
+```
+
+### Why No Further Model Upgrade Is Possible Yet
+Audio file upload support (`kind="audio"` in `chat_service.py`) depends on llama.cpp's mmproj audio encoder. In the llama.cpp ecosystem (as of 2026-04-19), **only Qwen2.5-Omni-7B** combines all three capabilities: audio input + image/video input + general text reasoning. Every other capable model fails on at least one requirement:
 
 | Candidate | Blocker |
 |---|---|
 | Qwen3-8B / Qwen3-VL-8B | No audio encoder — audio uploads break |
 | Gemma 3 12B | No audio encoder in llama.cpp |
 | Qwen3-Omni-30B-A3B | Fits on 5090 but 5090 is fully occupied by ARCHITECT + BGE-M3 (~29 GB used of 32 GB) |
-| Qwen3.5-Omni | llama.cpp audio support confirmed incomplete as of 2026-04-07 |
+| Qwen3.5-Omni | llama.cpp audio support confirmed incomplete as of 2026-04-19 |
 | Voxtral-Mini-3B | Known crash on audio encoding — llama.cpp issue #21080 |
 | Ultravox v0.5/v0.6 (8B) | Audio-to-text only; no vision, no general reasoning |
-
-### VRAM Budget — Current vs Proposed Q6_K Downquant
-If English stability is needed on FAST without a model change, dropping to Q6_K saves ~1.85 GB with negligible quality loss (~0.1–0.2 PPL):
-
-```
-# Current (Q8_0)                    # Proposed (Q6_K)
-Model weights:   ~8.10 GB           Model weights:   ~6.25 GB  (-1.85 GB)
-mmproj F16:      ~2.64 GB           mmproj F16:      ~2.64 GB  (unchanged)
-KV cache q8_0:   ~0.45 GB           KV cache q8_0:   ~0.45 GB  (unchanged)
-Compute buffer:  ~0.50 GB           Compute buffer:  ~0.50 GB  (unchanged)
-Total:          ~11.70 GB           Total:           ~9.84 GB
-Headroom:        ~4.3 GB            Headroom:        ~6.2 GB  (+1.9 GB)
-```
-Q6_K GGUF: https://huggingface.co/ggml-org/Qwen2.5-Omni-7B-GGUF  
-`brains.yaml` change: update `model:` path and `alias:` only — all flags, mmproj, and ports unchanged.
 
 ### Functionality Checklist (What Must Be Preserved on Any FAST Upgrade)
 Before proposing or applying a FAST brain model change, verify all of the following are maintained:
