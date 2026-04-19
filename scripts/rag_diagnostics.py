@@ -12,13 +12,14 @@ What it does:
 """
 from __future__ import annotations
 
+import io
 import os
 import sys
 import textwrap
 
 # Force UTF-8 output so Windows cp1252 terminal does not blow up on
 # special chars that may appear in file paths or content previews.
-if hasattr(sys.stdout, "reconfigure"):
+if isinstance(sys.stdout, io.TextIOWrapper):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import httpx
@@ -133,12 +134,23 @@ def main() -> None:
         sys.exit(1)
     print(f"OK  (dim={len(q_emb)})")
 
+    # pgvector text format '[0.1, 0.2, ...]' — always works regardless of
+    # pgvector cast availability; psycopg3 sends this as a plain text value
+    # and PostgreSQL applies text::vector, which is defined in every pgvector version.
+    q_vec = "[" + ",".join(repr(x) for x in q_emb) + "]"
+
     # Step 2 -- query
     print("Step 2: Running pgvector query ...")
     print()
     try:
-        with psycopg.connect(PG_DSN, row_factory=dict_row) as conn:
-            rows = conn.execute(SQL, (q_emb, q_emb, MAX_DISTANCE, q_emb, TOP_K)).fetchall()
+        with psycopg.connect(PG_DSN, autocommit=True) as conn:
+            conn.execute("SET hnsw.ef_search = 100")
+            # Use an explicit cursor with row_factory=dict_row so Pylance
+            # can infer Cursor[DictRow] via cursor()'s own CursorRow TypeVar,
+            # which is free (not the class-level Row default TupleRow).
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(SQL, (q_vec, q_vec, MAX_DISTANCE, q_vec, TOP_K))
+                rows = cur.fetchall()
     except Exception as e:
         print(f"DB ERROR: {e}")
         sys.exit(1)

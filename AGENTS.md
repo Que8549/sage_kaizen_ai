@@ -16,12 +16,18 @@ Assume:
 
 ## 2) WHAT (What you’ll be changing)
 Typical work areas:
-- Streamlit UI chat experience + server status indicators
-- Router logic (FAST vs ARCHITECT, template application, escalation)
-- llama-server orchestration (process management, logging, GPU flags)
-- RAG ingestion (folder/rss/web) + shared utilities
-- Pi agent orchestration (ZeroMQ command schema + safety)
-- Repo docs generator (README + Mermaid)
+- Streamlit UI chat experience + server status indicators (`ui_streamlit_server.py`)
+- Router logic (FAST vs ARCHITECT, template application, escalation) (`router.py`)
+- Chat service turn lifecycle (memory, prompts, RAG, streaming) (`chat_service.py`)
+- llama-server orchestration (process management, logging, GPU flags) (`server_manager.py`)
+- RAG ingestion (folder/rss/web/wiki/media) + retrieval pipeline (`rag_v1/`)
+- Memory system (episode retrieval, profiles, learned rules) (`memory/`)
+- Live web search integration (SearXNG, scoring, summarization) (`search/`)
+- News collection and enrichment (`news/`)
+- Prompt-injection defense (`input_guard.py`)
+- Multi-format document parsing (`document_parser.py`)
+- Pi agent orchestration (ZeroMQ command schema + safety) (`agents/` — planned)
+- Review service (LangGraph, human gate, ADR/patch generation) (`review_service/`)
 
 ---
 
@@ -89,9 +95,11 @@ See `CLAUDE.md` invariants — do not violate them.
 ---
 
 ## 7) Conventions to Respect
-- Python typing is a first-class requirement (Pylance clean).
-- Windows cmd.exe syntax is required when giving commands (`^` for line continuation).
+- Python typing is a first-class requirement (Pylance clean); no `# type: ignore` without explanation.
+- Use Unix shell syntax in bash commands (forward slashes, `/dev/null`); PowerShell when explicitly needed.
 - Avoid refactors that change architecture without adding an ADR (see `docs/03-DECISIONS/`).
+- All external content (RAG chunks, web snippets) must pass through `input_guard.sanitize_chunk()` before context injection.
+- New optional subsystems must degrade gracefully — never let a missing service abort a turn.
 
 ---
 
