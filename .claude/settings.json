@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"F:\\\\Projects\\\\sage_kaizen_ai\" -Directory)",
+      "Bash(Select-Object Name)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "PowerShell(*)",
+      "WebFetch(domain:www.psycopg.org)",
+      "Bash(Test-Path \"F:\\\\Projects\\\\sage_kaizen_ai\\\\pyrightconfig.json\")"
+    ],
+    "additionalDirectories": [
+      "F:\\Projects\\sage_kaizen_ai_ingest"
+    ]
+  }
+}

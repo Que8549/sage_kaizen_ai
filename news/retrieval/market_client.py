@@ -128,7 +128,7 @@ class MarketClient:
             end   = target_date + timedelta(days=1)
             hist  = yf.download(ticker, start=start, end=end,
                                 progress=False, auto_adjust=True)
-            if hist.empty:
+            if hist is None or hist.empty:
                 return {"error": f"No data for {ticker} on {target_date}"}
             close = float(hist["Close"].iloc[-1])
             return {
@@ -152,12 +152,12 @@ class MarketClient:
             start = end - timedelta(days=days)
             hist  = yf.download(ticker, start=start, end=end,
                                 progress=False, auto_adjust=True)
-            if hist.empty:
+            if hist is None or hist.empty:
                 return {"error": f"No history for {ticker}"}
             rows = []
             for idx_date, row in hist.iterrows():
                 rows.append({
-                    "date":  str(idx_date.date()),
+                    "date":  str(idx_date)[:10],
                     "open":  round(float(row["Open"]),  4),
                     "high":  round(float(row["High"]),  4),
                     "low":   round(float(row["Low"]),   4),

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+# NOTE: This file is intentionally duplicated in sage_kaizen_ai_ingest/.
+# Each copy's project_root() resolves to its own directory so that log files
+# land in the correct project's logs/ folder. Do not consolidate into a shared
+# module — the per-project copy is the correct design.
+
 from pathlib import Path
 import logging
 from logging.handlers import RotatingFileHandler

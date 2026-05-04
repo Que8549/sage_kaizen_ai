@@ -321,7 +321,7 @@ wiki_embed:
     # wiki_ingest.py uses the same values as its per-call batch size so that
     # ingest calls always stay within the service limits.
     text_batch: 256
-    image_batch: 64
+    image_batch: 96
 
     # CUDA0 contention guard: after idle_timeout_s seconds of no requests,
     # the service offloads jina-clip-v2 from GPU to CPU (freeing ~2 GB VRAM).
@@ -511,7 +511,8 @@ voice:
 # -----------------------------------------------------------------------------
 summarizer:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
-  model: "E:/Qwen2.5-3B/qwen2.5-3b-instruct-q8_0.gguf"
+  # model: "E:/Qwen2.5-3B/qwen2.5-3b-instruct-q8_0.gguf"
+  model: "E:/Qwen3-4B-GGUF/Qwen3-4B-Q8_0.gguf"
   log: "F:/Projects/sage_kaizen_ai/logs/summarizer_server.log"
   startup_timeout_s: 120   # small model loads in < 30 s on CPU
 
@@ -519,7 +520,7 @@ summarizer:
     host: "127.0.0.1"
     port: 8013
 
-    alias: "Qwen2.5-3B-Summarizer"
+    alias: "Qwen3-4B-Summarizer"
 
     # CPU-only — no VRAM cost.  All CUDA0/CUDA1 headroom preserved for brains.
     n_gpu_layers: 0

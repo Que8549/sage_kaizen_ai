@@ -22,8 +22,7 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-import psycopg
-from psycopg.rows import dict_row, DictRow
+from psycopg.rows import dict_row
 
 from rag_v1.db.pg import get_conn
 from rag_v1.wiki.mm_embed_client import MmEmbedClient

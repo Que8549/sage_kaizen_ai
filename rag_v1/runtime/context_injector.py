@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 # Module-level executor — threads are kept alive for the process lifetime so
 # thread creation cost is paid once, not on every chat turn.
@@ -139,11 +139,11 @@ def _get_wiki_retriever() -> "WikiRetriever | None":
 # ---------------------------------------------------------------------------
 
 def apply_rag(
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     user_text: str,
     decision: Any,  # RouteDecision — duck-typed to avoid cross-package import
     rag_enabled: bool | None = None,
-) -> Tuple[List[Dict[str, Any]], list]:
+) -> tuple[list[dict[str, Any]], list]:
     """
     Drop-in RAG enrichment.  Call AFTER building messages, BEFORE sending to llama-server.
 
@@ -221,7 +221,7 @@ def _fetch_wiki_result(
         if result.empty or not result.chunks:
             return "", []
 
-        lines: List[str] = []
+        lines: list[str] = []
         for c in result.chunks:
             section = " > ".join(c.section_path) if c.section_path else "Introduction"
             lines.append(f"[{c.title} / {section} | score={c.score:.3f}]\n{sanitize_chunk(c.text, max_chars=None)}")
@@ -437,7 +437,7 @@ def _fetch_news_result(user_text: str) -> str:
 
 
 def apply_rag_and_wiki_parallel(
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     user_text: str,
     decision: Any,
     wiki_enabled: bool | None = None,
@@ -445,7 +445,7 @@ def apply_rag_and_wiki_parallel(
     fast_model_id: str | None = None,
     summarizer_base_url: str | None = None,
     summarizer_model_id: str | None = None,
-) -> Tuple[List[Dict[str, Any]], list, list, "Optional[SearchEvidence]", str]:
+) -> tuple[list[dict[str, Any]], list, list, "SearchEvidence | None", str]:
     """
     Run document RAG, wiki RAG, live web search, and music retrieval
     concurrently, then inject all into messages.

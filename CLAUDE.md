@@ -34,7 +34,7 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 - **Dual brains** (two llama-server instances):
   - FAST brain (default): `Qwen2.5-Omni-7B-Q6_K` (port 8011, RTX 5080/CUDA1) — multimodal: text + image + audio input via mmproj encoder
   - ARCHITECT brain (on demand): `Qwen3.5-27B-Q6_K` (port 8012, RTX 5090/CUDA0) — **128K context**, reasoning mode (`<think>` tokens), speculative decoding (ngram-map-k), hybrid DeltaNet+attention
-  - Summarizer (lightweight): `Qwen2.5-3B-Q8_0` (port 8013, CPU-only) — search evidence summarization before context injection
+  - Summarizer (lightweight): `Qwen3-4B-Q8_0` (port 8013, CPU-only) — search evidence summarization before context injection
 - **Router**: selects brain, applies templates, escalates to ARCHITECT when needed (`router.py`)
 - **Streamlit UI**: chat interface, status, templates visible, debugging-friendly (`ui_streamlit_server.py`)
 - **Chat Service**: full turn lifecycle — route → memory → prompt → parallel RAG → stream (`chat_service.py`)
@@ -70,7 +70,7 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 |---------|-------|------|-----|---------|
 | FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (5080) | Multimodal chat (text + image + audio via mmproj) |
 | ARCHITECT brain | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (5090) | Deep reasoning; 128K ctx; `<think>` tokens |
-| Summarizer | Qwen2.5-3B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
+| Summarizer | Qwen3-4B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
 | BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA0 (5090) | RAG text embeddings (1024-dim) |
 | Wiki embed A | jina-clip-v2 | 8031 | CUDA0 (5090) | Wikipedia multimodal embeddings (normal operation) |
 | Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (5080) | Wikipedia ingest only (2nd worker; FAST brain must be stopped) |
@@ -224,6 +224,7 @@ If a commit message says "reverted", "removed", "uninstalled", or describes a fa
 ## 10) Related and Associated Projects
  - Integrate with Sage Kaizen Voice (voice app) located at F:\Projects\sage_kaizen_ai_voice\
  - Sage Kaizen local-first AI assistant (main app) located at F:\Projects\sage_kaizen_ai\
+ - Sage Kaizen ingestation F:\Projects\sage_kaizen_ai_ingest
  - SearXNG - local search engine running at http://localhost:8080/ located at F:\Projects\searxng
 
 ---

@@ -38,16 +38,19 @@ _local = threading.local()
 
 def _thread_conn(dsn: str) -> psycopg.Connection[DictRow]:
     """Return or create a cached autocommit connection for this thread + DSN."""
-    cache: dict = getattr(_local, "cache", None)
-    if cache is None:
-        _local.cache = cache = {}
+    if not hasattr(_local, "cache"):
+        _local.cache = {}
+    cache: dict[str, psycopg.Connection[DictRow]] = _local.cache
 
-    conn = cache.get(dsn)
+    conn: psycopg.Connection[DictRow] | None = cache.get(dsn)
     if conn is None or conn.closed:
-        conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
+        conn = cast(
+            psycopg.Connection[DictRow],
+            psycopg.connect(dsn, row_factory=dict_row, autocommit=True),  # type: ignore[arg-type]
+        )
         cache[dsn] = conn
 
-    return cast(psycopg.Connection[DictRow], conn)
+    return conn
 
 
 def get_conn(dsn: str) -> psycopg.Connection[DictRow]:

@@ -1,0 +1,6 @@
+{
+  "pythonVersion": "3.14",
+  "extraPaths": [
+    "../sage_kaizen_ai_ingest"
+  ]
+}
