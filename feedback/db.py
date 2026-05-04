@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, cast
+from typing import Any, cast
 
 import psycopg
 from psycopg import sql as _sql
@@ -52,9 +52,9 @@ def insert_rating(
     model_id: str,
     endpoint: str,
     route_score: float,
-    route_reasons: List[Any],
-    templates: List[Any],
-    prompt_messages: List[Any],
+    route_reasons: list[Any],
+    templates: list[Any],
+    prompt_messages: list[Any],
     assistant_text: str,
     thumb: int,
     notes: str = "",
@@ -97,7 +97,7 @@ def insert_rating(
 # Stats                                                                         #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def fetch_stats(conn: psycopg.Connection[DictRow]) -> Dict[str, int]:
+def fetch_stats(conn: psycopg.Connection[DictRow]) -> dict[str, int]:
     """Return rating counters for the sidebar widget."""
     with conn.cursor() as cur:
         row = cur.execute(
@@ -128,7 +128,7 @@ def fetch_kto_rows(
     brain: str | None = None,
     thumb: int | None = None,
     min_chars: int = 50,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Return all rows that pass filters, ordered by ts_utc ascending.
 
     Args:

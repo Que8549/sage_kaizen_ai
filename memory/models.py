@@ -9,7 +9,6 @@ for DB row types see schemas.py.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,15 +21,15 @@ class MemoryContextRequest(BaseModel):
     """Everything the retriever needs to build a memory bundle for one turn."""
     user_id: str
     project_id: str = "sage_kaizen"
-    workspace_id: Optional[str] = None
-    session_id: Optional[str] = None
+    workspace_id: str | None = None
+    session_id: str | None = None
     query_text: str                          # raw or normalized user message
-    intent_label: Optional[str] = None      # e.g. "code_help", "creative", "tutor"
+    intent_label: str | None = None      # e.g. "code_help", "creative", "tutor"
     route_target: str = "fast"              # "fast" | "architect"
-    tags: List[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
     # Per-brain budget cap (tokens).  None = use the brain-specific default
     # (FAST=600, ARCHITECT=1500) resolved in service.py.
-    max_bundle_tokens: Optional[int] = None
+    max_bundle_tokens: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +51,7 @@ class EpisodeMemoryItem(BaseModel):
     id: str
     event_type: str
     summary_text: str
-    tags: List[str]
+    tags: list[str]
     importance: float
     confidence: float
     was_user_correction: bool
@@ -77,9 +76,9 @@ class RuleMemoryItem(BaseModel):
 
 class MemoryBundle(BaseModel):
     """A fully assembled, token-budgeted memory context for one turn."""
-    profiles: List[ProfileMemoryItem] = Field(default_factory=list)
-    rules: List[RuleMemoryItem] = Field(default_factory=list)
-    episodes: List[EpisodeMemoryItem] = Field(default_factory=list)
+    profiles: list[ProfileMemoryItem] = Field(default_factory=list)
+    rules: list[RuleMemoryItem] = Field(default_factory=list)
+    episodes: list[EpisodeMemoryItem] = Field(default_factory=list)
     total_items: int = 0
     estimated_tokens: int = 0
     # Set True when the bundle was truncated to fit the token cap
@@ -94,14 +93,14 @@ class EpisodeWriteRequest(BaseModel):
     """Input for Path B (episodic write) in writer.py."""
     user_id: str
     project_id: str = "sage_kaizen"
-    workspace_id: Optional[str] = None
-    session_id: Optional[str] = None
+    workspace_id: str | None = None
+    session_id: str | None = None
     scope: str = "project"
     event_type: str
-    intent_label: Optional[str] = None
+    intent_label: str | None = None
     summary_text: str
-    raw_excerpt: Optional[str] = None
-    tags: List[str] = Field(default_factory=list)
+    raw_excerpt: str | None = None
+    tags: list[str] = Field(default_factory=list)
     importance: float = 0.5
     confidence: float = 0.6
     was_user_correction: bool = False
@@ -112,7 +111,7 @@ class ProfileWriteRequest(BaseModel):
     """Input for Path A (explicit profile write) in writer.py."""
     user_id: str
     project_id: str = "sage_kaizen"
-    workspace_id: Optional[str] = None
+    workspace_id: str | None = None
     scope: str = "user"
     profile_type: str
     key: str
@@ -130,8 +129,8 @@ class ReflectionResult(BaseModel):
     """Output from consolidator.run_reflection()."""
     reflection_id: str
     summary_text: str
-    profile_candidates: List[ProfileWriteRequest] = Field(default_factory=list)
-    rule_candidates: List["PromotionDecision"] = Field(default_factory=list)
+    profile_candidates: list[ProfileWriteRequest] = Field(default_factory=list)
+    rule_candidates: list["PromotionDecision"] = Field(default_factory=list)
     contradictions_found: int = 0
     pruning_suggestions: int = 0
     parse_error: bool = False   # True when the LLM returned unparseable JSON
@@ -139,7 +138,7 @@ class ReflectionResult(BaseModel):
 
 class PromotionDecision(BaseModel):
     """A candidate rule promotion, returned by policy.check_promotions()."""
-    source_memory_id: Optional[str] = None
+    source_memory_id: str | None = None
     rule_text: str
     rule_kind: str
     confidence: float

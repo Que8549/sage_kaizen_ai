@@ -49,7 +49,6 @@ import subprocess
 import threading
 import uuid as _uuid
 from pathlib import Path
-from typing import Optional
 
 import zmq
 
@@ -265,11 +264,11 @@ class VoiceBridge:
         ).start()
 
         # ── Launch voice app subprocess ──────────────────────────────────────
-        self._proc: Optional[subprocess.Popen] = self._launch_voice_app()
+        self._proc: subprocess.Popen | None = self._launch_voice_app()
 
     # ── Subprocess ────────────────────────────────────────────────────────────
 
-    def _launch_voice_app(self) -> Optional[subprocess.Popen]:
+    def _launch_voice_app(self) -> subprocess.Popen | None:
         if not _VOICE_PYTHON.exists():
             _LOG.warning(
                 "Voice Python not found at %s — voice features disabled", _VOICE_PYTHON

@@ -8,7 +8,7 @@ The audit log is the primary mechanism for reviewing and reversing memory change
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any
 
 from sk_logging import get_logger
 from .db import get_connection, new_uuid
@@ -30,10 +30,10 @@ def log_action(
     memory_id: str,
     action_type: str,        # 'insert', 'update', 'delete', 'promote', 'demote', 'lock', 'forget'
     actor_type: str,         # 'user', 'fast_brain', 'architect_brain', 'system', 'langmem'
-    actor_id: Optional[str] = None,
-    old_value: Optional[Dict[str, Any]] = None,
-    new_value: Optional[Dict[str, Any]] = None,
-    reason: Optional[str] = None,
+    actor_id: str | None = None,
+    old_value: dict[str, Any] | None = None,
+    new_value: dict[str, Any] | None = None,
+    reason: str | None = None,
 ) -> None:
     """
     Write one audit log row.  Non-blocking best-effort: exceptions are logged

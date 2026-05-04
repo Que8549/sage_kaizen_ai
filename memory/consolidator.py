@@ -15,7 +15,7 @@ import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from openai_client import stream_chat_completions, HttpTimeouts
 from pg_settings import PgSettings
@@ -48,7 +48,7 @@ def _call_brain(
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_prompt},
     ]
-    chunks: List[str] = []
+    chunks: list[str] = []
     timeouts = HttpTimeouts(connect=5.0, read=120.0, write=10.0, pool=5.0)
     for chunk in stream_chat_completions(
         base_url=base_url,
@@ -101,7 +101,7 @@ Rules:
 def run_reflection(
     user_id: str,
     project_id: str = "sage_kaizen",
-    session_id: Optional[str] = None,
+    session_id: str | None = None,
     mode: str = "deep",   # "lightweight" | "deep"
     lookback_hours: int = 24,
 ) -> ReflectionResult:
@@ -155,7 +155,7 @@ def run_reflection(
         )
         # Strip markdown fences (``` or ```json) — regex is more robust than split
         raw = re.sub(r"```(?:json)?\s*", "", raw).strip()
-        data: Dict[str, Any] = json.loads(raw)
+        data: dict[str, Any] = json.loads(raw)
     except Exception as exc:
         _LOG.warning("consolidator | LLM parse failed: %s", exc)
         parse_error = True
@@ -178,7 +178,7 @@ def run_reflection(
 
     # Evaluate and write approved rule candidates (up to MAX_PROMOTIONS_PER_RUN)
     promotions_written = 0
-    written_promotions: List[PromotionDecision] = []
+    written_promotions: list[PromotionDecision] = []
     for rc in data.get("rule_candidates", []):
         if promotions_written >= MAX_PROMOTIONS_PER_RUN:
             break
@@ -194,7 +194,7 @@ def run_reflection(
             promotions_written += 1
 
     # Build profile candidates for the caller (not auto-written — require user or threshold gate)
-    profile_candidates: List[ProfileWriteRequest] = []
+    profile_candidates: list[ProfileWriteRequest] = []
     for pc in data.get("profile_candidates", []):
         profile_candidates.append(ProfileWriteRequest(
             user_id=user_id,

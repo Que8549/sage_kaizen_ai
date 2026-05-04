@@ -18,7 +18,6 @@ Usage in maintenance runner:
 from __future__ import annotations
 
 import time
-from typing import List, Optional
 
 from sk_logging import get_logger
 from .bundle_builder import build_bundle, format_bundle_prompt
@@ -101,7 +100,7 @@ class MemoryService:
         """Format a bundle into the prompt segment string."""
         return format_bundle_prompt(bundle)
 
-    def write_episode(self, req: EpisodeWriteRequest) -> Optional[str]:
+    def write_episode(self, req: EpisodeWriteRequest) -> str | None:
         """
         Write a post-turn episode (Path B — selective).
         Returns the new episode id, or None if policy skipped the write.
@@ -116,7 +115,7 @@ class MemoryService:
         self,
         user_id: str,
         project_id: str = "sage_kaizen",
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
         mode: str = "deep",
         lookback_hours: int = 24,
     ) -> ReflectionResult:
@@ -135,7 +134,7 @@ class MemoryService:
 
     def explain_bundle(self, bundle: MemoryBundle) -> str:
         """Return a human-readable explanation of why each item was included."""
-        lines: List[str] = [
+        lines: list[str] = [
             f"Memory bundle — {bundle.total_items} items, "
             f"~{bundle.estimated_tokens} tokens "
             f"({'truncated' if bundle.was_truncated else 'within budget'}):\n"

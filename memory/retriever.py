@@ -10,7 +10,6 @@ pgvector 0.8.x note:
 from __future__ import annotations
 
 import time
-from typing import List, Optional, Tuple
 
 from sk_logging import get_logger
 from .embedder import embed_one
@@ -34,10 +33,10 @@ _OVERFETCH = 3
 
 def retrieve_profiles(
     user_id: str,
-    project_id: Optional[str],
-) -> List[ProfileMemoryItem]:
+    project_id: str | None,
+) -> list[ProfileMemoryItem]:
     """Load always-on profile facts."""
-    rows: List[ProfileRow] = fetch_active_profiles(user_id, project_id)
+    rows: list[ProfileRow] = fetch_active_profiles(user_id, project_id)
     return [
         ProfileMemoryItem(
             id=row.id,
@@ -54,13 +53,13 @@ def retrieve_profiles(
 
 
 def retrieve_rules(
-    user_id: Optional[str],
-    project_id: Optional[str],
-    query_text: Optional[str],
+    user_id: str | None,
+    project_id: str | None,
+    query_text: str | None,
     limit: int = 6,
-) -> List[RuleMemoryItem]:
+) -> list[RuleMemoryItem]:
     """Retrieve procedural rules relevant to the current intent."""
-    rows: List[RuleRow] = fetch_active_rules(
+    rows: list[RuleRow] = fetch_active_rules(
         user_id=user_id,
         project_id=project_id,
         query_text=query_text,
@@ -81,11 +80,11 @@ def retrieve_rules(
 
 def retrieve_episodes(
     user_id: str,
-    project_id: Optional[str],
+    project_id: str | None,
     query_text: str,
-    scope_filter: Optional[str] = None,
+    scope_filter: str | None = None,
     top_k: int = 6,
-) -> List[EpisodeMemoryItem]:
+) -> list[EpisodeMemoryItem]:
     """
     Hybrid episode retrieval.
 
@@ -108,7 +107,7 @@ def retrieve_episodes(
         query_vec = None
 
     # FTS retrieval
-    lexical_results: List[Tuple[EpisodeRow, float]] = fetch_episodes_lexical(
+    lexical_results: list[tuple[EpisodeRow, float]] = fetch_episodes_lexical(
         user_id=user_id,
         project_id=project_id,
         query_text=query_text,
@@ -116,7 +115,7 @@ def retrieve_episodes(
     )
 
     # Vector retrieval (skipped if embed failed)
-    vector_results: List[Tuple[EpisodeRow, float]] = []
+    vector_results: list[tuple[EpisodeRow, float]] = []
     if query_vec is not None:
         vector_results = fetch_episodes_vector(
             user_id=user_id,

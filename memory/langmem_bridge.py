@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from langchain_openai import ChatOpenAI
 
@@ -150,8 +150,8 @@ class LangMemBridge:
 
     def submit_turn(
         self,
-        messages: List[Dict[str, str]],
-        user_id: Optional[str] = None,
+        messages: list[dict[str, str]],
+        user_id: str | None = None,
         debounce_seconds: float = 2.0,
     ) -> None:
         """
@@ -179,9 +179,9 @@ class LangMemBridge:
     async def search(
         self,
         query: str,
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
         limit: int = 8,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Semantic search over stored memories for a user.
 
@@ -216,7 +216,7 @@ class LangMemBridge:
     async def format_memories_for_prompt(
         self,
         query: str,
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
         limit: int = 6,
         max_chars: int = 1500,
     ) -> str:
@@ -245,7 +245,7 @@ class LangMemBridge:
 
         return "\n".join(lines)
 
-    async def forget(self, key: str, user_id: Optional[str] = None) -> None:
+    async def forget(self, key: str, user_id: str | None = None) -> None:
         """Delete a specific memory item by key."""
         uid = user_id or self._user_id
         namespace = ("sage_kaizen", "memories", uid)
@@ -288,11 +288,11 @@ class LangMemBridgeSync:
     """
 
     def __init__(self) -> None:
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
-        self._bridge: Optional[LangMemBridge] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._bridge: LangMemBridge | None = None
         self._ready = threading.Event()
-        self._error: Optional[Exception] = None
+        self._error: Exception | None = None
 
     def start(self) -> None:
         """Spin up the daemon thread and initialise the async bridge."""
@@ -328,8 +328,8 @@ class LangMemBridgeSync:
 
     def submit_turn(
         self,
-        messages: List[Dict[str, str]],
-        user_id: Optional[str] = None,
+        messages: list[dict[str, str]],
+        user_id: str | None = None,
     ) -> None:
         """Non-blocking: schedule background memory extraction for a completed turn."""
         if self._bridge is None:
@@ -339,7 +339,7 @@ class LangMemBridgeSync:
     def get_memory_prompt(
         self,
         query: str,
-        user_id: Optional[str] = None,
+        user_id: str | None = None,
         limit: int = 6,
         max_chars: int = 1500,
     ) -> str:
@@ -369,7 +369,7 @@ class LangMemBridgeSync:
 # Module-level singleton (lazy init)
 # ---------------------------------------------------------------------------
 
-_bridge_singleton: Optional[LangMemBridgeSync] = None
+_bridge_singleton: LangMemBridgeSync | None = None
 
 
 def get_langmem_bridge() -> LangMemBridgeSync:

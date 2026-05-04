@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
 
 from sk_logging import get_logger
 
@@ -194,7 +193,7 @@ class MarketClient:
 
 
 # Module-level lazy singleton.
-_client: Optional[MarketClient] = None
+_client: MarketClient | None = None
 
 
 def get_market_client() -> MarketClient:

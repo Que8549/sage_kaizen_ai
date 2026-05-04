@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, Tuple, List
 
 
 class TemplateKey(str, Enum):
@@ -26,7 +25,7 @@ class TemplateKey(str, Enum):
     PRODUCTION_READINESS = "production_readiness"
 
 
-TEMPLATES: Dict[TemplateKey, str] = {
+TEMPLATES: dict[TemplateKey, str] = {
     # ---- Existing templates (tuned, but compatible) ----
     TemplateKey.UNIVERSAL_DEPTH_ANCHOR: (
         "You are Sage Kaizen.\n"
@@ -339,14 +338,14 @@ sage_architect_core = (
 def build_system_only(
     system_prompt: str,
     core_prompt: str = "",
-    templates: Tuple[TemplateKey, ...] = (),
+    templates: tuple[TemplateKey, ...] = (),
 ) -> str:
     """
     Returns the assembled system message content string only.
     Use this when you need to insert conversation history in the correct order
     (prior turns before the current user message).
     """
-    parts: List[str] = []
+    parts: list[str] = []
     if system_prompt:
         parts.append(system_prompt.strip())
     if core_prompt:

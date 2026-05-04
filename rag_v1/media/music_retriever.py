@@ -34,7 +34,6 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import psycopg
 from psycopg.rows import dict_row, DictRow

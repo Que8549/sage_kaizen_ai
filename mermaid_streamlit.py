@@ -4,7 +4,7 @@ import json
 import re
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -18,19 +18,19 @@ import streamlit.components.v1 as components
 class LlamaServerInfo:
     base_url: str
     ok: bool
-    model_id: Optional[str] = None
-    alias: Optional[str] = None
-    ctx_size: Optional[int] = None
-    n_gpu_layers: Optional[Any] = None
-    device: Optional[Any] = None
-    tensor_split: Optional[Any] = None
-    split_mode: Optional[Any] = None
-    main_gpu: Optional[Any] = None
-    raw: Optional[Dict[str, Any]] = None
+    model_id: str | None = None
+    alias: str | None = None
+    ctx_size: int | None = None
+    n_gpu_layers: Any | None = None
+    device: Any | None = None
+    tensor_split: Any | None = None
+    split_mode: Any | None = None
+    main_gpu: Any | None = None
+    raw: dict[str, Any] | None = None
     source: str = "unknown"  # which endpoint succeeded
 
 
-def _http_get_json(url: str, timeout_s: float = 0.8) -> Tuple[bool, Optional[Dict[str, Any]]]:
+def _http_get_json(url: str, timeout_s: float = 0.8) -> tuple[bool, dict[str, Any] | None]:
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
@@ -84,7 +84,7 @@ def probe_llama_server(base_url: str) -> LlamaServerInfo:
         main_gpu = payload.get("main_gpu")
 
         # ctx_size can be str/int; normalize if possible
-        norm_ctx: Optional[int] = None
+        norm_ctx: int | None = None
         try:
             if ctx_size is not None:
                 norm_ctx = int(ctx_size)
@@ -177,10 +177,10 @@ def _preprocess_mermaid(src: str) -> str:
     return src
 
 
-def build_sage_kaizen_mermaid(q5: Optional[LlamaServerInfo], q6: Optional[LlamaServerInfo]) -> str:
+def build_sage_kaizen_mermaid(q5: LlamaServerInfo | None, q6: LlamaServerInfo | None) -> str:
     """Build Mermaid diagram; uses quoted node labels + <br/> for line breaks."""
 
-    def node_label(title: str, info: Optional[LlamaServerInfo]) -> str:
+    def node_label(title: str, info: LlamaServerInfo | None) -> str:
         lines = [title]
         if info and info.ok:
             if info.alias:
@@ -436,7 +436,7 @@ class DiagramHandler:
         return bool(cls._TRIGGER_RE.search(text or ""))
 
     @classmethod
-    def extract_mermaid(cls, text: str) -> Optional[str]:
+    def extract_mermaid(cls, text: str) -> str | None:
         """Return the first ```mermaid ... ``` block found in *text*, or None."""
         m = cls._MERMAID_BLOCK_RE.search(text or "")
         return m.group(1).strip() if m else None

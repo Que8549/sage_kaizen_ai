@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 import json
 import re
 import time
-from typing import List, Tuple
 
 from rapidfuzz import fuzz as _fuzz
 
@@ -57,7 +56,7 @@ _VERSUS_RE = re.compile(r"(?:^|[\s\W])versus(?:$|[\s\W])")
 # Temporal phrases that strongly imply a need for live/current information.
 # Intentionally conservative to avoid false positives on common words like
 # "today I want to learn..." (no search needed) vs "what happened today" (search needed).
-_SEARCH_TEMPORAL_HINTS: Tuple[str, ...] = (
+_SEARCH_TEMPORAL_HINTS: tuple[str, ...] = (
     "today's news", "latest news", "breaking news",
     "current events", "right now", "this week's", "this month's",
     "just announced", "recently announced", "just released", "newly released",
@@ -91,7 +90,7 @@ _SEARCH_TEMPORAL_HINTS: Tuple[str, ...] = (
 )
 
 # Explicit search-intent phrases — user is clearly asking for a web search.
-_SEARCH_INTENT_HINTS: Tuple[str, ...] = (
+_SEARCH_INTENT_HINTS: tuple[str, ...] = (
     "search for", "search the web", "search online", "find online",
     "look up online", "google that", "find me the latest",
     "what is the latest", "what are the latest", "is there news about",
@@ -104,7 +103,7 @@ _SEARCH_INTENT_HINTS: Tuple[str, ...] = (
 
 # Keyword → category mapping for category inference.
 # Only maps when the keyword is specific enough to imply a category.
-_CATEGORY_KEYWORDS: dict[str, Tuple[str, ...]] = {
+_CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "news":       ("news", "headlines", "breaking", "politics", "election",
                    "current events", "latest events",
                    "final score", "game results", "match results", "who won",
@@ -120,7 +119,7 @@ _CATEGORY_KEYWORDS: dict[str, Tuple[str, ...]] = {
                    "stock market"),
 }
 
-_DEFAULT_SEARCH_CATEGORIES: Tuple[str, ...] = ("general", "news")
+_DEFAULT_SEARCH_CATEGORIES: tuple[str, ...] = ("general", "news")
 
 # ---------------------------------------------------------------------------
 # News-aware brain routing
@@ -133,7 +132,7 @@ _DEFAULT_SEARCH_CATEGORIES: Tuple[str, ...] = ("general", "news")
 # a search AND should go to ARCHITECT.
 
 # Lightweight signals that confirm the query is about news content (not weather/finance).
-_NEWS_CONTENT_SIGNALS: Tuple[str, ...] = (
+_NEWS_CONTENT_SIGNALS: tuple[str, ...] = (
     "news",              # "Iran war news", "news today", "news about"
     "headlines",         # "today's headlines"
     "top stories",       # "top stories today"
@@ -164,7 +163,7 @@ _NEWS_CONTENT_SIGNALS: Tuple[str, ...] = (
 # When detected alongside a news-content signal, ARCHITECT is selected regardless
 # of FAST_HINTS counterweights (e.g. "detailed summary" cancels out to 0 without
 # this block; with it, the +3 push ensures ARCHITECT is selected).
-_NEWS_DEPTH_HINTS: Tuple[str, ...] = (
+_NEWS_DEPTH_HINTS: tuple[str, ...] = (
     # Explicit depth/quality signals
     "detailed",                  # "detailed summary", "detailed coverage"
     "in detail",                 # "explain in detail"
@@ -224,7 +223,7 @@ _FUZZY_SEARCH_THRESHOLD = 76
 
 def _fuzzy_matches_any(
     txt: str,
-    phrases: Tuple[str, ...],
+    phrases: tuple[str, ...],
     threshold: int = _FUZZY_SEARCH_THRESHOLD,
 ) -> bool:
     """
@@ -253,7 +252,7 @@ def _fuzzy_matches_any(
 # Music query detection
 # ---------------------------------------------------------------------------
 
-_MUSIC_HINTS: Tuple[str, ...] = (
+_MUSIC_HINTS: tuple[str, ...] = (
     "play something", "play me a song", "find songs", "find a song", "find me a song",
     "list songs", "list tracks", "music for", "songs about", "songs with",
     "tracks about", "tracks with", "what songs", "which songs", "any songs",
@@ -280,10 +279,10 @@ _LOG = get_logger("sage_kaizen.router")
 @dataclass(frozen=True)
 class RouteDecision:
     brain: str                 # "FAST" (5080) or "ARCHITECT" (5090)
-    reasons: List[str]
+    reasons: list[str]
     score: int
     needs_search: bool = False                      # True → run live web search this turn
-    search_categories: Tuple[str, ...] = field(default_factory=tuple)  # SearXNG categories to query
+    search_categories: tuple[str, ...] = field(default_factory=tuple)  # SearXNG categories to query
     needs_music: bool = False                       # True → run music retrieval this turn
     modality: str = "text"                          # "text" | "image" | "audio" | "video" | "multimodal"
 
@@ -321,7 +320,7 @@ def _log_decision(decision: "RouteDecision", user_text: str, processing_time_ms:
     )
 
 
-def _detect_search(txt: str) -> Tuple[bool, Tuple[str, ...]]:
+def _detect_search(txt: str) -> tuple[bool, tuple[str, ...]]:
     """
     Heuristic: decide whether this query needs live web data and which
     SearXNG categories to query.
@@ -337,7 +336,7 @@ def _detect_search(txt: str) -> Tuple[bool, Tuple[str, ...]]:
     return False, ()
 
 
-def _infer_categories(txt: str) -> Tuple[str, ...]:
+def _infer_categories(txt: str) -> tuple[str, ...]:
     """Map query text to the most relevant SearXNG categories."""
     cats: list[str] = []
     for cat, keywords in _CATEGORY_KEYWORDS.items():
@@ -377,7 +376,7 @@ def route(
 
     txt = user_text.lower()
     score = 0
-    reasons: List[str] = []
+    reasons: list[str] = []
 
     # Live-search detection (independent of brain routing)
     needs_search, search_categories = _detect_search(txt)
@@ -554,7 +553,7 @@ def llm_route(
         needs_search = "SEARCH" in label
         brain        = "ARCHITECT" if "ARCHITECT" in label else "FAST"
 
-        search_categories: Tuple[str, ...] = ()
+        search_categories: tuple[str, ...] = ()
         if needs_search:
             _, search_categories = _detect_search(user_text.lower())
             if not search_categories:

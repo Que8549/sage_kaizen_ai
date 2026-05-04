@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from feedback.db import fetch_kto_rows, fetch_stats, get_conn
 from sk_logging import get_logger
@@ -15,7 +15,7 @@ _LOG = get_logger("sage_kaizen.feedback.export")
 # TRL KTO format builder                                                        #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def _build_kto_record(row: Dict[str, Any]) -> Dict[str, Any]:
+def _build_kto_record(row: dict[str, Any]) -> dict[str, Any]:
     """Convert one DB row to a TRL KTOTrainer record.
 
     TRL KTO conversational format:
@@ -27,7 +27,7 @@ def _build_kto_record(row: Dict[str, Any]) -> Dict[str, Any]:
 
     The non-standard "_meta" block is ignored by TRL but useful for debugging.
     """
-    prompt_messages: List[dict] = row["prompt_messages"]
+    prompt_messages: list[dict] = row["prompt_messages"]
     if isinstance(prompt_messages, str):
         prompt_messages = json.loads(prompt_messages)
 
@@ -52,11 +52,11 @@ def export_kto_jsonl(
     out_path: Path,
     *,
     dsn: str,
-    brain: Optional[str] = None,
-    thumb: Optional[int] = None,
+    brain: str | None = None,
+    thumb: int | None = None,
     min_chars: int = 50,
     verbose: bool = True,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """Export rated responses to a JSONL file in TRL KTO conversational format.
 
     Returns stats dict: total_rows, exported.

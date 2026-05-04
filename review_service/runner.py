@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import datetime
-from typing import Optional
 
 from langgraph.types import Command
 
@@ -50,13 +49,13 @@ class ReviewRunner:
 
     def __init__(self) -> None:
         self.status: str = "idle"
-        self.thread_id: Optional[str] = None
-        self.interrupt_payload: Optional[dict] = None
+        self.thread_id: str | None = None
+        self.interrupt_payload: dict | None = None
         self.output_paths: list[str] = []
-        self.error: Optional[str] = None
+        self.error: str | None = None
 
         self._lock = threading.Lock()
-        self._bg_thread: Optional[threading.Thread] = None
+        self._bg_thread: threading.Thread | None = None
 
     # ── Public API ────────────────────────────────────────────────────────
 

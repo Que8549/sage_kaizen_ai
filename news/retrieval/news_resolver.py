@@ -28,7 +28,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 from rapidfuzz import fuzz as _fuzz
 
@@ -91,7 +90,7 @@ class NewsContext:
     """Resolved news context ready for injection into the user message."""
     source: str               # "db_brief" | "market" | "hybrid" | "stale"
     content: str              # The context text to inject
-    freshness_at: Optional[datetime] = None
+    freshness_at: datetime | None = None
     is_stale: bool = False
 
     def to_xml_block(self) -> str:
@@ -170,7 +169,7 @@ class NewsResolver:
         self._cfg = get_news_settings()
         self._dsn = self._cfg.pg_dsn
 
-    def resolve(self, user_text: str) -> Optional[NewsContext]:
+    def resolve(self, user_text: str) -> NewsContext | None:
         """
         Resolve a user message against the news pipeline.
 
@@ -221,7 +220,7 @@ class NewsResolver:
     # Resolution paths
     # ------------------------------------------------------------------
 
-    def _resolve_news_brief(self, kind: str) -> Optional[NewsContext]:
+    def _resolve_news_brief(self, kind: str) -> NewsContext | None:
         """Try DB-first, fall back to stale brief, then to None."""
 
         # Fresh brief?
@@ -273,7 +272,7 @@ class NewsResolver:
         _LOG.debug("news_resolver | no brief found | kind=%s", kind)
         return None
 
-    def _resolve_market(self, user_text: str) -> Optional[NewsContext]:
+    def _resolve_market(self, user_text: str) -> NewsContext | None:
         """Extract ticker from user text and call yfinance."""
         try:
             from news.retrieval.market_client import get_market_client, normalize_ticker
@@ -310,7 +309,7 @@ class NewsResolver:
     # Ticker extraction
     # ------------------------------------------------------------------
 
-    def _extract_ticker(self, text: str) -> Optional[str]:
+    def _extract_ticker(self, text: str) -> str | None:
         from news.retrieval.market_client import normalize_ticker, _NAME_TO_TICKER
         txt_lower = text.lower()
 
@@ -348,7 +347,7 @@ class NewsResolver:
 # ---------------------------------------------------------------------------
 # Module-level lazy singleton
 # ---------------------------------------------------------------------------
-_resolver: Optional[NewsResolver] = None
+_resolver: NewsResolver | None = None
 
 
 def get_news_resolver() -> NewsResolver:
@@ -358,7 +357,7 @@ def get_news_resolver() -> NewsResolver:
     return _resolver
 
 
-def resolve_news_context(user_text: str) -> Optional[NewsContext]:
+def resolve_news_context(user_text: str) -> NewsContext | None:
     """Convenience function for context_injector integration."""
     try:
         return get_news_resolver().resolve(user_text)

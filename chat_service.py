@@ -28,7 +28,7 @@ import base64
 import threading
 import time as _time
 from dataclasses import dataclass, field
-from typing import Iterator, List, Optional, Tuple
+from typing import Iterator
 
 import router as _router
 from document_parser import DocumentAttachment, format_document_context
@@ -55,7 +55,7 @@ _LOG = get_logger("sage_kaizen.chat_service")
 # MemoryService() will fail on first use.  The singleton catches that and
 # disables memory for the session rather than crashing the app.
 # ---------------------------------------------------------------------------
-_MEMORY_SVC: Optional["MemoryService"] = None  # type: ignore[name-defined]
+_MEMORY_SVC: "MemoryService | None" = None  # type: ignore[name-defined]
 _MEMORY_DISABLED = False   # set True after a failed init so we don't retry every turn
 _MEMORY_LOCK = threading.Lock()
 
@@ -81,7 +81,7 @@ def last_chat_activity_ts() -> float:
     return _last_chat_ts
 
 
-def _get_memory() -> Optional[object]:
+def _get_memory() -> object | None:
     global _MEMORY_SVC, _MEMORY_DISABLED
     if _MEMORY_DISABLED:
         return None
@@ -176,7 +176,7 @@ class TurnConfig:
     deep_mode: bool
     auto_escalate: bool
     auto_templates: bool
-    override_templates: Tuple[TemplateKey, ...]
+    override_templates: tuple[TemplateKey, ...]
     temperature_q5: float
     temperature_q6: float
     top_p_q5: float
@@ -192,11 +192,11 @@ class TurnConfig:
     # Creative turns auto-cap at _CREATIVE_THINKING_CAP when this is -1.
     thinking_budget: int = -1
     # Multimodal attachments for this turn (empty tuple = text-only)
-    media_attachments: Tuple[MediaAttachment, ...] = field(default_factory=tuple)
+    media_attachments: tuple[MediaAttachment, ...] = field(default_factory=tuple)
     # Text-based document attachments (txt, code files, docx, xlsx).
     # Content is extracted to plain text and injected into the user message.
     # Presence of any document attachment forces routing to ARCHITECT (27B, 128K context).
-    document_attachments: Tuple[DocumentAttachment, ...] = field(default_factory=tuple)
+    document_attachments: tuple[DocumentAttachment, ...] = field(default_factory=tuple)
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -332,7 +332,7 @@ class ChatService:
 
     def select_templates(
         self, user_text: str, cfg: TurnConfig
-    ) -> Tuple[TemplateKey, ...]:
+    ) -> tuple[TemplateKey, ...]:
         if cfg.override_templates:
             return cfg.override_templates
         if not cfg.auto_templates:
@@ -340,9 +340,9 @@ class ChatService:
         return self._auto_templates(user_text)
 
     @staticmethod
-    def _auto_templates(user_text: str) -> Tuple[TemplateKey, ...]:
+    def _auto_templates(user_text: str) -> tuple[TemplateKey, ...]:
         txt = (user_text or "").lower()
-        keys: List[TemplateKey] = [
+        keys: list[TemplateKey] = [
             TemplateKey.UNIVERSAL_DEPTH_ANCHOR,
             TemplateKey.AUTO_ADAPTIVE_META,
         ]
@@ -361,15 +361,15 @@ class ChatService:
     def prepare_messages(
         self,
         user_text: str,
-        history: List[dict],
+        history: list[dict],
         decision: RouteDecision,
-        templates: Tuple[TemplateKey, ...],
+        templates: tuple[TemplateKey, ...],
         wiki_enabled: bool = True,
-        media_attachments: Tuple[MediaAttachment, ...] = (),
-        document_attachments: Tuple[DocumentAttachment, ...] = (),
-        session_id: Optional[str] = None,
+        media_attachments: tuple[MediaAttachment, ...] = (),
+        document_attachments: tuple[DocumentAttachment, ...] = (),
+        session_id: str | None = None,
         user_id: str = "alquin",
-    ) -> Tuple[List[dict], list, list, object, str]:
+    ) -> tuple[list[dict], list, list, object, str]:
         """
         Build the full OpenAI-style messages list for this turn.
 
@@ -423,7 +423,7 @@ class ChatService:
                     _MEMORY_DISABLED = True
                     _LOG.warning("prepare_messages | memory disabled (schema not accessible); will not retry")
 
-        messages: List[dict] = []
+        messages: list[dict] = []
         if system_content:
             messages.append({"role": "system", "content": system_content})
 
@@ -476,7 +476,7 @@ class ChatService:
         user_text: str,
         assistant_text: str,
         decision: RouteDecision,
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
         user_id: str = "alquin",
     ) -> None:
         """
@@ -524,7 +524,7 @@ class ChatService:
 
     def stream_response(
         self,
-        messages: List[dict],
+        messages: list[dict],
         decision: RouteDecision,
         cfg: TurnConfig,
     ) -> Iterator[str]:
@@ -578,7 +578,7 @@ class ChatService:
 
 def _build_multimodal_content(
     user_text: str,
-    attachments: Tuple[MediaAttachment, ...],
+    attachments: tuple[MediaAttachment, ...],
     *,
     doc_context: str = "",
 ) -> list:

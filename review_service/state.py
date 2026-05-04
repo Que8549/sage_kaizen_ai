@@ -6,7 +6,6 @@ LangGraph review pipeline. Every node reads from and writes to this shape.
 """
 from __future__ import annotations
 
-from typing import Optional
 from typing_extensions import TypedDict
 
 
@@ -48,7 +47,7 @@ class ReviewState(TypedDict):
 
     # ── Output ────────────────────────────────────────────────────────────
     output_paths: list[str]        # written file paths (review.md, adr.md, .patch files)
-    error: Optional[str]           # fatal error message if any node fails
+    error: str | None           # fatal error message if any node fails
 
 
 def default_state(mode: str, target: str = "") -> ReviewState:

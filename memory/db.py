@@ -12,7 +12,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Generator, Optional
+from typing import Any, Generator
 
 import psycopg
 from psycopg.rows import dict_row
@@ -23,7 +23,7 @@ from sk_logging import get_logger
 
 _LOG  = get_logger("sage_kaizen.memory.db")
 _lock = threading.Lock()
-_pool: Optional[ConnectionPool] = None
+_pool: ConnectionPool | None = None
 
 
 def get_pool() -> ConnectionPool:

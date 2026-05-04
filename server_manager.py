@@ -23,7 +23,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 import yaml
 
 from openai_client import HttpTimeouts, health_check
@@ -108,7 +108,7 @@ class BrainConfig:
     model: Path                     # absolute path to GGUF file
     log: Path                       # absolute path to log file
     startup_timeout_s: float        # max seconds to wait for /health readiness
-    server: Dict[str, Any]          # server: section from YAML (host, port, flags…)
+    server: dict[str, Any]          # server: section from YAML (host, port, flags…)
 
     @property
     def host(self) -> str:
@@ -128,7 +128,7 @@ class BrainConfig:
 # ──────────────────────────────────────────────────────────────────────────── #
 
 # Default timeouts used when brains.yaml does not specify startup_timeout_s
-_DEFAULT_TIMEOUTS: Dict[str, float] = {
+_DEFAULT_TIMEOUTS: dict[str, float] = {
     "fast": 1800.0,
     "architect": 2700.0,
     "embed": 300.0,
@@ -141,7 +141,7 @@ def _load_brain_config(yaml_path: Path, name: str) -> BrainConfig:
 
     Raises KeyError if the named brain is missing from the file.
     """
-    data: Dict[str, Any] = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    data: dict[str, Any] = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     raw = data[name]
     return BrainConfig(
         name=name,
@@ -178,7 +178,7 @@ class ManagedServers:
     embed: BrainConfig
     fast: BrainConfig
     architect: BrainConfig
-    summarizer: Optional[BrainConfig] = field(default=None)
+    summarizer: BrainConfig | None = field(default=None)
 
     @classmethod
     def from_yaml(cls, path: Path = _BRAINS_YAML) -> "ManagedServers":
@@ -243,7 +243,7 @@ def _load_managed_servers(path: Path) -> ManagedServers:
         )
     # Try to load the optional summarizer brain (commented out by default).
     # KeyError means the section is absent/commented — not an error.
-    _summarizer: Optional[BrainConfig] = None
+    _summarizer: BrainConfig | None = None
     try:
         _summarizer = _load_brain_config(path, "summarizer")
     except KeyError:
@@ -272,7 +272,7 @@ def _run(cmd: list) -> subprocess.CompletedProcess:
     )
 
 
-def find_pid_by_port(port: int) -> Optional[int]:
+def find_pid_by_port(port: int) -> int | None:
     """Find the PID that is LISTENING on 127.0.0.1:<port> or 0.0.0.0:<port>."""
     cp = _run(["cmd.exe", "/c", "netstat -ano -p tcp"])
     if cp.returncode != 0:
@@ -298,7 +298,7 @@ def stop_server_on_port(port: int) -> bool:
 # HTTP readiness                                                                 #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def _http_ready(base_url: str, timeout_s: float = 1.0) -> Tuple[bool, str]:
+def _http_ready(base_url: str, timeout_s: float = 1.0) -> tuple[bool, str]:
     """Probe /health, /v1/health, /v1/models, /props — delegates to openai_client.health_check()."""
     return health_check(base_url, timeouts=HttpTimeouts(connect_s=timeout_s, read_s=timeout_s))
 
@@ -307,7 +307,7 @@ def _http_ready(base_url: str, timeout_s: float = 1.0) -> Tuple[bool, str]:
 # Log tail + fatal error detection                                               #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def _tail(path: Optional[Path], n_lines: int = 160) -> str:
+def _tail(path: Path | None, n_lines: int = 160) -> str:
     try:
         if not path or not path.exists():
             return ""
@@ -317,7 +317,7 @@ def _tail(path: Optional[Path], n_lines: int = 160) -> str:
         return ""
 
 
-def _log_has_fatal_error(tail_text: str) -> Optional[str]:
+def _log_has_fatal_error(tail_text: str) -> str | None:
     low = tail_text.lower()
     for marker in _FATAL_MARKERS:
         if marker.lower() in low:
@@ -331,7 +331,7 @@ def _wait_for_ready(
     base_url: str,
     timeout_s: float,
     log_path: Path,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     start = time.monotonic()
     last_tail = ""
     while (time.monotonic() - start) < timeout_s:
@@ -398,7 +398,7 @@ def _build_argv(brain: BrainConfig) -> list:
 # Server launch                                                                  #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def start_server_from_config(brain: BrainConfig) -> Tuple[bool, str]:
+def start_server_from_config(brain: BrainConfig) -> tuple[bool, str]:
     """
     Spawn a llama-server process using config loaded from brains.yaml.
 
@@ -466,7 +466,7 @@ def start_server_from_config(brain: BrainConfig) -> Tuple[bool, str]:
 # Public API: ensure_* functions (called by InferenceSession)                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def ensure_embed_running(servers: ManagedServers) -> Tuple[bool, str]:
+def ensure_embed_running(servers: ManagedServers) -> tuple[bool, str]:
     base_url = servers.embed.base_url
 
     if find_pid_by_port(servers.embed_port) is not None:
@@ -489,7 +489,7 @@ def ensure_embed_running(servers: ManagedServers) -> Tuple[bool, str]:
     )
 
 
-def ensure_q5_running(servers: ManagedServers) -> Tuple[bool, str]:
+def ensure_q5_running(servers: ManagedServers) -> tuple[bool, str]:
     # Embedding server must be ready before the chat brain starts
     ok, msg = ensure_embed_running(servers)
     if not ok:
@@ -517,7 +517,7 @@ def ensure_q5_running(servers: ManagedServers) -> Tuple[bool, str]:
     )
 
 
-def ensure_q6_running(servers: ManagedServers) -> Tuple[bool, str]:
+def ensure_q6_running(servers: ManagedServers) -> tuple[bool, str]:
     base_url = servers.architect.base_url
 
     if find_pid_by_port(servers.q6_port) is not None:
@@ -540,7 +540,7 @@ def ensure_q6_running(servers: ManagedServers) -> Tuple[bool, str]:
     )
 
 
-def ensure_summarizer_running(servers: ManagedServers) -> Tuple[bool, str]:
+def ensure_summarizer_running(servers: ManagedServers) -> tuple[bool, str]:
     """
     Start the optional CPU summarizer brain (port 8013) if configured and not running.
 

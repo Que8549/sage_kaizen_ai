@@ -10,7 +10,6 @@ Design rules:
 """
 from __future__ import annotations
 
-from typing import List, Optional
 
 from rag_v1.embed.embed_client import EmbedClient
 from sk_logging import get_logger
@@ -22,7 +21,7 @@ _BGE_BASE_URL = "http://127.0.0.1:8020"
 _BGE_MODEL    = "bge-m3"
 _DIMS         = 1024
 
-_singleton: Optional[EmbedClient] = None
+_singleton: EmbedClient | None = None
 
 
 def _get_client() -> EmbedClient:
@@ -33,7 +32,7 @@ def _get_client() -> EmbedClient:
     return _singleton
 
 
-def embed_texts(texts: List[str]) -> List[List[float]]:
+def embed_texts(texts: list[str]) -> list[list[float]]:
     """
     Embed a batch of texts using BGE-M3 (sync).
 
@@ -48,7 +47,7 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
     return vecs
 
 
-def embed_one(text: str) -> List[float]:
+def embed_one(text: str) -> list[float]:
     """Convenience wrapper for a single text."""
     return embed_texts([text])[0]
 
@@ -57,7 +56,7 @@ def embed_one(text: str) -> List[float]:
 # Async wrapper used by LangMem bridge and consolidator's background tasks
 # ---------------------------------------------------------------------------
 
-async def aembed_texts(texts: List[str]) -> List[List[float]]:
+async def aembed_texts(texts: list[str]) -> list[list[float]]:
     """
     Async version — uses EmbedClient.aembed() (native httpx.AsyncClient)
     so the event loop is not blocked.  Used by langmem_bridge.py and the
@@ -68,7 +67,7 @@ async def aembed_texts(texts: List[str]) -> List[List[float]]:
     return await _get_client().aembed(texts)
 
 
-async def aembed_one(text: str) -> List[float]:
+async def aembed_one(text: str) -> list[float]:
     result = await aembed_texts([text])
     return result[0]
 
