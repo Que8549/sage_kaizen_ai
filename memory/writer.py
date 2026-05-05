@@ -10,7 +10,7 @@ Path D — rule promotion (called by consolidator / policy check).
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from sk_logging import get_logger
 from .audit import log_action
@@ -68,7 +68,7 @@ def write_explicit_profile(req: ProfileWriteRequest) -> str:
 # Path B — episodic write (selective)
 # ---------------------------------------------------------------------------
 
-def write_episode(req: EpisodeWriteRequest) -> Optional[str]:
+def write_episode(req: EpisodeWriteRequest) -> str | None:
     """
     Write an episode if it passes the selective write policy.
     Embeds the summary_text with BGE-M3.
@@ -143,14 +143,14 @@ def write_episode(req: EpisodeWriteRequest) -> Optional[str]:
 
 def write_reflection(
     user_id: str,
-    project_id: Optional[str],
-    session_id: Optional[str],
+    project_id: str | None,
+    session_id: str | None,
     reflection_type: str,
     summary_text: str,
-    profile_candidates: Optional[List[Dict[str, Any]]] = None,
-    rule_candidates: Optional[List[Dict[str, Any]]] = None,
-    contradictions: Optional[List[Dict[str, Any]]] = None,
-    pruning_suggestions: Optional[List[Dict[str, Any]]] = None,
+    profile_candidates: list[dict[str, Any]] | None = None,
+    rule_candidates: list[dict[str, Any]] | None = None,
+    contradictions: list[dict[str, Any]] | None = None,
+    pruning_suggestions: list[dict[str, Any]] | None = None,
     confidence: float = 0.7,
 ) -> str:
     """Write a reflection record (output of consolidator).  Returns the row id."""
@@ -182,7 +182,7 @@ def write_reflection(
 # Path D — rule promotion
 # ---------------------------------------------------------------------------
 
-def write_promoted_rule(decision: PromotionDecision, user_id: Optional[str], project_id: Optional[str]) -> str:
+def write_promoted_rule(decision: PromotionDecision, user_id: str | None, project_id: str | None) -> str:
     """Write a promoted rule from a PromotionDecision.  Returns the rule id."""
     row_id = insert_rule(
         user_id=user_id,

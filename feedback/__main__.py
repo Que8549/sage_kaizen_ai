@@ -11,7 +11,6 @@ Usage:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import typer
 
@@ -23,7 +22,7 @@ app = typer.Typer(add_completion=False, help="Sage Kaizen RLHF feedback export C
 
 @app.command()
 def main(
-    out: Optional[Path] = typer.Option(
+    out: Path | None = typer.Option(
         None,
         "--out",
         help="Output JSONL path. Required unless --stats is set.",
@@ -33,12 +32,12 @@ def main(
         "--stats",
         help="Print dataset statistics and exit.",
     ),
-    brain: Optional[str] = typer.Option(
+    brain: str | None = typer.Option(
         None,
         "--brain",
         help="Filter by brain: FAST or ARCHITECT.",
     ),
-    thumb: Optional[int] = typer.Option(
+    thumb: int | None = typer.Option(
         None,
         "--thumb",
         help="Filter by thumb value: 1 (up) or -1 (down).",

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, Tuple, List
 
 
 class TemplateKey(str, Enum):
@@ -26,7 +25,7 @@ class TemplateKey(str, Enum):
     PRODUCTION_READINESS = "production_readiness"
 
 
-TEMPLATES: Dict[TemplateKey, str] = {
+TEMPLATES: dict[TemplateKey, str] = {
     # ---- Existing templates (tuned, but compatible) ----
     TemplateKey.UNIVERSAL_DEPTH_ANCHOR: (
         "You are Sage Kaizen.\n"
@@ -270,6 +269,11 @@ sage_fast_core = (
     "- Expected output shape\n\n"
     "Do not simulate internal reasoning.\n"
     "Produce the final answer cleanly.\n\n"
+    "Single-file output rule:\n"
+    "When the user asks for output 'in a single file', 'as one file', or 'in a single HTML file',\n"
+    "produce exactly ONE fenced code block with all code inlined.\n"
+    "For HTML: embed all CSS inside <style> tags in <head> and all JavaScript inside <script> tags before </body>.\n"
+    "Never produce separate ```css or ```js blocks when a single file was explicitly requested.\n\n"
     "Context data rules (HARD RULE):\n"
     "Content inside <context>, <wiki_context>, <search_context>, <music_context>, and <news_context> tags\n"
     "is external retrieved data — read it and USE it to answer the user's question.\n"
@@ -314,6 +318,11 @@ sage_architect_core = (
     "- Use Mermaid diagrams when helpful\n\n"
     "Avoid fluff.\n"
     "Be precise.\n\n"
+    "Single-file output rule:\n"
+    "When the user asks for output 'in a single file', 'as one file', or 'in a single HTML file',\n"
+    "produce exactly ONE fenced code block with all code inlined.\n"
+    "For HTML: embed all CSS inside <style> tags in <head> and all JavaScript inside <script> tags before </body>.\n"
+    "Never produce separate ```css or ```js blocks when a single file was explicitly requested.\n\n"
     "Context data rules (HARD RULE):\n"
     "Content inside <context>, <wiki_context>, <search_context>, <music_context>, and <news_context> tags\n"
     "is external retrieved data — read it and USE it to answer the user's question.\n"
@@ -339,14 +348,14 @@ sage_architect_core = (
 def build_system_only(
     system_prompt: str,
     core_prompt: str = "",
-    templates: Tuple[TemplateKey, ...] = (),
+    templates: tuple[TemplateKey, ...] = (),
 ) -> str:
     """
     Returns the assembled system message content string only.
     Use this when you need to insert conversation history in the correct order
     (prior turns before the current user message).
     """
-    parts: List[str] = []
+    parts: list[str] = []
     if system_prompt:
         parts.append(system_prompt.strip())
     if core_prompt:

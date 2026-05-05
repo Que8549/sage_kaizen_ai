@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import List
 
 from rag_v1.config.rag_settings import RetrievedChunk
 
 
-def format_sources_markdown(chunks: List[RetrievedChunk]) -> str:
+def format_sources_markdown(chunks: list[RetrievedChunk]) -> str:
     """Return an inline markdown sources block for appending after a streamed response.
 
     Example output:

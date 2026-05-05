@@ -10,7 +10,6 @@ Design:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
 
 from .schemas import EpisodeRow
 
@@ -20,9 +19,9 @@ _RRF_K = 60
 
 
 def rrf_fuse(
-    lexical: List[Tuple[EpisodeRow, float]],
-    vector: List[Tuple[EpisodeRow, float]],
-) -> List[Tuple[EpisodeRow, float]]:
+    lexical: list[tuple[EpisodeRow, float]],
+    vector: list[tuple[EpisodeRow, float]],
+) -> list[tuple[EpisodeRow, float]]:
     """
     Reciprocal Rank Fusion of two ranked lists (lexical + vector).
 
@@ -31,8 +30,8 @@ def rrf_fuse(
 
     Returns a merged list sorted by descending RRF score.
     """
-    rrf_scores: Dict[str, float] = {}
-    id_to_row: Dict[str, EpisodeRow] = {}
+    rrf_scores: dict[str, float] = {}
+    id_to_row: dict[str, EpisodeRow] = {}
 
     for rank, (row, _) in enumerate(lexical, start=1):
         rrf_scores[row.id] = rrf_scores.get(row.id, 0.0) + 1.0 / (_RRF_K + rank)
@@ -47,9 +46,9 @@ def rrf_fuse(
 
 
 def score_episodes(
-    fused: List[Tuple[EpisodeRow, float]],
-    scope_filter: Optional[str] = None,
-) -> List[Tuple[EpisodeRow, float]]:
+    fused: list[tuple[EpisodeRow, float]],
+    scope_filter: str | None = None,
+) -> list[tuple[EpisodeRow, float]]:
     """
     Apply multi-signal final scoring:
 
@@ -65,7 +64,7 @@ def score_episodes(
     now = datetime.now(tz=timezone.utc)
     max_rrf = fused[0][1] or 1.0   # normalisation denominator
 
-    scored: List[Tuple[EpisodeRow, float]] = []
+    scored: list[tuple[EpisodeRow, float]] = []
     for row, rrf_score in fused:
         norm_rrf = rrf_score / max_rrf   # 0..1
 
@@ -96,14 +95,14 @@ def score_episodes(
 
 
 def filter_contradictions(
-    scored: List[Tuple[EpisodeRow, float]],
-) -> List[Tuple[EpisodeRow, float]]:
+    scored: list[tuple[EpisodeRow, float]],
+) -> list[tuple[EpisodeRow, float]]:
     """
     Suppress lower-scored items that share a contradiction_group with a
     higher-scored item.  The first (highest-scored) item in each group wins.
     """
     seen_groups: set[str] = set()
-    result: List[Tuple[EpisodeRow, float]] = []
+    result: list[tuple[EpisodeRow, float]] = []
     for row, score in scored:
         if row.contradiction_group:
             if row.contradiction_group in seen_groups:
@@ -114,17 +113,17 @@ def filter_contradictions(
 
 
 def deduplicate(
-    scored: List[Tuple[EpisodeRow, float]],
+    scored: list[tuple[EpisodeRow, float]],
     similarity_threshold: float = 0.92,
-) -> List[Tuple[EpisodeRow, float]]:
+) -> list[tuple[EpisodeRow, float]]:
     """
     Simple text-based deduplication: suppress items whose summary_text is
     very similar to a higher-ranked item already in the result set.
 
     Uses character-level Jaccard similarity on word sets (no heavy deps).
     """
-    result: List[Tuple[EpisodeRow, float]] = []
-    seen_tokens: List[set[str]] = []
+    result: list[tuple[EpisodeRow, float]] = []
+    seen_tokens: list[set[str]] = []
 
     for row, score in scored:
         tokens = set(row.summary_text.lower().split())

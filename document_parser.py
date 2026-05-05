@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass
-from typing import Optional
 
 from sk_logging import get_logger
 
@@ -247,7 +246,7 @@ def is_supported(filename: str) -> bool:
     return _file_extension(filename) in ACCEPTED_EXTENSIONS
 
 
-def parse_document(raw: bytes, filename: str) -> Optional[DocumentAttachment]:
+def parse_document(raw: bytes, filename: str) -> DocumentAttachment | None:
     """
     Extract plain text from *raw* bytes and return a DocumentAttachment.
 

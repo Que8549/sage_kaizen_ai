@@ -96,14 +96,15 @@ flowchart TD
 | Process | `server_manager.py` | YAML-driven `Popen` spawning, readiness polling via log markers |
 | Context | `rag_v1/runtime/context_injector.py` | Parallel RAG + wiki + search + music injection (5-worker ThreadPoolExecutor) |
 | RAG | `rag_v1/retrieve/retriever.py` | pgvector HNSW vector search; citation formatting |
-| Wiki RAG | `rag_v1/wiki/` | Wikipedia ZIM multimodal RAG; jina-clip-v2 embeddings |
-| Media RAG | `rag_v1/media/` | Cross-modal: images (jina-clip-v2) + audio (CLAP) |
-| Ingest | `rag_v1/ingest/` | Doc / RSS / web / ZIM ingestion; idempotent via content hash |
-| Embed | `rag_v1/embed/embed_client.py` | HTTP client to BGE-M3 embed server |
+| Wiki RAG | `rag_v1/wiki/wiki_retriever.py` | Wikipedia HNSW retrieval at query time; auto-starts jina-clip-v2 embed service |
+| Media RAG | `rag_v1/media/` | Cross-modal retrieval: images (jina-clip-v2) + audio (CLAP) + lyrics |
+| Ingest | `sage_kaizen_ai_ingest` project | All ingest pipelines (doc, RSS, web, ZIM, media, news); runs standalone |
+| Embed | `rag_v1/embed/embed_client.py` | HTTP client to BGE-M3 embed server; persistent sync + lazy async httpx client |
 | Memory | `memory/service.py` | Episode retrieval, profile management, learned rules; lazy singleton |
 | Search | `search/search_orchestrator.py` | SearXNG metasearch; scoring, dedup, per-brain ceilings; lazy singleton |
 | Summarizer | `search/summarizer.py` | FAST-brain or fallback summarization of search evidence |
-| News | `news/` | News collection, clustering, enrichment, image pipeline |
+| News (retrieval) | `news/retrieval/` | Query-time news resolver and market data client; read-only DB queries |
+| News (ingest) | `sage_kaizen_ai_ingest` project | News collection, clustering, enrichment, images, scheduling — separate process |
 | Review | `review_service/` | LangGraph sequential review; human-gated before file writes |
 | Config | `settings.py` + `pg_settings.py` | Typed Pydantic settings loaded from `.env` |
 | Env | `env_utils.py` | Per-call env var accessors (re-read every turn, not cached) |
@@ -173,14 +174,22 @@ ui_streamlit_server.py
 
 ---
 
-## 6. RAG Ingest Flow (Offline, Separate Processes)
+## 6. RAG Ingest Flow (Offline — `sage_kaizen_ai_ingest` Project)
+
+> All ingest pipelines are now a **separate project** at `F:\Projects\sage_kaizen_ai_ingest`.
+> They share the same PostgreSQL database and namespace packages (`rag_v1.*`, `news.*`) via
+> Python namespace packages (no `__init__.py`) and editable pip installs (`pip install -e .`).
+> The Pylance cross-project import resolution is configured via `pyrightconfig.json`
+> (`extraPaths: ["../sage_kaizen_ai_ingest"]`).
 
 ### Document / RSS / Web RAG
 ```
-ingest_docs.py / rss_ingest.py / web_ingest.py
+sage_kaizen_ai_ingest/rag_v1/ingest/
+  ingest_docs.py / rss_ingest.py / web_ingest.py
   │  iter_text_files() / RSS feed fetch / URL crawl
   │  sha256_text()     — content hash (idempotency key)
   │  chunk_text()      — sliding window (1200 chars, 200 overlap)
+  │  ensure_embed_running() — auto-starts BGE-M3 :8020 if not alive
   │
   ▼
 EmbedClient → POST /embeddings → llama-server :8020 (BGE-M3 FP16)
@@ -193,13 +202,14 @@ upsert_chunks_executemany() → PostgreSQL rag_chunks table
 
 ### Wikipedia Multimodal RAG
 ```
-wiki_ingest.py
+sage_kaizen_ai_ingest/rag_v1/wiki/wiki_ingest.py
   │  ZIM dump scan → _iter_md_files()
   │  3-stage parallel pipeline:
   │  ├─ 1 IO scanner thread
   │  ├─ 2 embed/write workers (one per GPU: :8031 CUDA0, :8032 CUDA1)
   │  └─ 1 reporter thread
   │  resume-safe by content_hash
+  │  NOTE: wiki ingest port 8032 (CUDA1) conflicts with FAST brain — stop FAST first
   │
   ▼
 MmEmbedClient → POST /embed → jina-clip-v2 FastAPI service
@@ -213,13 +223,26 @@ PostgreSQL: wiki_bundles, wiki_pages, wiki_chunks, wiki_images
 
 ### Media / Audio Ingest (Cross-Modal)
 ```
-media_ingest.py
+sage_kaizen_ai_ingest/rag_v1/media/media_ingest.py
   │  images  → jina-clip-v2 :8031 (1024-dim)
   │  audio   → clap-htsat-unfused :8040 (512-dim)
   │
   ▼
 PostgreSQL: media_chunks table
   │  HNSW indexes (separate per modality)
+```
+
+### News Ingest
+```
+sage_kaizen_ai_ingest/news/scheduler/news_scheduler.py  (APScheduler 3.x)
+  │  9 registered jobs: collect, enrich, cluster, images,
+  │  summarize_articles, summarize_clusters, daily_brief, rolling_brief, reconcile_failed
+  │
+  ├─ TopicCollector   → SearXNG :8080 → daily_news table
+  ├─ ArticleEnricher  → full-text fetch → BGE-M3 :8020 embeddings
+  ├─ ArticleClusterer → DBSCAN on embeddings → news_story_clusters
+  ├─ NewsImagePipeline→ image fetch → jina-clip-v2 :8031 embeddings
+  └─ Summarizers      → FAST/ARCHITECT brain HTTP calls → summary tables
 ```
 
 ---
@@ -253,7 +276,7 @@ Config source: config/brains/brains.yaml — no .bat files exist
 |---------|-------|----------------|-----|---------|
 | FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (RTX 5080) | Multimodal chat (text + image + audio via mmproj) |
 | ARCHITECT brain | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (RTX 5090) | Deep reasoning; 128K ctx; `<think>` tokens; speculative decoding |
-| Summarizer | Qwen2.5-3B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
+| Summarizer | Qwen3-4B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
 | BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA0 (RTX 5090) | RAG text embeddings (1024-dim) |
 | Wiki embed A | jina-clip-v2 | 8031 | CUDA0 (RTX 5090) | Wikipedia multimodal embeddings (normal operation) |
 | Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (RTX 5080) | Wikipedia ingest only (2nd worker; needs FAST brain stopped) |
@@ -286,3 +309,5 @@ Config source: config/brains/brains.yaml — no .bat files exist
 4. **Paths must be fully expanded** before Python uses them — no `%ROOT%` or env var assumptions
 5. **Review service uses `pg_settings.py` DSN** — LangGraph tables live in the `langgraph` schema (not `public`); run `scripts/setup_langgraph_schema.sql` once before first review
 6. **`prompt_library.py` is the authoritative source for all prompts** — `settings.py` imports from it; no prompt strings outside this module
+7. **Namespace packages must not have `__init__.py`** — `rag_v1/`, `rag_v1/wiki/`, `rag_v1/media/`, and `news/` are namespace packages shared between this project and `sage_kaizen_ai_ingest`; adding `__init__.py` breaks the cross-project split
+8. **Pylance cross-project resolution** — `pyrightconfig.json` at project root has `extraPaths: ["../sage_kaizen_ai_ingest"]`; do not remove this entry

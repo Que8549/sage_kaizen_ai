@@ -1,5 +1,11 @@
 # 05-Daily_News_Agent.md
 
+> **Implementation location**: All news ingest pipelines (`collectors/`, `enrichment/`, `clustering/`,
+> `images/`, `summaries/`, `scheduler/`) live in the **`sage_kaizen_ai_ingest`** project at
+> `F:\Projects\sage_kaizen_ai_ingest\news\`.  
+> Only the query-time retrieval layer (`news/retrieval/news_resolver.py`, `news/retrieval/market_client.py`)
+> remains in this project. Run the scheduler with `python scripts/run_scheduler.py` from the ingest project.
+
 ## Purpose
 
 This document defines a production-ready design for the Sage Kaizen Daily News Runtime.

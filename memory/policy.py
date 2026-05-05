@@ -7,7 +7,6 @@ tuned in one place without touching logic.
 """
 from __future__ import annotations
 
-from typing import List, Optional
 
 from sk_logging import get_logger
 from .models import EpisodeWriteRequest, PromotionDecision
@@ -102,9 +101,9 @@ def check_rule_promotion(
     rule_kind: str,
     confidence: float,
     rationale: str,
-    source_memory_id: Optional[str] = None,
+    source_memory_id: str | None = None,
     scope: str = "project",
-) -> Optional[PromotionDecision]:
+) -> PromotionDecision | None:
     """
     Evaluate whether a candidate rule should be promoted.
 

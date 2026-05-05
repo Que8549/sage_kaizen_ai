@@ -10,7 +10,6 @@ Priority order when trimming: profiles → rules → episodes (drop lowest-score
 """
 from __future__ import annotations
 
-from typing import List
 
 from sk_logging import get_logger
 from .models import EpisodeMemoryItem, MemoryBundle, ProfileMemoryItem, RuleMemoryItem
@@ -40,9 +39,9 @@ def _episode_tokens(e: EpisodeMemoryItem) -> int:
 
 
 def build_bundle(
-    profiles: List[ProfileMemoryItem],
-    rules: List[RuleMemoryItem],
-    episodes: List[EpisodeMemoryItem],
+    profiles: list[ProfileMemoryItem],
+    rules: list[RuleMemoryItem],
+    episodes: list[EpisodeMemoryItem],
     max_tokens: int,
 ) -> MemoryBundle:
     """
@@ -54,7 +53,7 @@ def build_bundle(
     used = _HEADER_TOKENS
     was_truncated = False
 
-    kept_profiles: List[ProfileMemoryItem] = []
+    kept_profiles: list[ProfileMemoryItem] = []
     for p in profiles:
         cost = _profile_tokens(p)
         if used + cost <= max_tokens:
@@ -63,7 +62,7 @@ def build_bundle(
         else:
             was_truncated = True
 
-    kept_rules: List[RuleMemoryItem] = []
+    kept_rules: list[RuleMemoryItem] = []
     for r in rules:
         cost = _rule_tokens(r)
         if used + cost <= max_tokens:
@@ -75,7 +74,7 @@ def build_bundle(
     # Episodes sorted by retrieval_score descending (already sorted by retriever,
     # but re-sort here to be safe in case caller mixed the order)
     sorted_eps = sorted(episodes, key=lambda e: e.retrieval_score, reverse=True)
-    kept_episodes: List[EpisodeMemoryItem] = []
+    kept_episodes: list[EpisodeMemoryItem] = []
     for e in sorted_eps:
         cost = _episode_tokens(e)
         if used + cost <= max_tokens:
@@ -110,7 +109,7 @@ def format_bundle_prompt(bundle: MemoryBundle) -> str:
     if bundle.total_items == 0:
         return ""
 
-    lines: List[str] = []
+    lines: list[str] = []
 
     if bundle.profiles:
         lines.append("[USER PROFILE]")

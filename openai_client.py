@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Iterator
 
 import requests
 
@@ -15,7 +15,7 @@ class LlamaServerError(RuntimeError):
 # Plain requests.post()/get() open a new socket per call; a Session keeps the
 # connection alive so the TCP handshake cost (~0.1–1 ms on loopback) is paid
 # once per server, not once per turn.
-_sessions: Dict[str, requests.Session] = {}
+_sessions: dict[str, requests.Session] = {}
 
 
 def _session(base_url: str) -> requests.Session:
@@ -37,7 +37,7 @@ class HttpTimeouts:
     read_s: float
 
 
-def _timeout_tuple(t: HttpTimeouts) -> Tuple[float, float]:
+def _timeout_tuple(t: HttpTimeouts) -> tuple[float, float]:
     return (float(t.connect_s), float(t.read_s))
 
 
@@ -58,7 +58,7 @@ def _normalize_base_url(base_url: str) -> str:
     return b
 
 
-def _probe_get(base: str, path: str, *, timeouts: HttpTimeouts) -> Tuple[bool, str]:
+def _probe_get(base: str, path: str, *, timeouts: HttpTimeouts) -> tuple[bool, str]:
     """
     Returns (ok, detail). ok is True if HTTP 200.
     detail includes status code or exception type.
@@ -73,7 +73,7 @@ def _probe_get(base: str, path: str, *, timeouts: HttpTimeouts) -> Tuple[bool, s
         return False, f"{path}={type(e).__name__}"
 
 
-def health_check(base_url: str, *, timeouts: HttpTimeouts) -> Tuple[bool, str]:
+def health_check(base_url: str, *, timeouts: HttpTimeouts) -> tuple[bool, str]:
     """
     Returns (ok, detail).
 
@@ -106,7 +106,7 @@ def health_check(base_url: str, *, timeouts: HttpTimeouts) -> Tuple[bool, str]:
     return False, f"not ready ({d1}; {d2}; {d3}; {d4})"
 
 
-def discover_model_id(base_url: str, *, timeouts: HttpTimeouts) -> Optional[str]:
+def discover_model_id(base_url: str, *, timeouts: HttpTimeouts) -> str | None:
     """
     Returns the first model id from /v1/models, if available.
     Falls back to None if the endpoint is unavailable or payload is unexpected.
@@ -137,11 +137,52 @@ def _iter_sse_data_lines(resp: requests.Response) -> Iterator[str]:
             yield line[len("data:"):].strip()
 
 
+def call_brain_blocking(
+    base_url: str,
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    temperature: float,
+    top_p: float,
+    max_tokens: int,
+    timeouts: HttpTimeouts,
+    top_k: int = -1,
+    min_p: float = 0.0,
+) -> str:
+    """Non-streaming brain call — for background batch jobs that don't need live SSE.
+
+    Returns the full response content string with thinking tokens already stripped
+    by the server (stream=False never emits reasoning_content separately).
+    """
+    base = _normalize_base_url(base_url)
+    url = f"{base}/v1/chat/completions"
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "temperature": float(temperature),
+        "top_p": float(top_p),
+        "max_tokens": int(max_tokens),
+        "top_k": int(top_k),
+        "min_p": float(min_p),
+        "cache_prompt": True,
+    }
+    r = _session(base).post(url, json=payload, timeout=_timeout_tuple(timeouts))
+    if r.status_code // 100 != 2:
+        try:
+            body = r.text
+        except Exception:
+            body = "<unreadable>"
+        raise LlamaServerError(f"{url} returned HTTP {r.status_code}: {body[:500]}")
+    data = r.json()
+    return data["choices"][0]["message"].get("content", "") or ""
+
+
 def stream_chat_completions(
     base_url: str,
     *,
     model: str,
-    messages: List[Dict[str, Any]],  # Any: content may be str or multimodal list
+    messages: list[dict[str, Any]],  # Any: content may be str or multimodal list
     temperature: float,
     top_p: float,
     max_tokens: int,
@@ -153,7 +194,7 @@ def stream_chat_completions(
     base = _normalize_base_url(base_url)
     url = f"{base}/v1/chat/completions"
 
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "stream": True,

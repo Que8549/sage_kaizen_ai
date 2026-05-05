@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
@@ -53,7 +53,7 @@ class NewsScheduler:
     execution time so that importing this module at startup is fast.
     """
 
-    _instance: ClassVar[Optional[NewsScheduler]] = None
+    _instance: ClassVar["NewsScheduler | None"] = None
 
     def __init__(self) -> None:
         cfg = get_news_settings()

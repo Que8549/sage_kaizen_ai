@@ -8,7 +8,6 @@ the UI and ChatService have no direct dependency on server_manager details.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
 
 from openai_client import HttpTimeouts, discover_model_id, health_check
 from server_manager import (
@@ -87,10 +86,10 @@ class InferenceSession:
     # Health                                                               #
     # ------------------------------------------------------------------ #
 
-    def health_q5(self, timeouts: HttpTimeouts) -> Tuple[bool, str]:
+    def health_q5(self, timeouts: HttpTimeouts) -> tuple[bool, str]:
         return health_check(self.q5_url, timeouts=timeouts)
 
-    def health_q6(self, timeouts: HttpTimeouts) -> Tuple[bool, str]:
+    def health_q6(self, timeouts: HttpTimeouts) -> tuple[bool, str]:
         return health_check(self.q6_url, timeouts=timeouts)
 
     # ------------------------------------------------------------------ #
@@ -99,7 +98,7 @@ class InferenceSession:
 
     def discover_model_ids(
         self, timeouts: HttpTimeouts
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         """Return (q5_model_id, q6_model_id) as discovered from /v1/models."""
         mid5 = discover_model_id(self.q5_url, timeouts=timeouts)
         mid6 = discover_model_id(self.q6_url, timeouts=timeouts)
@@ -109,22 +108,22 @@ class InferenceSession:
     # Server lifecycle                                                     #
     # ------------------------------------------------------------------ #
 
-    def ensure_q5_ready(self) -> Tuple[bool, str]:
+    def ensure_q5_ready(self) -> tuple[bool, str]:
         """Start embed + Q5 if not running; block until ready or timeout."""
         return ensure_q5_running(self.servers)
 
-    def ensure_q6_ready(self) -> Tuple[bool, str]:
+    def ensure_q6_ready(self) -> tuple[bool, str]:
         """Start Q6 if not running; block until ready or timeout."""
         return ensure_q6_running(self.servers)
 
-    def ensure_summarizer_ready(self) -> Tuple[bool, str]:
+    def ensure_summarizer_ready(self) -> tuple[bool, str]:
         """
         Start the CPU summarizer brain if configured and not running.
         Returns (False, reason) when no summarizer is configured — not an error.
         """
         return ensure_summarizer_running(self.servers)
 
-    def stop_all(self) -> Tuple[bool, bool, bool]:
+    def stop_all(self) -> tuple[bool, bool, bool]:
         """Stop all three servers. Returns (ok_q5, ok_q6, ok_embed)."""
         ok5 = stop_server_on_port(self.servers.q5_port)
         ok6 = stop_server_on_port(self.servers.q6_port)

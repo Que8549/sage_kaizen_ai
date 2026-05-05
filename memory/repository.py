@@ -17,7 +17,7 @@ Design rules:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from .db import dumps, get_connection, new_uuid, now_utc, vec_str
 from .schemas import EpisodeRow, ProfileRow, ReflectionRow, RuleRow
@@ -32,18 +32,18 @@ _LOG = get_logger("sage_kaizen.memory.repository")
 
 def upsert_profile(
     user_id: str,
-    project_id: Optional[str],
-    workspace_id: Optional[str],
+    project_id: str | None,
+    workspace_id: str | None,
     scope: str,
     profile_type: str,
     key: str,
     value_text: str,
-    value_json: Optional[Dict[str, Any]] = None,
+    value_json: dict[str, Any] | None = None,
     confidence: float = 1.0,
     source_type: str = "explicit_user",
     is_pinned: bool = True,
     is_locked: bool = False,
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """
     Insert or update a profile row.
@@ -105,8 +105,8 @@ def upsert_profile(
 
 def fetch_active_profiles(
     user_id: str,
-    project_id: Optional[str] = None,
-) -> List[ProfileRow]:
+    project_id: str | None = None,
+) -> list[ProfileRow]:
     """Fetch all active profile rows for a user (always-on bundle)."""
     sql = """
         SELECT id, user_id, project_id, workspace_id, scope, profile_type, key,
@@ -130,21 +130,21 @@ def fetch_active_profiles(
 
 def insert_episode(
     user_id: str,
-    project_id: Optional[str],
-    workspace_id: Optional[str],
-    session_id: Optional[str],
+    project_id: str | None,
+    workspace_id: str | None,
+    session_id: str | None,
     scope: str,
     event_type: str,
     summary_text: str,
-    embedding: Optional[List[float]] = None,
-    intent_label: Optional[str] = None,
-    raw_excerpt: Optional[str] = None,
-    tags: Optional[List[str]] = None,
+    embedding: list[float] | None = None,
+    intent_label: str | None = None,
+    raw_excerpt: str | None = None,
+    tags: list[str] | None = None,
     importance: float = 0.5,
     confidence: float = 0.6,
     was_user_correction: bool = False,
     was_explicit_preference: bool = False,
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Insert a new episode row.  Returns the new row id."""
     rid = new_uuid()
@@ -184,10 +184,10 @@ def insert_episode(
 
 def fetch_episodes_lexical(
     user_id: str,
-    project_id: Optional[str],
+    project_id: str | None,
     query_text: str,
     limit: int = 10,
-) -> List[Tuple[EpisodeRow, float]]:
+) -> list[tuple[EpisodeRow, float]]:
     """Full-text search on memory.episodes.  Returns (row, ts_rank) pairs."""
     sql = """
         SELECT id, user_id, project_id, workspace_id, session_id, scope, event_type,
@@ -214,10 +214,10 @@ def fetch_episodes_lexical(
 
 def fetch_episodes_vector(
     user_id: str,
-    project_id: Optional[str],
-    embedding: List[float],
+    project_id: str | None,
+    embedding: list[float],
     limit: int = 10,
-) -> List[Tuple[EpisodeRow, float]]:
+) -> list[tuple[EpisodeRow, float]]:
     """
     Vector similarity search on memory.episodes using HNSW.
 
@@ -255,10 +255,10 @@ def fetch_episodes_vector(
 
 def fetch_episodes_since(
     user_id: str,
-    project_id: Optional[str],
+    project_id: str | None,
     cutoff: datetime,
     limit: int = 40,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Fetch raw episode rows created after `cutoff`, ordered newest-first.
     Used by the consolidator — returns plain dicts to avoid importing EpisodeRow
@@ -298,11 +298,11 @@ def touch_episode_retrieved(episode_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 def fetch_active_rules(
-    user_id: Optional[str],
-    project_id: Optional[str],
-    query_text: Optional[str] = None,
+    user_id: str | None,
+    project_id: str | None,
+    query_text: str | None = None,
     limit: int = 8,
-) -> List[RuleRow]:
+) -> list[RuleRow]:
     """Fetch active rules, optionally filtered by FTS on rule_text."""
     if query_text:
         sql = """
@@ -321,7 +321,7 @@ def fetch_active_rules(
             ORDER BY is_locked DESC, rank DESC, confidence DESC
             LIMIT %(limit)s
         """
-        params: Dict[str, Any] = {
+        params: dict[str, Any] = {
             "user_id": user_id, "project_id": project_id,
             "query": query_text, "limit": limit,
         }
@@ -347,18 +347,18 @@ def fetch_active_rules(
 
 
 def insert_rule(
-    user_id: Optional[str],
-    project_id: Optional[str],
+    user_id: str | None,
+    project_id: str | None,
     scope: str,
     rule_kind: str,
     rule_text: str,
-    rationale: Optional[str] = None,
+    rationale: str | None = None,
     confidence: float = 0.7,
     source_type: str = "promoted_from_episode",
-    source_memory_id: Optional[str] = None,
+    source_memory_id: str | None = None,
     is_locked: bool = False,
     review_status: str = "proposed",
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     rid = new_uuid()
     now = now_utc()
@@ -395,16 +395,16 @@ def insert_rule(
 
 def insert_reflection(
     user_id: str,
-    project_id: Optional[str],
-    session_id: Optional[str],
+    project_id: str | None,
+    session_id: str | None,
     reflection_type: str,
     summary_text: str,
-    profile_candidates: Optional[List[Any]] = None,
-    rule_candidates: Optional[List[Any]] = None,
-    contradictions: Optional[List[Any]] = None,
-    pruning_suggestions: Optional[List[Any]] = None,
+    profile_candidates: list[Any] | None = None,
+    rule_candidates: list[Any] | None = None,
+    contradictions: list[Any] | None = None,
+    pruning_suggestions: list[Any] | None = None,
     confidence: float = 0.7,
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     rid = new_uuid()
     sql = """
@@ -474,7 +474,7 @@ def disable_rule(rule_id: str) -> None:
 # Row constructors (internal)
 # ---------------------------------------------------------------------------
 
-def _profile_row(r: Dict[str, Any]) -> ProfileRow:
+def _profile_row(r: dict[str, Any]) -> ProfileRow:
     return ProfileRow(
         id=str(r["id"]), user_id=r["user_id"], project_id=r["project_id"],
         workspace_id=r.get("workspace_id"), scope=r["scope"],
@@ -488,7 +488,7 @@ def _profile_row(r: Dict[str, Any]) -> ProfileRow:
     )
 
 
-def _episode_row(r: Dict[str, Any]) -> EpisodeRow:
+def _episode_row(r: dict[str, Any]) -> EpisodeRow:
     return EpisodeRow(
         id=str(r["id"]), user_id=r["user_id"], project_id=r["project_id"],
         workspace_id=r.get("workspace_id"), session_id=r.get("session_id"),
@@ -507,7 +507,7 @@ def _episode_row(r: Dict[str, Any]) -> EpisodeRow:
     )
 
 
-def _rule_row(r: Dict[str, Any]) -> RuleRow:
+def _rule_row(r: dict[str, Any]) -> RuleRow:
     return RuleRow(
         id=str(r["id"]), user_id=r.get("user_id"), project_id=r.get("project_id"),
         workspace_id=r.get("workspace_id"), scope=r["scope"],

@@ -3,8 +3,12 @@
 # nvidia-smi
 
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 from huggingface_hub import snapshot_download
 
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 # You can then use the `api` object for interactions, but snapshot_download
@@ -19,9 +23,9 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 # Re-download if needed:
 snapshot_download(
-    repo_id = "Qwen/Qwen2.5-3B-Instruct-GGUF",
-    local_dir = "E:/Qwen2.5-3B-Instruct-GGUF",
-    allow_patterns = ["*Q6_K*", "*Q8_0*"],   
+    repo_id = "HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Balanced",
+    local_dir = "E:/HauhauCS_Qwen3.6-27B-Uncensored-HauhauCS-Balanced",
+    allow_patterns = ["*Q6_K*", "*mmproj*F16*"],   
     max_workers=16,  # 8 = default
 )
 

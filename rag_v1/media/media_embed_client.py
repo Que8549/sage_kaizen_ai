@@ -15,7 +15,7 @@ Both raise httpx.HTTPStatusError on non-2xx responses after all retries.
 from __future__ import annotations
 
 import base64
-from typing import Sequence
+from collections.abc import Sequence
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_fixed

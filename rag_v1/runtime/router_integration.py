@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import List, Tuple
 
 from input_guard import sanitize_chunk
 from rag_v1.config.rag_settings import RetrievedChunk
@@ -28,12 +27,12 @@ class RagInjector:
 
     def maybe_inject(
         self,
-        messages: List[dict],
+        messages: list[dict],
         user_text: str,
         brain: str,
         enabled: bool = True,
         top_k: int | None = None,
-    ) -> Tuple[List[dict], List[RetrievedChunk]]:
+    ) -> tuple[list[dict], list[RetrievedChunk]]:
         """Inject retrieved context into the last user message and return sources.
 
         RAG context belongs in the user turn, not the system message.  The system

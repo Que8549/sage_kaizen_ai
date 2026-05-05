@@ -1,5 +1,10 @@
 # 01-02 — Wikipedia Offline Corpus & ZIM Download Architecture
 
+> **Implementation location**: The Wikipedia ingest pipeline (`wiki_ingest.py`, `zim_dump.py`,
+> `mm_embed_service/`, `wiki_embed_config.py`, `mm_embed_client.py`) lives in the
+> **`sage_kaizen_ai_ingest`** project at `F:\Projects\sage_kaizen_ai_ingest\rag_v1\wiki\`.  
+> The query-time retriever (`wiki_retriever.py`) remains in this project at `rag_v1/wiki/wiki_retriever.py`.
+
 ## 1. Purpose
 
 This document describes how **Sage Kaizen** acquires, stores, extracts, and prepares offline Wikipedia content for retrieval-augmented generation (RAG), with a focus on the current `zim_dump.py` workflow and the English full-image corpus file:

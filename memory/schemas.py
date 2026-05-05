@@ -9,20 +9,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
 class ProfileRow:
     id: str
     user_id: str
-    project_id: Optional[str]
-    workspace_id: Optional[str]
+    project_id: str | None
+    workspace_id: str | None
     scope: str
     profile_type: str
     key: str
     value_text: str
-    value_json: Optional[Dict[str, Any]]
+    value_json: dict[str, Any] | None
     confidence: float
     source_type: str
     is_pinned: bool
@@ -30,74 +30,74 @@ class ProfileRow:
     is_active: bool
     created_at: datetime
     updated_at: datetime
-    last_confirmed_at: Optional[datetime]
-    expires_at: Optional[datetime]
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    last_confirmed_at: datetime | None
+    expires_at: datetime | None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class EpisodeRow:
     id: str
     user_id: str
-    project_id: Optional[str]
-    workspace_id: Optional[str]
-    session_id: Optional[str]
+    project_id: str | None
+    workspace_id: str | None
+    session_id: str | None
     scope: str
     event_type: str
-    intent_label: Optional[str]
+    intent_label: str | None
     summary_text: str
-    raw_excerpt: Optional[str]
-    tags: List[str]
+    raw_excerpt: str | None
+    tags: list[str]
     importance: float
     confidence: float
-    sentiment: Optional[float]
+    sentiment: float | None
     was_user_correction: bool
     was_explicit_preference: bool
-    contradiction_group: Optional[str]
-    embedding: Optional[List[float]]
+    contradiction_group: str | None
+    embedding: list[float] | None
     created_at: datetime
-    last_accessed_at: Optional[datetime]
-    last_retrieved_at: Optional[datetime]
-    expires_at: Optional[datetime]
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    last_accessed_at: datetime | None
+    last_retrieved_at: datetime | None
+    expires_at: datetime | None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class RuleRow:
     id: str
-    user_id: Optional[str]
-    project_id: Optional[str]
-    workspace_id: Optional[str]
+    user_id: str | None
+    project_id: str | None
+    workspace_id: str | None
     scope: str
     rule_kind: str
     rule_text: str
-    rationale: Optional[str]
+    rationale: str | None
     confidence: float
     promotion_count: int
     source_type: str
-    source_memory_id: Optional[str]
+    source_memory_id: str | None
     is_locked: bool
     is_active: bool
     review_status: str
     created_at: datetime
     updated_at: datetime
-    expires_at: Optional[datetime]
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    expires_at: datetime | None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class ReflectionRow:
     id: str
     user_id: str
-    project_id: Optional[str]
-    workspace_id: Optional[str]
-    session_id: Optional[str]
+    project_id: str | None
+    workspace_id: str | None
+    session_id: str | None
     reflection_type: str
     summary_text: str
-    extracted_profile_candidates: List[Dict[str, Any]]
-    extracted_rule_candidates: List[Dict[str, Any]]
-    contradictions: List[Dict[str, Any]]
-    pruning_suggestions: List[Dict[str, Any]]
+    extracted_profile_candidates: list[dict[str, Any]]
+    extracted_rule_candidates: list[dict[str, Any]]
+    contradictions: list[dict[str, Any]]
+    pruning_suggestions: list[dict[str, Any]]
     confidence: float
     created_at: datetime
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)

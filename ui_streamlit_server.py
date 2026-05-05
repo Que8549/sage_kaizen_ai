@@ -9,7 +9,6 @@ import re
 import threading
 import time
 import warnings
-from typing import List, Optional, Tuple
 from uuid import uuid4
 
 # ── Suppress Pydantic v1 / Python 3.14 compatibility noise ───────────────────
@@ -83,6 +82,7 @@ from document_parser import (
 from input_guard import InjectionDetectedError, check_user_input
 from rag_v1.retrieve.citations import format_sources_markdown
 from inference_session import InferenceSession
+from code_download import CodeFileHandler
 from mermaid_streamlit import DiagramHandler
 from openai_client import HttpTimeouts, LlamaServerError, _normalize_base_url, health_check
 from prompt_library import TemplateKey
@@ -183,7 +183,7 @@ def _extract_video_frames(
     filename: str,
     fps_sample: float = 0.5,
     max_frames: int = 8,
-) -> List[MediaAttachment]:
+) -> list[MediaAttachment]:
     """
     Extract up to max_frames still images from a video file.
 
@@ -209,7 +209,7 @@ def _extract_video_frames(
             step = max(1, int(video_fps / fps_sample))
             frames_to_grab = list(range(0, total_frames, step))[:max_frames]
 
-            attachments: List[MediaAttachment] = []
+            attachments: list[MediaAttachment] = []
             for fi in frames_to_grab:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
                 ok, frame = cap.read()
@@ -249,9 +249,9 @@ def _collect_attachments(
     uploaded_files: list,
     frames_per_second: float,
     max_video_frames: int,
-) -> List[MediaAttachment]:
+) -> list[MediaAttachment]:
     """Convert Streamlit UploadedFile objects into MediaAttachment list."""
-    attachments: List[MediaAttachment] = []
+    attachments: list[MediaAttachment] = []
     for uf in uploaded_files:
         ext = _ext(uf.name)
         raw = uf.read()
@@ -281,7 +281,7 @@ def _collect_attachments(
     return attachments
 
 
-def _render_attachments_preview(attachments: List[MediaAttachment]) -> None:
+def _render_attachments_preview(attachments: list[MediaAttachment]) -> None:
     """Show inline previews of pending attachments above the chat input."""
     if not attachments:
         return
@@ -316,7 +316,7 @@ _DOC_SIZE_WARN_MB: float = 10.0
 _DOC_ACCEPT_LIST: list[str] = sorted(_DOC_ACCEPTED_EXTENSIONS)
 
 
-def _collect_doc_attachments(uploaded_files: list) -> List[DocumentAttachment]:
+def _collect_doc_attachments(uploaded_files: list) -> list[DocumentAttachment]:
     """
     Parse Streamlit UploadedFile objects into DocumentAttachment list.
 
@@ -324,7 +324,7 @@ def _collect_doc_attachments(uploaded_files: list) -> List[DocumentAttachment]:
     exceeds _DOC_SIZE_WARN_MB but still attempts parsing (content will be
     truncated to PER_DOCUMENT_CHAR_LIMIT by document_parser).
     """
-    attachments: List[DocumentAttachment] = []
+    attachments: list[DocumentAttachment] = []
     for uf in uploaded_files:
         raw = uf.read()
         size_mb = len(raw) / (1024 * 1024)
@@ -343,7 +343,7 @@ def _collect_doc_attachments(uploaded_files: list) -> List[DocumentAttachment]:
     return attachments
 
 
-def _render_doc_attachments_preview(attachments: List[DocumentAttachment]) -> None:
+def _render_doc_attachments_preview(attachments: list[DocumentAttachment]) -> None:
     """Show a compact preview of pending document attachments."""
     if not attachments:
         return
@@ -626,6 +626,7 @@ try:
     from news.pipeline_runner import get_state as _news_get_state, run_pipeline_async as _news_run
     _NEWS_PIPELINE_AVAILABLE = True
 except ImportError:
+    _news_get_state = _news_run = None  # type: ignore[assignment]
     _NEWS_PIPELINE_AVAILABLE = False
 
 
@@ -645,6 +646,7 @@ def _render_news_pipeline_status() -> None:
     if not _NEWS_PIPELINE_AVAILABLE:
         return
 
+    assert _news_get_state is not None
     s = _news_get_state()
     running      = s["running"]
     stage_num    = s["stage_num"]
@@ -852,6 +854,7 @@ with st.sidebar:
     # ── News pipeline ──────────────────────────────────────────────────────
     st.subheader("News")
     if _NEWS_PIPELINE_AVAILABLE:
+        assert _news_get_state is not None and _news_run is not None
         _pipeline_running = _news_get_state()["running"]
         if _pipeline_running:
             st.button("Get News", disabled=True, help="Pipeline is already running…")
@@ -891,6 +894,9 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
         DiagramHandler.render_if_present(m["content"])
+        if m["role"] == "assistant":
+            _msg_key = str(abs(hash(m["content"])) % 1_000_000)
+            CodeFileHandler.render_downloads(m["content"], key_prefix=f"hist_{_msg_key}")
 
         # Show any media thumbnails stored with the message
         if m.get("media_labels"):
@@ -1126,10 +1132,10 @@ if user_text:
     # Snapshot attachments for this turn then clear both pending lists.
     # Documents and media are snapshotted atomically so mid-rerun state changes
     # cannot cause one to be cleared while the other is still pending.
-    turn_attachments: Tuple[MediaAttachment, ...] = tuple(
+    turn_attachments: tuple[MediaAttachment, ...] = tuple(
         st.session_state.pending_attachments
     )
-    turn_doc_attachments: Tuple[DocumentAttachment, ...] = tuple(
+    turn_doc_attachments: tuple[DocumentAttachment, ...] = tuple(
         st.session_state.pending_doc_attachments
     )
     st.session_state.pending_attachments     = []
@@ -1186,7 +1192,7 @@ if user_text:
     # Voice path: instant keyword heuristic → spinner appears immediately,
     #             LLM routing runs in a background thread in parallel.
     # Keyboard path: existing sequential decide_route() (LLM routing included).
-    _route_future: Optional[concurrent.futures.Future] = None
+    _route_future: concurrent.futures.Future | None = None
     if _pending_voice:
         decision = _heuristic_route(user_text, voice_mode=True)
         _route_future = _ROUTE_EXECUTOR.submit(
@@ -1267,7 +1273,7 @@ if user_text:
             templates_str = ", ".join(t.value for t in templates) if templates else "(none)"
             templates_caption.caption(f"\U0001F9E9 Templates: {templates_str}")
 
-            history: List[dict] = st.session_state.messages[-CONFIG.max_history_messages:]
+            history: list[dict] = st.session_state.messages[-CONFIG.max_history_messages:]
             messages, rag_sources, wiki_images, search_evidence, music_context = chat_svc.prepare_messages(
                 user_text, history, decision, templates,
                 wiki_enabled=st.session_state.get("wiki_enabled", True),
@@ -1297,7 +1303,8 @@ if user_text:
                         if _tts_on and not _barged_in:
                             _voice_bridge.publish_token(voice_session_id, piece)
                         yield piece             # always yield — barge-in silences voice, not text
-                full_streamed = live.write_stream(_voice_stream()) or ""
+                _ws = live.write_stream(_voice_stream())
+                full_streamed = _ws if isinstance(_ws, str) else ""
             except LlamaServerError as e:
                 live.error(str(e))
             except Exception as e:
@@ -1339,6 +1346,7 @@ if user_text:
         if final:
             live.markdown(_clean)
             DiagramHandler.render_if_present(_clean)
+            CodeFileHandler.render_downloads(_clean, key_prefix="live")
 
             # Wikipedia images
             if wiki_images:

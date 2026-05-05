@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
@@ -185,7 +185,7 @@ def load_wiki_embed_config(yaml_path: Path = _BRAINS_YAML) -> WikiEmbedConfig:
             f"brains.yaml not found: {yaml_path}\n"
             "Expected at config/brains/brains.yaml relative to the project root."
         )
-    raw_all: Dict[str, Any] = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    raw_all: dict[str, Any] = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     raw = raw_all["wiki_embed"]
 
     return WikiEmbedConfig(
