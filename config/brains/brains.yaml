@@ -117,7 +117,7 @@ fast:
 # -----------------------------------------------------------------------------
 architect:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
-  model: "E:/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive-Q6_K.gguf"
+  model: "E:/HauhauCS_Qwen3.6-27B-Uncensored-HauhauCS-Balanced/Qwen3.6-27B-Uncensored-HauhauCS-Balanced-Q6_K_P.gguf"
   log: "F:/Projects/sage_kaizen_ai/logs/q6_server.log"
   startup_timeout_s: 360    # 6 minutes — 27B model loads; allow extra for mmproj if enabled
 
@@ -191,7 +191,7 @@ architect:
     slot_prompt_similarity: 0.10
 
     fit: true
-    fit_target: 3072          # 3 GB buffer; extra headroom for 128K ctx + optional mmproj
+    fit_target: 2048  # 3072<-orig value # 3 GB buffer; extra headroom for 128K ctx + optional mmproj
     fit_ctx: 131072
 
     no_warmup: true

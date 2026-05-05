@@ -28,7 +28,11 @@ import base64
 import threading
 import time as _time
 from dataclasses import dataclass, field
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
+
+if TYPE_CHECKING:
+    from memory.service import MemoryService
+    from search.models import SearchEvidence
 
 import router as _router
 from document_parser import DocumentAttachment, format_document_context
@@ -55,7 +59,7 @@ _LOG = get_logger("sage_kaizen.chat_service")
 # MemoryService() will fail on first use.  The singleton catches that and
 # disables memory for the session rather than crashing the app.
 # ---------------------------------------------------------------------------
-_MEMORY_SVC: "MemoryService | None" = None  # type: ignore[name-defined]
+_MEMORY_SVC: "MemoryService | None" = None
 _MEMORY_DISABLED = False   # set True after a failed init so we don't retry every turn
 _MEMORY_LOCK = threading.Lock()
 
@@ -81,7 +85,7 @@ def last_chat_activity_ts() -> float:
     return _last_chat_ts
 
 
-def _get_memory() -> object | None:
+def _get_memory() -> "MemoryService | None":
     global _MEMORY_SVC, _MEMORY_DISABLED
     if _MEMORY_DISABLED:
         return None
@@ -369,7 +373,7 @@ class ChatService:
         document_attachments: tuple[DocumentAttachment, ...] = (),
         session_id: str | None = None,
         user_id: str = "alquin",
-    ) -> tuple[list[dict], list, list, object, str]:
+    ) -> "tuple[list[dict], list, list, SearchEvidence | None, str]":
         """
         Build the full OpenAI-style messages list for this turn.
 

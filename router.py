@@ -25,7 +25,7 @@ DEPTH_HINTS = (
 )
 
 CODE_HINTS = (
-    "code", "python", "c#", "typescript", "javascript", "rust", "go lang", "golang",
+    "code", "html", "css", "python", "c#", "typescript", "javascript", "rust", "go lang", "golang",
     "sql", "bash", "shell script", "powershell", "regex", "function", "class definition",
     "debug", "stack trace", "error", "traceback", "exception", "refactor", "unit test",
     "postgresql",

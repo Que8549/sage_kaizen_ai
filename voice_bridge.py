@@ -42,6 +42,7 @@ Thread-safety invariants:
 """
 from __future__ import annotations
 
+import atexit
 import msgspec.json as _json
 import queue
 import re
@@ -102,6 +103,69 @@ def _clean_markdown(text: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Language-specific code block announcements
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Maps the language tag after the opening ``` to a natural spoken phrase.
+# The phrase is injected once in place of the entire code block content.
+_CODE_LANG_ANNOUNCEMENTS: dict[str, str] = {
+    # Web
+    "html":       "An HTML structure is shown in the UI.",
+    "htm":        "An HTML structure is shown in the UI.",
+    "css":        "CSS styling is shown in the UI.",
+    "javascript": "JavaScript logic is shown in the UI.",
+    "js":         "JavaScript logic is shown in the UI.",
+    "typescript": "TypeScript code is shown in the UI.",
+    "ts":         "TypeScript code is shown in the UI.",
+    "jsx":        "JSX component code is shown in the UI.",
+    "tsx":        "TSX component code is shown in the UI.",
+    # Systems / backend
+    "python":     "Python code is shown in the UI.",
+    "py":         "Python code is shown in the UI.",
+    "csharp":     "C sharp code is shown in the UI.",
+    "cs":         "C sharp code is shown in the UI.",
+    "java":       "Java code is shown in the UI.",
+    "cpp":        "C plus plus code is shown in the UI.",
+    "c":          "C code is shown in the UI.",
+    "go":         "Go code is shown in the UI.",
+    "rust":       "Rust code is shown in the UI.",
+    "rs":         "Rust code is shown in the UI.",
+    "swift":      "Swift code is shown in the UI.",
+    "kotlin":     "Kotlin code is shown in the UI.",
+    "kt":         "Kotlin code is shown in the UI.",
+    "ruby":       "Ruby code is shown in the UI.",
+    "rb":         "Ruby code is shown in the UI.",
+    "php":        "PHP code is shown in the UI.",
+    "lua":        "Lua code is shown in the UI.",
+    "zig":        "Zig code is shown in the UI.",
+    # Data / config
+    "sql":        "An SQL query is shown in the UI.",
+    "json":       "JSON data is shown in the UI.",
+    "xml":        "XML markup is shown in the UI.",
+    "yaml":       "YAML configuration is shown in the UI.",
+    "yml":        "YAML configuration is shown in the UI.",
+    "toml":       "TOML configuration is shown in the UI.",
+    # Shell
+    "bash":       "A shell script is shown in the UI.",
+    "sh":         "A shell script is shown in the UI.",
+    "powershell": "A PowerShell script is shown in the UI.",
+    "ps1":        "A PowerShell script is shown in the UI.",
+    "cmd":        "A command script is shown in the UI.",
+    # Markup / docs
+    "markdown":   "Markdown content is shown in the UI.",
+    "md":         "Markdown content is shown in the UI.",
+}
+
+_CODE_SUB_GENERIC = " A code block is shown in the UI. "
+
+
+def _code_announcement(lang: str) -> str:
+    """Return the TTS announcement for a fenced code block with the given language tag."""
+    phrase = _CODE_LANG_ANNOUNCEMENTS.get(lang.lower().strip())
+    return f" {phrase} " if phrase else _CODE_SUB_GENERIC
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _TtsFilter — token-by-token state machine
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -110,29 +174,41 @@ class _TtsFilter:
     Strips content inappropriate for TTS from a streaming LLM response.
 
     States:
-      NORMAL   — emit tokens (after light markdown cleanup)
-      IN_THINK — inside <think>...</think>; suppress all content
-      IN_CODE  — inside ``` code fence; suppress content, emit one announcement
+      NORMAL          — emit tokens (after light markdown cleanup)
+      IN_THINK        — inside <think>...</think>; suppress all content
+      IN_CODE_HEADER  — collecting language tag after opening ```; suppress content
+      IN_CODE         — inside code fence body; suppress content, emit one announcement
 
     A hold-back buffer guards against tags split across token boundaries
     (e.g. token N = "<thi", token N+1 = "nk>").
+
+    Language-specific announcements
+    --------------------------------
+    When a fenced block opens with a recognised language tag (e.g. ```html,
+    ```python, ```javascript) the announcement names the language:
+      "An HTML structure is shown in the UI."
+      "Python code is shown in the UI."
+    Unknown or untagged blocks fall back to "A code block is shown in the UI."
     """
 
-    CODE_SUB   = " View code block in the UI. "
     _HOLD_BACK = len("</think>")   # longest sentinel we must watch for at tail
 
     def __init__(self) -> None:
-        self._buf:            str  = ""
-        self._in_think:       bool = False
-        self._in_code:        bool = False
-        self._code_announced: bool = False
+        self._buf:              str  = ""
+        self._in_think:         bool = False
+        self._in_code_header:   bool = False   # collecting lang tag after ```
+        self._in_code:          bool = False
+        self._code_lang:        str  = ""
+        self._code_announced:   bool = False
 
     def reset(self) -> None:
         """Reset all state for a new turn."""
-        self._buf            = ""
-        self._in_think       = False
-        self._in_code        = False
-        self._code_announced = False
+        self._buf             = ""
+        self._in_think        = False
+        self._in_code_header  = False
+        self._in_code         = False
+        self._code_lang       = ""
+        self._code_announced  = False
 
     def feed(self, chunk: str) -> str:
         """
@@ -144,7 +220,7 @@ class _TtsFilter:
 
     def flush(self) -> str:
         """Drain any remaining buffer at end of turn."""
-        if self._in_think or self._in_code:
+        if self._in_think or self._in_code_header or self._in_code:
             self._buf = ""
             return ""
         remaining  = _clean_markdown(self._buf)
@@ -156,17 +232,21 @@ class _TtsFilter:
     def _drain(self) -> str:
         output: list[str] = []
         while self._buf:
-            if not self._in_think and not self._in_code:
-                output.extend(self._drain_normal())
-                break                     # _drain_normal holds or consumes all
-            elif self._in_think:
+            if self._in_think:
                 if self._drain_think():
                     continue              # exited think block — re-enter normal
                 break
-            else:                         # _in_code
+            elif self._in_code_header:
+                if self._drain_code_header():
+                    continue              # collected lang tag — enter code body
+                break
+            elif self._in_code:
                 if self._drain_code(output):
                     continue              # exited code block — re-enter normal
                 break
+            else:
+                output.extend(self._drain_normal())
+                break                     # _drain_normal holds or consumes all
         return "".join(output)
 
     def _drain_normal(self) -> list[str]:
@@ -193,8 +273,9 @@ class _TtsFilter:
             self._in_think = True
             self._buf      = self._buf[t_pos + len("<think>"):]
         else:
-            self._in_code        = True
-            self._code_announced = False
+            # Enter code-header state to collect the language tag
+            self._in_code_header = True
+            self._code_lang      = ""
             self._buf            = self._buf[c_pos + 3:]   # skip opening ```
 
         return result
@@ -209,15 +290,39 @@ class _TtsFilter:
         self._buf = ""   # discard all — still inside think block
         return False
 
+    def _drain_code_header(self) -> bool:
+        """
+        IN_CODE_HEADER state: collect language tag until the first newline.
+
+        The language tag is the text between the opening ``` and the first \\n,
+        e.g. "python" in ```python\\n.  It arrives across one or more tokens so
+        we accumulate until we see \\n, then transition to IN_CODE.
+
+        Returns True when the newline (and therefore the full tag) has been seen.
+        """
+        newline_pos = self._buf.find("\n")
+        if newline_pos >= 0:
+            self._code_lang      = (self._code_lang + self._buf[:newline_pos]).strip()
+            self._buf            = self._buf[newline_pos + 1:]   # skip the header line
+            self._in_code_header = False
+            self._in_code        = True
+            self._code_announced = False
+            return True
+        # No newline yet — accumulate what we have and wait for more tokens
+        self._code_lang += self._buf
+        self._buf = ""
+        return False
+
     def _drain_code(self, output: list[str]) -> bool:
         """IN_CODE state: discard until closing ```. Returns True when block ended."""
         if not self._code_announced:
-            output.append(self.CODE_SUB)
+            output.append(_code_announcement(self._code_lang))
             self._code_announced = True
         end = self._buf.find("```")
         if end >= 0:
             self._in_code        = False
             self._code_announced = False
+            self._code_lang      = ""
             self._buf            = self._buf[end + 3:]    # skip closing ```
             return True
         self._buf = ""   # discard all — still inside code block
@@ -242,12 +347,20 @@ class VoiceBridge:
         self.transcript_queue:   queue.Queue[str] = queue.Queue()
         self.barge_in_event:     threading.Event  = threading.Event()
         self._voice_ready_event: threading.Event  = threading.Event()
+        self._stop_event:        threading.Event  = threading.Event()
 
         self._filter = _TtsFilter()
 
-        # ── PUB socket — Streamlit main thread only, never touched by threads ─
+        # ── ZMQ context — LINGER=0 so ctx.destroy() never blocks on exit ────
+        # Without this, zmq.Context.__del__ calls ctx.term() which waits for
+        # all open sockets to drain — including the PULL sockets held by daemon
+        # threads — causing the process to hang after "Stopping..." on Ctrl+C.
         self._ctx = zmq.Context.instance()
+        self._ctx.setsockopt(zmq.LINGER, 0)
+
+        # ── PUB socket — Streamlit main thread only, never touched by threads ─
         self._pub: zmq.Socket = self._ctx.socket(zmq.PUB)
+        self._pub.setsockopt(zmq.LINGER, 0)
         self._pub.bind(_ADDR_TOKEN_BUS)
         _LOG.info("VoiceBridge: PUB bound on %s", _ADDR_TOKEN_BUS)
 
@@ -265,6 +378,9 @@ class VoiceBridge:
 
         # ── Launch voice app subprocess ──────────────────────────────────────
         self._proc: subprocess.Popen | None = self._launch_voice_app()
+
+        # ── Register cleanup so Ctrl+C actually exits ────────────────────────
+        atexit.register(self.shutdown)
 
     # ── Subprocess ────────────────────────────────────────────────────────────
 
@@ -300,40 +416,62 @@ class VoiceBridge:
         """Thread A: PULL on 5790 — receives transcripts + voice_ready signal."""
         ctx  = zmq.Context.instance()
         sock = ctx.socket(zmq.PULL)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.setsockopt(zmq.RCVTIMEO, 500)   # unblock every 500 ms to check stop event
         sock.bind(_ADDR_TRANSCRIPT)
         _LOG.info("VoiceBridge: PULL bound on %s", _ADDR_TRANSCRIPT)
-        while True:
-            try:
-                msg   = _json.decode(sock.recv())
-                mtype = msg.get("type")
-                if mtype == "voice_ready":
-                    _LOG.info("Voice app reported ready")
-                    self._voice_ready_event.set()
-                elif mtype == "transcript":
-                    text = msg.get("text", "").strip()
-                    if text:
-                        self.transcript_queue.put(text)
-                        _LOG.info("Voice transcript queued: %r", text[:60])
-            except Exception:
-                _LOG.exception("VoiceBridge _recv_transcripts error")
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    msg   = _json.decode(sock.recv())
+                    mtype = msg.get("type")
+                    if mtype == "voice_ready":
+                        _LOG.info("Voice app reported ready")
+                        self._voice_ready_event.set()
+                    elif mtype == "transcript":
+                        text = msg.get("text", "").strip()
+                        if text:
+                            self.transcript_queue.put(text)
+                            _LOG.info("Voice transcript queued: %r", text[:60])
+                except zmq.Again:
+                    pass   # RCVTIMEO expired — loop and re-check stop event
+                except zmq.ZMQError:
+                    if self._stop_event.is_set():
+                        break
+                    _LOG.exception("VoiceBridge _recv_transcripts ZMQ error")
+                except Exception:
+                    _LOG.exception("VoiceBridge _recv_transcripts error")
+        finally:
+            sock.close(linger=0)
 
     def _recv_barge_in(self) -> None:
         """Thread B: PULL on 5792 — receives barge-in interrupt signals."""
         ctx  = zmq.Context.instance()
         sock = ctx.socket(zmq.PULL)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.setsockopt(zmq.RCVTIMEO, 500)   # unblock every 500 ms to check stop event
         sock.bind(_ADDR_INTERRUPT)
         _LOG.info("VoiceBridge: PULL bound on %s", _ADDR_INTERRUPT)
-        while True:
-            try:
-                msg = _json.decode(sock.recv())
-                if msg.get("type") == "interrupt":
-                    _LOG.info(
-                        "Barge-in signal (session=%.8s)",
-                        msg.get("session_id", ""),
-                    )
-                    self.barge_in_event.set()
-            except Exception:
-                _LOG.exception("VoiceBridge _recv_barge_in error")
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    msg = _json.decode(sock.recv())
+                    if msg.get("type") == "interrupt":
+                        _LOG.info(
+                            "Barge-in signal (session=%.8s)",
+                            msg.get("session_id", ""),
+                        )
+                        self.barge_in_event.set()
+                except zmq.Again:
+                    pass   # RCVTIMEO expired — loop and re-check stop event
+                except zmq.ZMQError:
+                    if self._stop_event.is_set():
+                        break
+                    _LOG.exception("VoiceBridge _recv_barge_in ZMQ error")
+                except Exception:
+                    _LOG.exception("VoiceBridge _recv_barge_in error")
+        finally:
+            sock.close(linger=0)
 
     # ── Turn publishing — Streamlit main thread only ──────────────────────────
 
@@ -449,3 +587,47 @@ class VoiceBridge:
             _LOG.info("VoiceBridge: greeting sent — %r", text)
         except zmq.ZMQError:
             _LOG.warning("VoiceBridge: failed to send greeting (voice app down?)")
+
+    # ── Graceful shutdown ─────────────────────────────────────────────────────
+
+    def shutdown(self) -> None:
+        """
+        Graceful teardown called on process exit (via atexit) or Ctrl+C.
+
+        1. Signals both PULL threads to stop via _stop_event (they exit their
+           while-loop on the next 500 ms RCVTIMEO tick and close their sockets).
+        2. Terminates (then kills if needed) the voice app subprocess.
+        3. Closes the PUB socket and destroys the ZMQ context with linger=0
+           so no blocking occurs even if the PULL threads haven't finished yet.
+        """
+        if self._stop_event.is_set():
+            return   # already shut down
+        _LOG.info("VoiceBridge: shutting down")
+        self._stop_event.set()
+
+        # Terminate voice app subprocess
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            self._proc = None
+
+        # Close PUB socket
+        try:
+            self._pub.close(linger=0)
+        except Exception:
+            pass
+
+        # Destroy ZMQ context — linger=0 means no blocking even if PULL
+        # sockets in daemon threads are still technically open at this moment.
+        try:
+            self._ctx.destroy(linger=0)
+        except Exception:
+            pass
+
+        _LOG.info("VoiceBridge: shutdown complete")

@@ -82,6 +82,7 @@ from document_parser import (
 from input_guard import InjectionDetectedError, check_user_input
 from rag_v1.retrieve.citations import format_sources_markdown
 from inference_session import InferenceSession
+from code_download import CodeFileHandler
 from mermaid_streamlit import DiagramHandler
 from openai_client import HttpTimeouts, LlamaServerError, _normalize_base_url, health_check
 from prompt_library import TemplateKey
@@ -625,6 +626,7 @@ try:
     from news.pipeline_runner import get_state as _news_get_state, run_pipeline_async as _news_run
     _NEWS_PIPELINE_AVAILABLE = True
 except ImportError:
+    _news_get_state = _news_run = None  # type: ignore[assignment]
     _NEWS_PIPELINE_AVAILABLE = False
 
 
@@ -644,6 +646,7 @@ def _render_news_pipeline_status() -> None:
     if not _NEWS_PIPELINE_AVAILABLE:
         return
 
+    assert _news_get_state is not None
     s = _news_get_state()
     running      = s["running"]
     stage_num    = s["stage_num"]
@@ -851,6 +854,7 @@ with st.sidebar:
     # ── News pipeline ──────────────────────────────────────────────────────
     st.subheader("News")
     if _NEWS_PIPELINE_AVAILABLE:
+        assert _news_get_state is not None and _news_run is not None
         _pipeline_running = _news_get_state()["running"]
         if _pipeline_running:
             st.button("Get News", disabled=True, help="Pipeline is already running…")
@@ -890,6 +894,9 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
         DiagramHandler.render_if_present(m["content"])
+        if m["role"] == "assistant":
+            _msg_key = str(abs(hash(m["content"])) % 1_000_000)
+            CodeFileHandler.render_downloads(m["content"], key_prefix=f"hist_{_msg_key}")
 
         # Show any media thumbnails stored with the message
         if m.get("media_labels"):
@@ -1296,7 +1303,8 @@ if user_text:
                         if _tts_on and not _barged_in:
                             _voice_bridge.publish_token(voice_session_id, piece)
                         yield piece             # always yield — barge-in silences voice, not text
-                full_streamed = live.write_stream(_voice_stream()) or ""
+                _ws = live.write_stream(_voice_stream())
+                full_streamed = _ws if isinstance(_ws, str) else ""
             except LlamaServerError as e:
                 live.error(str(e))
             except Exception as e:
@@ -1338,6 +1346,7 @@ if user_text:
         if final:
             live.markdown(_clean)
             DiagramHandler.render_if_present(_clean)
+            CodeFileHandler.render_downloads(_clean, key_prefix="live")
 
             # Wikipedia images
             if wiki_images:

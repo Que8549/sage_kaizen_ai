@@ -159,6 +159,7 @@ User rig also known as "my rig":
 - RAM: 192 GB DDR5
 - GPU0: RTX 5090 (32 GB VRAM)
 - GPU1: RTX 5080 (16 GB VRAM)
+- Motherboard: Gigabyte X870E AORUS XTREME AI TOP
 - Storage: 40 TB mixed SSD/HDD
 
 ---
