@@ -18,6 +18,7 @@ Usage in maintenance runner:
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, Future
 
 from sk_logging import get_logger
 from .bundle_builder import build_bundle, format_bundle_prompt
@@ -65,19 +66,29 @@ class MemoryService:
         )
         max_tokens = request.max_bundle_tokens if request.max_bundle_tokens is not None else default_tokens
 
-        profiles = retrieve_profiles(request.user_id, request.project_id)
-        rules    = retrieve_rules(
-            user_id=request.user_id,
-            project_id=request.project_id,
-            query_text=request.query_text,
-            limit=6,
-        )
-        episodes = retrieve_episodes(
-            user_id=request.user_id,
-            project_id=request.project_id,
-            query_text=request.query_text,
-            top_k=8,
-        )
+        # Fetch all three memory sources in parallel — psycopg3 ConnectionPool
+        # is thread-safe and each function acquires its own connection.
+        with ThreadPoolExecutor(max_workers=3) as _pool:
+            _f_profiles: Future = _pool.submit(
+                retrieve_profiles, request.user_id, request.project_id
+            )
+            _f_rules: Future = _pool.submit(
+                retrieve_rules,
+                user_id=request.user_id,
+                project_id=request.project_id,
+                query_text=request.query_text,
+                limit=6,
+            )
+            _f_episodes: Future = _pool.submit(
+                retrieve_episodes,
+                user_id=request.user_id,
+                project_id=request.project_id,
+                query_text=request.query_text,
+                top_k=8,
+            )
+            profiles = _f_profiles.result()
+            rules    = _f_rules.result()
+            episodes = _f_episodes.result()
 
         bundle = build_bundle(
             profiles=profiles,

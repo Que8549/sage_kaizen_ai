@@ -72,8 +72,8 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 | ARCHITECT brain | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (5090) | Deep reasoning; 128K ctx; `<think>` tokens |
 | Summarizer | Qwen3-4B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
 | BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA0 (5090) | RAG text embeddings (1024-dim) |
-| Wiki embed A | jina-clip-v2 | 8031 | CUDA0 (5090) | Wikipedia multimodal embeddings (normal operation) |
-| Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (5080) | Wikipedia ingest only (2nd worker; FAST brain must be stopped) |
+| Wiki embed A | jina-clip-v2 | 8031 | CUDA1 (5080) | Wikipedia multimodal embeddings (workers A1/A2) |
+| Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (5080) | Wikipedia ingest only (workers B1/B2; stop FAST brain first) |
 | CLAP embed | clap-htsat-unfused | 8040 | CUDA1 (5080) | Audio embeddings (512-dim) |
 | SearXNG | (metasearch) | 8080 | Docker Desktop | Live web search JSON API |
 | Voice STT/TTS | Whisper distil-large-v3.5 + Kokoro-82M | ZMQ 5790/5791/5792 | CPU (ONNX) | Voice: transcript in, token stream out, barge-in |
@@ -225,8 +225,22 @@ If a commit message says "reverted", "removed", "uninstalled", or describes a fa
 ## 10) Related and Associated Projects
  - Integrate with Sage Kaizen Voice (voice app) located at F:\Projects\sage_kaizen_ai_voice\
  - Sage Kaizen local-first AI assistant (main app) located at F:\Projects\sage_kaizen_ai\
- - Sage Kaizen ingestation F:\Projects\sage_kaizen_ai_ingest
+ - Sage Kaizen ingest (all pipelines) located at F:\Projects\sage_kaizen_ai_ingest
  - SearXNG - local search engine running at http://localhost:8080/ located at F:\Projects\searxng
+
+### Wiki Ingest — GPU Layout and Thermal Management
+Both jina-clip-v2 embed services (ports 8031 + 8032) run on **CUDA1 (RTX 5080)**.  
+The RTX 5090 (CUDA0) drives the display and must not run sustained compute — Windows TDR (2 s) resets the display driver if a CUDA kernel runs too long, causing a black screen requiring reboot.
+
+Before running a long wiki ingest session, set GPU power limits once as Administrator:
+```powershell
+F:\Projects\sage_kaizen_ai_ingest\scripts\set_gpu_limits.ps1
+```
+Limits: RTX 5090 → 420 W (stock 575 W, now mostly idle), RTX 5080 → 260 W (stock 360 W).  
+Then run ingest with `--no-power-limits` (limits persist until reboot).  
+If power limits cannot be applied, `wiki_ingest.py` auto-falls back to 2 workers + 75 ms throttle.  
+Default throttle is 25 ms per worker even with power limits applied (protective baseline).  
+Stop the FAST brain (port 8011) before starting wiki ingest — both share the 5080's 16 GB VRAM.
 
 ---
 

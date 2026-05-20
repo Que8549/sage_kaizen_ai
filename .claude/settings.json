@@ -7,7 +7,9 @@
       "Skill(update-config:*)",
       "PowerShell(*)",
       "WebFetch(domain:www.psycopg.org)",
-      "Bash(Test-Path \"F:\\\\Projects\\\\sage_kaizen_ai\\\\pyrightconfig.json\")"
+      "Bash(Test-Path \"F:\\\\Projects\\\\sage_kaizen_ai\\\\pyrightconfig.json\")",
+      "Bash(dir \"E:\\\\unsloth_Qwen3.6-27B-MTP-GGUF\\\\\" 2>&1)",
+      "Bash(Get-Content \"F:\\\\Projects\\\\sage_kaizen_ai\\\\logs\\\\q5_server.log\" -Tail 60)"
     ],
     "additionalDirectories": [
       "F:\\Projects\\sage_kaizen_ai_ingest"

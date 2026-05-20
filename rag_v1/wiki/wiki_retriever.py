@@ -212,9 +212,12 @@ class WikiRetriever:
         if self._embed_proc and self._embed_proc.poll() is None:
             try:
                 self._embed_proc.terminate()
-                self._embed_proc.wait(timeout=5)
+                self._embed_proc.wait(timeout=3)
             except Exception:
-                pass
+                try:
+                    self._embed_proc.kill()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ #
     # Public API                                                         #
