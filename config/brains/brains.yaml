@@ -107,9 +107,10 @@ fast:
 # VRAM budget on CUDA0 (32 GB):
 #   Model weights Q6_K:        ~21.3 GB  (22884406400 bytes; +0.3 GB vs non-MTP)
 #   MTP head weights:          included above (~310 MB, 1 extra block)
-#   KV cache q8_0 @ ctx=131072:~4.0 GB  (16 KV layers, 4 KV heads, head_dim=256)
+#   KV cache q4_0 @ ctx=131072:~2.0 GB  (16 KV layers, 4 KV heads, head_dim=256)
+#   MTP draft KV cache f16:    ~0.1 GB  (MTP context always uses f16; not configurable)
 #   Compute buffer:             ~1.5 GB
-#   Total (no mmproj):         ~26.8 GB  → ~5.2 GB headroom  ✓
+#   Total (no mmproj):         ~24.9 GB  → ~7.1 GB headroom  ✓
 #
 # MTP heads: 1 (block_count=65 - 64 transformer = 1 MTP head)
 # → spec_draft_n_max: 1; expect ~1.4–1.6x speedup at ~80% draft acceptance rate
@@ -139,14 +140,15 @@ architect:
     # mmproj: "E:/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive/mmproj-Qwen3.5-27B-Uncensored-HauhauCS-Aggressive-f16.gguf"
 
     # Context — model trained to 262K; model card requires >= 128K for thinking mode.
-    # Only 16/64 transformer layers use KV cache; at 128K q8_0 KV costs ~4 GB (5090 has ~5.2 GB headroom).
+    # Only 16/64 transformer layers use KV cache; at 128K q4_0 KV costs ~2 GB (5090 has ~7.1 GB headroom).
     ctx_size: 131072          # 128K — meets model thinking-mode requirement
     batch_size: 2048          # logical batch (llama.cpp default); better prefill throughput
     ubatch_size: 1024         # 1024 halves GPU kernel dispatch rounds vs 512 during RAG prefill
 
-    # More threads for the heavier model
-    threads: 22
-    threads_batch: 22
+    # 16 threads = physical P-core count on 9950X3D; avoid HT scheduling overhead
+    # during GPU-bound decode (DeltaNet forward pass saturates CUDA; CPU threads idle)
+    threads: 16
+    threads_batch: 16
     threads_http: 8
 
     parallel: 1
@@ -161,28 +163,27 @@ architect:
     no_cont_batching: true
 
     flash_attn: true
-    cache_type_k: "q8_0"     # near-lossless; halves KV memory vs f16
-    cache_type_v: "q8_0"     # only 16/64 layers use KV — pressure to go lower is minimal
+    # q4_0 KV saves ~2 GB vs q8_0 (from ~4 GB → ~2 GB at 128K; only 16/64 layers
+    # use KV cache — DeltaNet layers use recurrent state with no KV cost).
+    # Halves per-step KV memory bandwidth; quality impact minimal on full-attention layers.
+    cache_type_k: "q4_0"
+    cache_type_v: "q4_0"
 
-    # SWA full cache — Qwen3.5-27B's 16 softmax-attention layers use sliding window attention.
-    # Without this flag llama.cpp may use a smaller rolling window, silently losing context
-    # beyond the SWA window.  Enabling full-size SWA cache preserves coherence across the
-    # full 128K context at the cost of the KV VRAM already budgeted above.
-    swa_full: true
+    # swa_full: intentionally omitted.
+    # Qwen3.6-27B's 16 full-attention layers are not SWA (sliding window attention) —
+    # they are standard full-context attention.  llama.cpp logs "swa_full is not supported
+    # by this model, it will be disabled" at startup; the flag is a no-op for this arch.
 
-    # KV cache reuse via prefix shifting — big latency win for RAG-heavy turns.
-    # The system prompt + injected RAG/wiki/search context is an identical prefix
-    # shared across most turns.  With cache_reuse=256, llama-server attempts to
-    # shift and reuse at least 256 cached tokens rather than re-prefilling from scratch.
-    cache_reuse: 256
+    # cache_reuse: intentionally omitted.
+    # The MTP draft context logs "cache_reuse is not supported by this context, it will
+    # be disabled" at startup.  Re-enable if a future build adds MTP cache_reuse support.
 
     # Raise server process priority so ARCHITECT turns are not preempted by background tasks.
     prio: 2                   # high (0=normal, 1=medium, 2=high, 3=realtime)
 
-    # KV prefix cache in host RAM (see FAST brain notes above for rationale).
-    # 256 MiB is smaller because ARCHITECT already has aggressive prefix
-    # checkpointing (checkpoint_every_n_tokens: 4096) + cache_reuse: 256.
-    # Together these cover the reuse space; cache_ram covers the cross-turn case.
+    # KV prefix cache in host RAM — stores the most-recently computed KV prefix
+    # so the next turn with the same system-prompt + RAG prefix skips re-prefilling.
+    # 256 MiB covers the full system prompt + typical RAG injection.
     cache_ram: 256
 
     # Aggressive slot-reuse for the single ARCHITECT slot (parallel=1).
@@ -190,7 +191,7 @@ architect:
     slot_prompt_similarity: 0.10
 
     fit: true
-    fit_target: 2048  # 3072<-orig value # 3 GB buffer; extra headroom for 128K ctx + optional mmproj
+    fit_target: 2048  # 2 GB free-VRAM floor; ~7.1 GB actual headroom at q4_0 KV
     fit_ctx: 131072
 
     no_warmup: true
