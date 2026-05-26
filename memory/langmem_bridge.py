@@ -136,7 +136,7 @@ class LangMemBridge:
                 "model selections, approved code patterns, and explicit prohibitions. "
                 "Do NOT extract: ephemeral requests, one-time questions, or trivial acks. "
                 "Keep each memory concise (one sentence). "
-                "Scope: Sage Kaizen project on Windows 11 Pro with RTX 5090/5080 stack."
+                "Scope: Sage Kaizen project on Windows 11 Pro with dual RTX 5090 stack (GPU0: RTX 5090, GPU1: Gigabyte RTX 5090 OC)."
             ),
         )
         bridge._manager = manager

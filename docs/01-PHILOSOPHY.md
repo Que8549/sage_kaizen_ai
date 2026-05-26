@@ -16,7 +16,7 @@ It aligns:
 
 # The Dual-Brain Model
 
-## Fast Brain (RTX 5080)
+## Fast Brain (RTX 5090 OC, CUDA1)
 
 Purpose:
 - Low latency responses

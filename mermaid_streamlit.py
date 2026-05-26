@@ -197,7 +197,7 @@ def build_sage_kaizen_mermaid(q5: LlamaServerInfo | None, q6: LlamaServerInfo | 
                 lines.append(f"split={_fmt(info.split_mode)}")
         return _mm_safe("<br/>".join(lines))
 
-    q5_label = node_label("GPU1 (RTX 5080) - Fast / Low-Latency", q5)
+    q5_label = node_label("GPU1 (RTX 5090 OC) - Fast / Low-Latency", q5)
     q6_label = node_label("GPU0 (RTX 5090) - Architect / Deep Reasoning", q6)
 
     # Use quoted node labels to tolerate spaces, punctuation, and <br/>

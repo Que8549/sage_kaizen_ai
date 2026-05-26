@@ -91,7 +91,7 @@ _SEARCH_TEMPORAL_HINTS: tuple[str, ...] = (
 
 # Explicit search-intent phrases — user is clearly asking for a web search.
 _SEARCH_INTENT_HINTS: tuple[str, ...] = (
-    "search for", "search the web", "search online", "find online",
+    "search for", "search the web", "search the internet", "search online", "find online",
     "look up online", "google that", "find me the latest",
     "what is the latest", "what are the latest", "is there news about",
     "any news on", "any updates on", "what's happening with", "top stories",
@@ -278,7 +278,7 @@ _LOG = get_logger("sage_kaizen.router")
 
 @dataclass(frozen=True)
 class RouteDecision:
-    brain: str                 # "FAST" (5080) or "ARCHITECT" (5090)
+    brain: str                 # "FAST" (5090 OC, CUDA1) or "ARCHITECT" (5090, CUDA0)
     reasons: list[str]
     score: int
     needs_search: bool = False                      # True → run live web search this turn
@@ -352,7 +352,7 @@ def route(
 ) -> RouteDecision:
     """
     Returns a routing decision:
-      - FAST      -> 5080 (Qwen2.5-Omni-7B Q8_0, multimodal)
+      - FAST      -> 5090 OC/CUDA1 (Qwen2.5-Omni-7B Q6_K, multimodal)
       - ARCHITECT -> 5090 (Qwen3.5-27B-Uncensored Q6_K, thinking+multimodal)
 
     voice_mode: when True, short queries (<VOICE_BIAS_THRESHOLD chars) receive a -1 score bias

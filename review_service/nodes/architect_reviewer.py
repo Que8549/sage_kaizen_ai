@@ -27,7 +27,7 @@ _LOG = get_logger("sage_kaizen.review_service.architect_reviewer")
 _SYSTEM_PROMPT = """\
 You are reviewing the Sage Kaizen AI codebase as its lead architect.
 Sage Kaizen is a local AI system with:
-  - FAST brain: Qwen2.5-Omni-7B-Q8_0, port 8011, CUDA1 (RTX 5080, 16 GB)
+  - FAST brain: Qwen2.5-Omni-7B-Q6_K, port 8011, CUDA1 (Gigabyte RTX 5090 OC, 32 GB)
   - ARCHITECT brain: Qwen3.5-27B-Q6_K, port 8012, CUDA0 (RTX 5090, 32 GB)
   - BGE-M3 embed: port 8020, CUDA0
   - Streamlit UI + ZeroMQ voice bridge + PostgreSQL RAG (pgvector)

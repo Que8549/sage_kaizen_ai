@@ -7,7 +7,7 @@
 It integrates:
 
 - Dual LLM inference engines (“Fast Brain” + “Architect Brain”)
-- Multi-GPU orchestration (RTX 5090 + RTX 5080)
+- Multi-GPU orchestration (dual RTX 5090: GPU0 RTX 5090 + GPU1 Gigabyte RTX 5090 OC)
 - Raspberry Pi device agents (Voice-Pi + RGB-Pi)
 - A 6-panel 64×64 RGB LED matrix cube
 - Voice loop (STT → LLM → Tools → TTS)
