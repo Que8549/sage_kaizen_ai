@@ -17,7 +17,7 @@ It uses **progressive disclosure**:
 ### Primary developer environment
 - VS Code on Windows 11 Pro
 - Python 3.14.3
-- CUDA 13.2.1
+- CUDA 13.3
 - Custom `llama.cpp` build (MSVC, CUDA SM_120 Blackwell, `ARCHS=1200`)
 
 
@@ -33,7 +33,7 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 ### Core modules (v1)
 - **Dual brains** (two llama-server instances):
   - FAST brain (default): `Qwen2.5-Omni-7B-Q6_K` (port 8011, RTX 5090 OC/CUDA1) — multimodal: text + image + audio input via mmproj encoder
-  - ARCHITECT brain (on demand): `Qwen3.5-27B-Q6_K` (port 8012, RTX 5090/CUDA0) — **128K context**, reasoning mode (`<think>` tokens), speculative decoding (ngram-map-k), hybrid DeltaNet+attention
+  - ARCHITECT brain (on demand): `Qwen3.6-27B-MTP-Q6_K` (port 8012, RTX 5090/CUDA0) — **128K context**, reasoning mode (`<think>` tokens), MTP speculative decoding: draft-mtp, hybrid DeltaNet+attention
   - Summarizer (lightweight): `Qwen3-4B-Q8_0` (port 8013, CPU-only) — search evidence summarization before context injection
 - **Router**: selects brain, applies templates, escalates to ARCHITECT when needed (`router.py`)
 - **Streamlit UI**: chat interface, status, templates visible, debugging-friendly (`ui_streamlit_server.py`)
@@ -69,7 +69,7 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 | Service | Model | Port | GPU | Purpose |
 |---------|-------|------|-----|---------|
 | FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (5090 OC) | Multimodal chat (text + image + audio via mmproj) |
-| ARCHITECT brain | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (5090) | Deep reasoning; 128K ctx; `<think>` tokens |
+| ARCHITECT brain | Qwen3.6-27B-MTP-Q6_K | 8012 | CUDA0 (5090) | Deep reasoning; 128K ctx; `<think>` tokens |
 | Summarizer | Qwen3-4B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
 | BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA0 (5090) | RAG text embeddings (1024-dim) |
 | Wiki embed A | jina-clip-v2 | 8031 | CUDA0 (5090) | Wikipedia multimodal embeddings (workers A1/A2) |
@@ -156,13 +156,18 @@ These are **hard constraints**:
 User rig also known as "my rig":
 - Motherboard: Gigabyte X870E AORUS XTREME AI TOP
 - CPU: AMD Ryzen 9 9950X3D
-- RAM: 192 GB DDR5
-- GPU0: NVIDIA GeForce RTX 5090 (32 GB VRAM) — primary display GPU (3 monitors); ARCHITECT Brain + BGE-M3 embed
-- GPU1: Gigabyte GeForce RTX 5090 OC (32 GB VRAM) — no display; FAST Brain + Wiki embed B + CLAP embed
-- CUDA: 13.2.1
-- Python (this venv): 3.14.3
+- RAM: 192 GB DDR5 Speed: 6400 MT/s
+- GPU0: CUDA 0 - NVIDIA GeForce RTX 5090 (32GB VRAM) — primary display GPU (3 monitors); ARCHITECT Brain + BGE-M3 embed
+- GPU1: CUDA 1 - Gigabyte GeForce RTX 5090 OC (32GB VRAM) — no display; FAST Brain + Wiki embed B + CLAP embed
+- GPU2: CUDA 2 - Gigabyte GeForce RTX 5080 (16GB VRAM) — no display; 
+  - Connected by MinisForum DEG2 OCuLink eGPU Dock via USB-C (https://www.minisforum.com/products/deg2). 
+  - The MinisForum DEG2 OCuLink eGPU Dock has a 2TB SSD drive.
+- CUDA: 13.3
 - Storage: 40 TB mixed SSD/HDD
 - OS: Windows 11 Professional
+- Database: PostgreSQL with pgvector
+- Power Supply 1600W https://seasonic.com/atx3-prime-tx/ 
+- Python (this venv): 3.14.3
 
 ---
 
@@ -246,12 +251,12 @@ Stop the FAST brain (port 8011) before starting wiki ingest — conservative: wi
 
 ---
 
-## 11) FAST Brain Model — Upgrade Research Log (2026-04-07, updated 2026-05-24)
+## 11) FAST Brain Model — Upgrade Research Log (2026-04-07, updated 2026-06-11)
 
-### Current State (as of 2026-05-24)
+### Current State (as of 2026-06-11)
 - **Model**: `Qwen2.5-Omni-7B-Q6_K` — **Q6_K downquant applied**; saves ~1.85 GB VRAM vs Q8_0 with negligible quality loss (~0.1–0.2 PPL)
 - **GPU**: Gigabyte GeForce RTX 5090 OC (CUDA1, 32 GB VRAM) — upgraded from RTX 5080 (16 GB) on 2026-05-24
-- **llama.cpp build**: b9305 (63248fc3e) — custom MSVC build with CUDA SM_120 Blackwell kernels (`ARCHS=1200`, `BLACKWELL_NATIVE_FP4=1`)
+- **llama.cpp build**: b9598 (fdc3db9b6) — custom MSVC build with CUDA SM_120 Blackwell kernels (`ARCHS=1200`, `BLACKWELL_NATIVE_FP4=1`)
 - **Context**: 32K (upgraded from 16K — new 32 GB VRAM budget provides ~21.7 GB headroom)
 - **Known limitation**: Mid-response Chinese language code-switching during long-form generation (confirmed Qwen2.5-Omni-7B training data bias; see QwenLM/Qwen2.5 issue #347)
 - **Workaround applied**: `router.py` routes creative writing (`CREATIVE_HINTS`) to ARCHITECT (score +3); `prompt_library.py` `sage_fast_core` includes English-only instruction
@@ -285,10 +290,10 @@ Before proposing or applying a FAST brain model change, verify all of the follow
 | Audio file uploads (`.wav`, `.mp3`) | mmproj audio encoder; `kind="audio"` routes to FAST | `chat_service.py:194` |
 | Image input | mmproj vision encoder; `kind="image"/"video_frame"` → ARCHITECT or FAST | `chat_service.py:183` |
 | Video input | Client-side frame extraction → image attachments → ARCHITECT | `chat_service.py:183` |
-| Flash attention | `flash_attn: true` in brains.yaml; C++ runtime only (not Python) | `brains.yaml:65` |
-| KV prefix cache | `cache_ram: 512`, `slot_prompt_similarity: 0.10` | `brains.yaml:74,79` |
-| 32K context | `ctx_size: 32768` — 1 image ≈ 1280 tokens, ~30K for conversation | `brains.yaml:53` |
-| Port 8011, CUDA1 | Hard-coded in routing and inference session | `brains.yaml:38,43` |
+| Flash attention | `flash_attn: true` in brains.yaml; C++ runtime only (not Python) | `brains.yaml:67` |
+| KV prefix cache | `cache_ram: 512`, `slot_prompt_similarity: 0.10` | `brains.yaml:79,84` |
+| 32K context | `ctx_size: 32768` — 1 image ≈ 1280 tokens, ~30K for conversation | `brains.yaml:55` |
+| Port 8011, CUDA1 | Hard-coded in routing and inference session | `brains.yaml:39,43` |
 | TTS voice pipeline | Audio output is text-only; Kokoro handles TTS separately | `voice_bridge.py` |
 
 ### Watch List — When to Revisit the FAST Brain Upgrade
@@ -302,7 +307,7 @@ Monitor these milestones; when any trigger is met, re-evaluate:
 
 4. **Gemma 4 audio support in llama.cpp** — Gemma 4 natively supports audio but llama.cpp audio parsing is not yet implemented. Track https://github.com/ggml-org/llama.cpp/issues.
 
-5. **llama.cpp rebuild** — Current build b9305 (63248fc3e) includes SM_120 Blackwell kernel optimizations. Monitor https://github.com/ggml-org/llama.cpp/releases for newer builds; a Chunk-fused GatedDeltaNet kernel for Blackwell (PR #21074) is in development and would benefit ARCHITECT throughput when merged.
+5. **llama.cpp rebuild** — Current build b9598 (fdc3db9b6) includes SM_120 Blackwell kernel optimizations. Monitor https://github.com/ggml-org/llama.cpp/releases for newer builds; a Chunk-fused GatedDeltaNet kernel for Blackwell (PR #21074) is in development and would benefit ARCHITECT throughput when merged.
 
 ### Qwen2.5-Omni-7B GGUF Sources
 - Official: https://huggingface.co/ggml-org/Qwen2.5-Omni-7B-GGUF (Q8_0, Q6_K, Q4_K_M, and others)

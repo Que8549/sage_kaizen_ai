@@ -23,7 +23,7 @@
 #   Compute buffer:            ~0.50 GB
 #   Total:                    ~10.3 GB  → ~21.7 GB headroom  ✓
 #
-# ARCHITECT (Qwen3.5-27B) on CUDA0 runs simultaneously — no GPU conflict.
+# ARCHITECT (Qwen3.6-27B-MTP) on CUDA0 runs simultaneously — no GPU conflict.
 # Audio output (TTS) is NOT supported by llama.cpp; responses are text-only.
 # Video input: client-side frame extraction → sent as individual images.
 # Old model: Qwen2.5-Omni-7B-Q8_0.gguf
@@ -137,11 +137,11 @@ architect:
     split_mode: "none"
 
     # Multimodal vision encoder — DISABLED: loading mmproj silently disables speculative
-    # decoding (ngram-map-k), cache_reuse, and swa_full at startup, cutting generation
-    # throughput from ~4.9 t/s → ~2.89 t/s. Image/video queries are now routed to the
-    # FAST brain (Qwen2.5-Omni-7B), which has its own audio+vision mmproj encoder and
-    # handles all modalities. Re-enable here only if ARCHITECT-exclusive vision is needed.
-    # mmproj: "E:/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive/mmproj-Qwen3.5-27B-Uncensored-HauhauCS-Aggressive-f16.gguf"
+    # decoding (draft-mtp), cutting generation throughput significantly. Image/video queries
+    # are routed to the FAST brain (Qwen2.5-Omni-7B), which has its own audio+vision mmproj
+    # encoder and handles all modalities. Re-enable here only if ARCHITECT-exclusive vision
+    # is needed (requires a Qwen3.6-27B-MTP compatible mmproj GGUF).
+    # mmproj: ""  # no Qwen3.6-27B-MTP mmproj currently available
 
     # Context — model trained to 262K; model card requires >= 128K for thinking mode.
     # Only 16/64 transformer layers use KV cache; at 128K q8_0 KV costs ~4 GB (5090 has ~5.15 GB headroom).
@@ -205,7 +205,7 @@ architect:
     n_predict: -1             # unlimited — thinking mode can generate thousands of tokens;
                               # model stops via EOS; clients should set their own max_tokens
 
-    # Thinking mode — Qwen3.5-27B-Uncensored always runs with <think> enabled on ARCHITECT.
+    # Thinking mode — Qwen3.6-27B-MTP always runs with <think> enabled on ARCHITECT.
     # Non-thinking fast responses are routed to the FAST brain (Qwen2.5-Omni-7B) by router.py.
     # Model card recommended sampling (thinking mode): temp=0.6, top_k=20, top_p=0.95.
     reasoning: "on"           # explicit thinking mode (--reasoning on); b8639+ flag
@@ -263,10 +263,9 @@ architect:
     # 4096 is intentional — b9307 changed the default to 8192, but 4096 gives
     # more granular checkpoints for our 4–16K RAG prefill window.
     #
-    # Issue #20225 note: without swa_full, Qwen3.5 hybrid models invalidate
-    # checkpoints on every turn (causing full reprocessing).  swa_full: true
-    # (already set above) is the correct fix; checkpoint_every_n_tokens then
-    # resumes working as intended.
+    # Issue #20225 note: Qwen3.6-27B's 16 full-attention layers use standard full-context
+    # attention (not SWA), so the swa_full workaround is not applicable here.
+    # Checkpoints work correctly with this architecture; see swa_full note above.
     checkpoint_every_n_tokens: 4096
 
     log_colors: false
@@ -331,12 +330,26 @@ wiki_embed:
   # Local directory containing the jina-clip-v2 model weights
   model: "E:/jinaai_jina-clip-v2"
 
-  # Shared log file — wiki_ingest.py Python logger AND the embed service
-  # subprocess both append here (one unified pipeline log)
+  # Embed service subprocess stdout/stderr log (uvicorn lifecycle messages).
+  # NOTE: app.py's Python _LOG (sk_logging) writes to a SEPARATE file:
+  #   sage_kaizen_ai_ingest/logs/sage_kaizen_ingest.log
+  # sage_wiki_embed.log only contains uvicorn startup/shutdown lines and any
+  # raw stderr output (e.g. Python warnings from trust_remote_code).
+  # Service B appends to sage_wiki_embed_b.log (log_suffix="_b" applied by
+  # wiki_ingest._start_embed_service).
   log: "F:/Projects/sage_kaizen_ai/logs/sage_wiki_embed.log"
 
-  # How long wiki_ingest.py waits for app.py to become healthy on startup.
-  # jina-clip-v2 on GPU loads in ~30-90 s; 300 s gives plenty of headroom.
+  # How long wiki_ingest.py waits for app.py to become healthy on each start.
+  # With a warm TORCHINDUCTOR_CACHE_DIR, jina-clip-v2 loads + compiles in ~11 s.
+  # Cold first-run (no cache): ~90 s for max-autotune warmup at batch=512.
+  # 300 s is ample for a single service starting in isolation.
+  #
+  # IMPORTANT — concurrent restart deadlock:
+  #   Services A (8031) and B (8032) both run on cuda:1.  If both crash
+  #   simultaneously and restart concurrently, two AutoModel.from_pretrained()
+  #   calls on the same CUDA device can deadlock CUDA's memory allocator,
+  #   causing both to hang until this timeout fires.  wiki_ingest.py serialises
+  #   restarts per-device via _device_restart_lock() to prevent this.
   startup_timeout_s: 300
 
   # ── Embed service settings (read by app.py / FastAPI) ──────────────────
