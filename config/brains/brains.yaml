@@ -64,6 +64,11 @@ fast:
     no_kv_unified: true
     no_cont_batching: true
 
+    # Process scheduling priority: prio:1 (medium) ensures FAST is not preempted by
+    # the embed server (prio:1) or background OS tasks at normal priority (prio:0).
+    # ARCHITECT runs at prio:2 (high); FAST at prio:1 keeps ordering consistent.
+    prio: 1
+
     flash_attn: true
     # q8_0 KV: lossless (<0.1% ppl vs f16) and halves KV read bandwidth vs f16 → better
     # flash-attention throughput for a memory-bound 7B model. f16 would cost +0.9 GB for
@@ -87,7 +92,6 @@ fast:
     fit_ctx: 32768
     fit_target: 512
 
-    no_warmup: true
     n_predict: -1             # unlimited — multimodal responses vary widely in length
 
     log_colors: false
@@ -147,7 +151,10 @@ architect:
     # Only 16/64 transformer layers use KV cache; at 128K q8_0 KV costs ~4 GB (5090 has ~5.15 GB headroom).
     ctx_size: 131072          # 128K — meets model thinking-mode requirement
     batch_size: 2048          # logical batch (llama.cpp default); better prefill throughput
-    ubatch_size: 1024         # 1024 halves GPU kernel dispatch rounds vs 512 during RAG prefill
+    # ubatch_size: 512 vs 1024 tradeoff — issue #17578 reports decode halving above 512 on
+    # some Qwen3 variants; prefill kernel dispatch rounds double vs 1024 but decode matters
+    # more for long thinking turns.  Reverted from 1024 to 512 for testing on 2026-06-11.
+    ubatch_size: 512
 
     # 16 threads = physical P-core count on 9950X3D; avoid HT scheduling overhead
     # during GPU-bound decode (DeltaNet forward pass saturates CUDA; CPU threads idle)
@@ -201,7 +208,6 @@ architect:
     fit_target: 2048  # 2 GB free-VRAM floor; ~5.15 GB actual headroom at q8_0 KV
     fit_ctx: 131072
 
-    no_warmup: true
     n_predict: -1             # unlimited — thinking mode can generate thousands of tokens;
                               # model stops via EOS; clients should set their own max_tokens
 
@@ -258,15 +264,18 @@ architect:
     # Creates a KV-state snapshot every 4096 tokens during the initial RAG prompt
     # injection (prefill phase).  For a 4–16K RAG prefix this creates 1–4
     # checkpoints; subsequent turns whose prefix matches a checkpoint avoid full
-    # reprocessing.  Works correctly alongside swa_full: true.
+    # reprocessing.
     #
-    # 4096 is intentional — b9307 changed the default to 8192, but 4096 gives
-    # more granular checkpoints for our 4–16K RAG prefill window.
+    # --checkpoint-every-n-tokens was removed in llama.cpp; replaced by:
+    #   --checkpoint-min-step N   (minimum token spacing between checkpoints)
+    #   --ctx-checkpoints N       (max checkpoints per slot; default 32)
+    # 4096 min-step with 128K ctx → up to 32 checkpoints, matching the default
+    # ctx-checkpoints count, so --ctx-checkpoints need not be set explicitly.
     #
     # Issue #20225 note: Qwen3.6-27B's 16 full-attention layers use standard full-context
     # attention (not SWA), so the swa_full workaround is not applicable here.
     # Checkpoints work correctly with this architecture; see swa_full note above.
-    checkpoint_every_n_tokens: 4096
+    checkpoint_min_step: 4096
 
     log_colors: false
     log_timestamps: true

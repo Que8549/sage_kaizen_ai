@@ -18,7 +18,7 @@ Usage in maintenance runner:
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError as _FutureTimeout
 
 from sk_logging import get_logger
 from .bundle_builder import build_bundle, format_bundle_prompt
@@ -39,6 +39,10 @@ _LOG = get_logger("sage_kaizen.memory.service")
 # Per-brain token caps (04-Memory_Service.md)
 _FAST_MAX_TOKENS      = 600
 _ARCHITECT_MAX_TOKENS = 1500
+
+# Module-level pool: avoids 3-thread creation/teardown (~3–15 ms on Windows) on
+# every chat turn.  max_workers=3 matches the three parallel memory fetches.
+_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix="memory-")
 
 
 class MemoryService:
@@ -68,27 +72,38 @@ class MemoryService:
 
         # Fetch all three memory sources in parallel — psycopg3 ConnectionPool
         # is thread-safe and each function acquires its own connection.
-        with ThreadPoolExecutor(max_workers=3) as _pool:
-            _f_profiles: Future = _pool.submit(
-                retrieve_profiles, request.user_id, request.project_id
-            )
-            _f_rules: Future = _pool.submit(
-                retrieve_rules,
-                user_id=request.user_id,
-                project_id=request.project_id,
-                query_text=request.query_text,
-                limit=6,
-            )
-            _f_episodes: Future = _pool.submit(
-                retrieve_episodes,
-                user_id=request.user_id,
-                project_id=request.project_id,
-                query_text=request.query_text,
-                top_k=8,
-            )
-            profiles = _f_profiles.result()
-            rules    = _f_rules.result()
-            episodes = _f_episodes.result()
+        _f_profiles: Future = _POOL.submit(
+            retrieve_profiles, request.user_id, request.project_id
+        )
+        _f_rules: Future = _POOL.submit(
+            retrieve_rules,
+            user_id=request.user_id,
+            project_id=request.project_id,
+            query_text=request.query_text,
+            limit=6,
+        )
+        _f_episodes: Future = _POOL.submit(
+            retrieve_episodes,
+            user_id=request.user_id,
+            project_id=request.project_id,
+            query_text=request.query_text,
+            top_k=8,
+        )
+        try:
+            profiles = _f_profiles.result(timeout=2.0)
+        except (_FutureTimeout, Exception):
+            _LOG.warning("memory | profiles retrieval timed out or failed; using empty list")
+            profiles = []
+        try:
+            rules = _f_rules.result(timeout=2.0)
+        except (_FutureTimeout, Exception):
+            _LOG.warning("memory | rules retrieval timed out or failed; using empty list")
+            rules = []
+        try:
+            episodes = _f_episodes.result(timeout=2.0)
+        except (_FutureTimeout, Exception):
+            _LOG.warning("memory | episodes retrieval timed out or failed; using empty list")
+            episodes = []
 
         bundle = build_bundle(
             profiles=profiles,

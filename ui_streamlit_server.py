@@ -123,12 +123,22 @@ _start_shutdown_monitor()
 
 
 def _force_exit_watchdog() -> None:
-    """Atexit handler: force os._exit(0) after 8 s if shutdown stalls."""
-    def _bomb() -> None:
+    """Atexit handler: force os._exit(0) after 8 s only when shutdown stalls.
+
+    Checks for live non-daemon threads before forcing exit so that clean
+    shutdowns (wiki embed termination, PG teardown, LangGraph flush) are not
+    truncated by os._exit() when they would have completed on their own.
+    """
+    def _guarded_bomb() -> None:
         import time
         time.sleep(8)
-        _os._exit(0)
-    threading.Thread(target=_bomb, daemon=True, name="force-exit-watchdog").start()
+        live = [
+            t for t in threading.enumerate()
+            if not t.daemon and t is not threading.current_thread()
+        ]
+        if live:
+            _os._exit(0)
+    threading.Thread(target=_guarded_bomb, daemon=True, name="force-exit-watchdog").start()
 
 atexit.register(_force_exit_watchdog)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,6 +178,18 @@ _ROUTE_EXECUTOR: concurrent.futures.ThreadPoolExecutor = (
 # ─────────────────────────────────────────────────────────────────────────── #
 # UI helpers                                                                  #
 # ─────────────────────────────────────────────────────────────────────────── #
+
+
+def _render_wiki_images(images: list[dict]) -> None:
+    """Render a list of {'path', 'caption'} dicts as a columnar image grid."""
+    valid = [w for w in images if _os.path.isfile(w["path"])]
+    if not valid:
+        return
+    st.markdown("**Wikipedia images**")
+    cols = st.columns(min(len(valid), 3))
+    for col, img in zip(cols, valid):
+        with col:
+            st.image(img["path"], caption=img["caption"], use_container_width=True)
 
 
 _THINK_RE      = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
@@ -959,6 +981,10 @@ for m in st.session_state.messages:
             _msg_key = str(abs(hash(m["content"])) % 1_000_000)
             CodeFileHandler.render_downloads(m["content"], key_prefix=f"hist_{_msg_key}")
 
+        # Wikipedia images stored with this message
+        if m.get("wiki_images"):
+            _render_wiki_images(m["wiki_images"])
+
         # Show any media thumbnails stored with the message
         if m.get("media_labels"):
             st.caption("\U0001F4CE " + ", ".join(m["media_labels"]))
@@ -1410,15 +1436,14 @@ if user_text:
             CodeFileHandler.render_downloads(_clean, key_prefix="live")
 
             # Wikipedia images
+            _wiki_img_data: list[dict] = []
             if wiki_images:
-                import os as _os
-                _valid_imgs = [img for img in wiki_images if _os.path.isfile(img.absolute_path)]
-                if _valid_imgs:
-                    st.markdown("**Wikipedia images**")
-                    _cols = st.columns(min(len(_valid_imgs), 3))
-                    for _col, _img in zip(_cols, _valid_imgs):
-                        with _col:
-                            st.image(_img.absolute_path, caption=_img.caption_text, width='stretch')
+                _wiki_img_data = [
+                    {"path": img.absolute_path, "caption": img.caption_text}
+                    for img in wiki_images
+                    if _os.path.isfile(img.absolute_path)
+                ]
+                _render_wiki_images(_wiki_img_data)
 
             # Music retrieval results
             if music_context:
@@ -1450,6 +1475,7 @@ if user_text:
                 "content":    _clean,
                 "thinking":   _thinking or "",
                 "model_used": f"{_model_id} ({decision.brain})",
+                "wiki_images": _wiki_img_data,
                 "meta": {
                     "brain":           decision.brain,
                     "endpoint":        _endpoint,

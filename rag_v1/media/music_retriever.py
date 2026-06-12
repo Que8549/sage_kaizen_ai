@@ -38,7 +38,7 @@ from pathlib import Path
 import psycopg
 from psycopg.rows import dict_row, DictRow
 
-from rag_v1.db.pg import get_conn
+from rag_v1.db.pg import conn_ctx
 from rag_v1.embed.embed_client import EmbedClient
 from rag_v1.media.media_embed_client import AudioEmbedClient
 from rag_v1.media.lyrics_retriever import LyricsResult, LyricsRetriever
@@ -369,17 +369,16 @@ class MusicRetriever:
             return []
 
         try:
-            conn = get_conn(self._pg_dsn)
-            with conn.cursor(row_factory=dict_row) as cur:
-                rows = cur.execute(_SQL_MOOD_SEARCH, (
-                    qvec, qvec, self._max_dist,
-                    min_bpm, min_bpm,
-                    max_bpm, max_bpm,
-                    has_vocals, has_vocals,
-                    is_explicit, is_explicit,
-                    qvec, top_k,
-                )).fetchall()
-            conn.close()
+            with conn_ctx(self._pg_dsn) as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    rows = cur.execute(_SQL_MOOD_SEARCH, (
+                        qvec, qvec, self._max_dist,
+                        min_bpm, min_bpm,
+                        max_bpm, max_bpm,
+                        has_vocals, has_vocals,
+                        is_explicit, is_explicit,
+                        qvec, top_k,
+                    )).fetchall()
         except Exception:
             _LOG.exception("search_by_mood: DB query failed")
             return []
@@ -419,58 +418,56 @@ class MusicRetriever:
         If it looks like an existing path or title, look up its stored
         embedding; otherwise fall back to CLAP text embed.
         """
-        conn = get_conn(self._pg_dsn)
         try:
-            # 1. Try exact file path match
-            source_vec = None
-            source_id  = None
-            with conn.cursor(row_factory=dict_row) as cur:
-                row = cur.execute(
-                    _SQL_SIMILAR_BY_PATH, (f"%{query.strip()}%",)
-                ).fetchone()
-                if row:
-                    source_vec = row["embedding"]
-                    source_id  = row["media_id"]
-
-            # 2. Try title match
-            if source_vec is None:
+            with conn_ctx(self._pg_dsn) as conn:
+                # 1. Try exact file path match
+                source_vec = None
+                source_id  = None
                 with conn.cursor(row_factory=dict_row) as cur:
                     row = cur.execute(
-                        _SQL_SIMILAR_BY_TITLE, (f"%{query.strip()}%",)
+                        _SQL_SIMILAR_BY_PATH, (f"%{query.strip()}%",)
                     ).fetchone()
                     if row:
                         source_vec = row["embedding"]
                         source_id  = row["media_id"]
 
-            # 3. Fall back to CLAP text embed
-            if source_vec is None:
-                try:
-                    vecs = self._clap.embed_text([query])
-                    source_vec = vecs[0] if vecs else None
-                except Exception:
-                    pass
+                # 2. Try title match
+                if source_vec is None:
+                    with conn.cursor(row_factory=dict_row) as cur:
+                        row = cur.execute(
+                            _SQL_SIMILAR_BY_TITLE, (f"%{query.strip()}%",)
+                        ).fetchone()
+                        if row:
+                            source_vec = row["embedding"]
+                            source_id  = row["media_id"]
 
-            if source_vec is None:
-                return []
+                # 3. Fall back to CLAP text embed
+                if source_vec is None:
+                    try:
+                        vecs = self._clap.embed_text([query])
+                        source_vec = vecs[0] if vecs else None
+                    except Exception:
+                        pass
 
-            # Convert pgvector return type to list[float]
-            import json as _json  # noqa: PLC0415
-            if isinstance(source_vec, str):
-                source_vec = _json.loads(source_vec)
+                if source_vec is None:
+                    return []
 
-            # 4. Cosine search
-            with conn.cursor(row_factory=dict_row) as cur:
-                rows = cur.execute(_SQL_SIMILAR_SEARCH, (
-                    source_vec,
-                    source_id or "00000000-0000-0000-0000-000000000000",
-                    source_vec, source_vec, top_k,
-                )).fetchall()
+                # Convert pgvector return type to list[float]
+                import json as _json  # noqa: PLC0415
+                if isinstance(source_vec, str):
+                    source_vec = _json.loads(source_vec)
+
+                # 4. Cosine search
+                with conn.cursor(row_factory=dict_row) as cur:
+                    rows = cur.execute(_SQL_SIMILAR_SEARCH, (
+                        source_vec,
+                        source_id or "00000000-0000-0000-0000-000000000000",
+                        source_vec, source_vec, top_k,
+                    )).fetchall()
 
         except Exception:
             _LOG.exception("find_similar: DB query failed")
             return []
-        finally:
-            conn.close()
 
         return [_row_to_result(row) for row in rows]
 
@@ -510,17 +507,16 @@ class MusicRetriever:
         top_k: int = 20,
     ) -> list[MusicResult]:
         try:
-            conn = get_conn(self._pg_dsn)
-            with conn.cursor(row_factory=dict_row) as cur:
-                rows = cur.execute(_SQL_ATTRIBUTE_FILTER, (
-                    min_bpm, min_bpm,
-                    max_bpm, max_bpm,
-                    has_vocals, has_vocals,
-                    is_explicit, is_explicit,
-                    key, key,
-                    top_k,
-                )).fetchall()
-            conn.close()
+            with conn_ctx(self._pg_dsn) as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    rows = cur.execute(_SQL_ATTRIBUTE_FILTER, (
+                        min_bpm, min_bpm,
+                        max_bpm, max_bpm,
+                        has_vocals, has_vocals,
+                        is_explicit, is_explicit,
+                        key, key,
+                        top_k,
+                    )).fetchall()
         except Exception:
             _LOG.exception("filter_by_attributes: DB query failed")
             return []
@@ -536,37 +532,35 @@ class MusicRetriever:
         Return songs in the same acoustic cluster as the matched file/title.
         Falls back to [] if no cluster data exists.
         """
-        conn = get_conn(self._pg_dsn)
         try:
-            # Resolve media_id from path or title
-            source_id: str | None = None
-            with conn.cursor(row_factory=dict_row) as cur:
-                row = cur.execute(
-                    _SQL_SIMILAR_BY_PATH, (f"%{query.strip()}%",)
-                ).fetchone()
-                if row:
-                    source_id = row["media_id"]
-            if source_id is None:
+            with conn_ctx(self._pg_dsn) as conn:
+                # Resolve media_id from path or title
+                source_id: str | None = None
                 with conn.cursor(row_factory=dict_row) as cur:
                     row = cur.execute(
-                        _SQL_SIMILAR_BY_TITLE, (f"%{query.strip()}%",)
+                        _SQL_SIMILAR_BY_PATH, (f"%{query.strip()}%",)
                     ).fetchone()
                     if row:
                         source_id = row["media_id"]
+                if source_id is None:
+                    with conn.cursor(row_factory=dict_row) as cur:
+                        row = cur.execute(
+                            _SQL_SIMILAR_BY_TITLE, (f"%{query.strip()}%",)
+                        ).fetchone()
+                        if row:
+                            source_id = row["media_id"]
 
-            if source_id is None:
-                return []
+                if source_id is None:
+                    return []
 
-            with conn.cursor(row_factory=dict_row) as cur:
-                rows = cur.execute(
-                    _SQL_CLUSTER_MEMBERS, (source_id, source_id, top_k)
-                ).fetchall()
+                with conn.cursor(row_factory=dict_row) as cur:
+                    rows = cur.execute(
+                        _SQL_CLUSTER_MEMBERS, (source_id, source_id, top_k)
+                    ).fetchall()
 
         except Exception:
             _LOG.exception("get_similar_cluster: DB query failed")
             return []
-        finally:
-            conn.close()
 
         return [_row_to_result(row, score=1.0) for row in rows]
 

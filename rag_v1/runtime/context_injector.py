@@ -488,6 +488,8 @@ def apply_rag_and_wiki_parallel(
     # Values are generous (doc-RAG: 15 s, wiki: 20 s, search+summarize: 30 s,
     # music: 10 s, news: 10 s) — real work is much faster; these are safety ceilings.
     # TimeoutError is caught and logged; the turn continues with partial context.
+    # wiki: 20 s is safe because _ensure_service() now fires a warmup embed
+    # before returning, so CUDA JIT is absorbed at service startup, not here.
     _WORKER_TIMEOUTS = {"rag": 15, "wiki": 20, "search": 30, "music": 10, "news": 10}
 
     try:

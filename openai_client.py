@@ -17,6 +17,7 @@ class LlamaServerError(RuntimeError):
 # connection alive so the TCP handshake cost (~0.1–1 ms on loopback) is paid
 # once per server, not once per turn.
 _sessions: dict[str, requests.Session] = {}
+_sessions_lock = threading.Lock()  # guards _sessions read-modify-write
 
 # Reference to the currently-active streaming response so it can be closed
 # from outside (e.g. shutdown monitor) to interrupt a long LLM stream.
@@ -44,25 +45,28 @@ def abort_active_stream() -> None:
         except Exception:
             pass
     # Also close all sessions so no new streams can start.
-    for s in list(_sessions.values()):
+    with _sessions_lock:
+        sessions_to_close = list(_sessions.values())
+        _sessions.clear()
+    for s in sessions_to_close:
         try:
             s.close()
         except Exception:
             pass
-    _sessions.clear()
 
 
 def _session(base_url: str) -> requests.Session:
     """Return (or create) a persistent Session for this base URL."""
-    sess = _sessions.get(base_url)
-    if sess is None:
-        sess = requests.Session()
-        # Keep up to 4 connections per host alive in the pool
-        adapter = requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=4)
-        sess.mount("http://", adapter)
-        sess.mount("https://", adapter)
-        _sessions[base_url] = sess
-    return sess
+    with _sessions_lock:
+        sess = _sessions.get(base_url)
+        if sess is None:
+            sess = requests.Session()
+            # Keep up to 4 connections per host alive in the pool
+            adapter = requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=4)
+            sess.mount("http://", adapter)
+            sess.mount("https://", adapter)
+            _sessions[base_url] = sess
+        return sess
 
 
 @dataclass(frozen=True)
@@ -254,20 +258,28 @@ def stream_chat_completions(
 
     global _active_stream
     with _session(base).post(url, json=payload, stream=True, timeout=_timeout_tuple(timeouts)) as r:
-        if r.status_code // 100 != 2:
-            try:
-                body = r.text
-            except Exception:
-                body = "<unreadable>"
-            raise LlamaServerError(f"{url} returned HTTP {r.status_code}: {body[:500]}")
-
-        # llama-server sends text/event-stream without a charset declaration;
-        # requests defaults to ISO-8859-1 for text/* types per the HTTP spec,
-        # which garbles multi-byte UTF-8 characters (e.g. box-drawing, em-dash).
-        r.encoding = "utf-8"
-
+        # Register the response immediately so abort_active_stream() can close
+        # it even if the status check or abort_active_stream() races with us.
         with _active_stream_lock:
             _active_stream = r
+        try:
+            if r.status_code // 100 != 2:
+                try:
+                    body = r.text
+                except Exception:
+                    body = "<unreadable>"
+                raise LlamaServerError(f"{url} returned HTTP {r.status_code}: {body[:500]}")
+
+            # llama-server sends text/event-stream without a charset declaration;
+            # requests defaults to ISO-8859-1 for text/* types per the HTTP spec,
+            # which garbles multi-byte UTF-8 characters (e.g. box-drawing, em-dash).
+            r.encoding = "utf-8"
+        except LlamaServerError:
+            with _active_stream_lock:
+                if _active_stream is r:
+                    _active_stream = None
+            raise
+
         try:
             _in_reasoning = False
             for data in _iter_sse_data_lines(r):

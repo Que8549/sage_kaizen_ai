@@ -40,6 +40,7 @@ _LOGS_DIR.mkdir(parents=True, exist_ok=True)
 _BRAINS_YAML = _PROJECT_ROOT / "config" / "brains" / "brains.yaml"
 
 _FATAL_MARKERS = (
+    "error: invalid argument",       # unknown/removed CLI flag (fast-fail, no timeout)
     "error while handling argument",
     "failed to load model",
     "error loading model",

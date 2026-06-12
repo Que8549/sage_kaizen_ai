@@ -1,0 +1,39 @@
+[tool.pytest.ini_options]
+minversion = "7.0"
+# importlib mode: prevents accidental shadowing of installed packages by local files.
+addopts = "-v --import-mode=importlib"
+testpaths = ["tests"]
+# Add project root to sys.path so top-level modules (env_utils, router, etc.) are importable.
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: tests that require a live DB or network (skip by default)",
+    "unit: fast, isolated unit tests (default)",
+]
+# Integration tests require real services; exclude from the default run.
+# Run integration tests explicitly:  pytest -m integration
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.coverage.run]
+source = ["."]
+omit = [
+    "tests/*",
+    "llama.cpp/*",
+    "flash-attention/*",
+    ".venv/*",
+    "scripts/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]

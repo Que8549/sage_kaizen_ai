@@ -24,7 +24,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 from psycopg.rows import dict_row
 
-from rag_v1.db.pg import get_conn
+from rag_v1.db.pg import conn_ctx
 from rag_v1.wiki.mm_embed_client import MmEmbedClient
 from rag_v1.wiki.wiki_embed_config import load_wiki_embed_config
 from sk_logging import get_logger
@@ -142,10 +142,22 @@ class WikiRetriever:
         self._client              = MmEmbedClient(host=wiki_cfg.host, port=wiki_cfg.port)
         self._embed_proc: subprocess.Popen | None = None
         self._atexit_registered: bool = False
+        self._warmed_up: bool = False
 
     # ------------------------------------------------------------------ #
     # Service lifecycle                                                    #
     # ------------------------------------------------------------------ #
+
+    def _maybe_warmup(self) -> None:
+        """Send one dummy embed to absorb torch.compile/CUDA JIT on first forward pass."""
+        if self._warmed_up:
+            return
+        try:
+            self._client.embed_text(["warmup"])
+            _LOG.info("Wiki embed service warmed up (port %s).", self._embed_port)
+        except Exception:
+            _LOG.warning("Wiki embed warmup failed; first real query may be slower")
+        self._warmed_up = True
 
     def _ensure_service(self) -> bool:
         """
@@ -153,6 +165,7 @@ class WikiRetriever:
         Returns True if the service is up and ready.
         """
         if self._client.ping(timeout_s=2.0):
+            self._maybe_warmup()
             return True
 
         # Check if a previously started proc has died
@@ -198,6 +211,7 @@ class WikiRetriever:
         while time.monotonic() < deadline:
             if self._client.ping(timeout_s=2.0):
                 _LOG.info("Wiki embed service ready (port %s).", self._embed_port)
+                self._maybe_warmup()
                 return True
             time.sleep(1.0)
 
@@ -284,13 +298,13 @@ class WikiRetriever:
     # ------------------------------------------------------------------ #
 
     def _get_chunks(self, qvec: list[float], top_k: int) -> list[WikiChunk]:
-        conn = get_conn(self._pg_dsn)
-        conn.execute("SET hnsw.ef_search = 100")
-        with conn.cursor(row_factory=dict_row) as cur:
-            rows = cur.execute(
-                _SQL_TOP_CHUNKS,
-                (qvec, qvec, top_k),
-            ).fetchall()
+        with conn_ctx(self._pg_dsn) as conn:
+            conn.execute("SET hnsw.ef_search = 100")
+            with conn.cursor(row_factory=dict_row) as cur:
+                rows = cur.execute(
+                    _SQL_TOP_CHUNKS,
+                    (qvec, qvec, top_k),
+                ).fetchall()
         # Filter by distance threshold in Python; keeps the HNSW index path clean
         rows = [r for r in rows if float(r["distance"]) < self._max_distance]
 
@@ -316,17 +330,24 @@ class WikiRetriever:
         if not bundle_ids:
             return []
 
-        conn = get_conn(self._pg_dsn)
-        with conn.cursor(row_factory=dict_row) as cur:
-            rows = cur.execute(
-                _SQL_TOP_IMAGES,
-                (qvec, qvec, bundle_ids, top_images),
-            ).fetchall()
+        with conn_ctx(self._pg_dsn) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                rows = cur.execute(
+                    _SQL_TOP_IMAGES,
+                    (qvec, qvec, bundle_ids, top_images),
+                ).fetchall()
+
+        if not rows:
+            _LOG.debug("Wiki image query returned 0 rows for %d bundle_id(s)", len(bundle_ids))
+            return []
 
         images: list[WikiImage] = []
         for row in rows:
             rel = row["relative_path"].replace("/", os.sep)
             abs_path = str(self._wiki_root / rel)
+            if not os.path.isfile(abs_path):
+                _LOG.warning("Wiki image file missing on disk: %s", abs_path)
+                continue
             images.append(WikiImage(
                 image_id      = row["image_id"],
                 bundle_id     = row["bundle_id"],
@@ -334,6 +355,7 @@ class WikiRetriever:
                 caption_text  = row["caption_text"],
                 is_hero       = bool(row["is_hero"]),
                 hero_rank     = int(row["hero_rank"]),
-                sim_score     = float(row["sim_score"]),
+                sim_score     = float(row["sim_score"]) if row["sim_score"] is not None else 0.0,
             ))
+        _LOG.debug("Wiki image retrieval: %d/%d images valid on disk", len(images), len(rows))
         return images

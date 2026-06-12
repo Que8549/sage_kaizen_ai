@@ -1,4 +1,4 @@
-from rag_v1.db.pg import get_conn
+from rag_v1.db.pg import conn_ctx
 from rag_v1.embed.embed_client import EmbedClient
 from rag_v1.config.rag_settings import RetrievedChunk
 
@@ -25,9 +25,9 @@ class PgvectorRetriever:
         LIMIT %s;
         """
 
-        conn = get_conn(self.cfg.pg_dsn)
-        conn.execute("SET hnsw.ef_search = 100")
-        rows = conn.execute(sql, (q_emb, q_emb, k)).fetchall()
+        with conn_ctx(self.cfg.pg_dsn) as conn:
+            conn.execute("SET hnsw.ef_search = 100")
+            rows = conn.execute(sql, (q_emb, q_emb, k)).fetchall()
         rows = [r for r in rows if float(r["distance"]) < max_dist]
 
         results = []
