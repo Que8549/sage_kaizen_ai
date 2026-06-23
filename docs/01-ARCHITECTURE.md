@@ -44,7 +44,7 @@ flowchart TD
     C["Router\nrouter.py\n(LLM-assisted + heuristic fallback)"]
     D["Chat Service\nchat_service.py\n(turn lifecycle)"]
     E["Template Engine\nprompt_library.py\n(build_messages + TemplateKey)"]
-    F["FAST Brain\nQwen2.5-Omni-7B-Q6_K\nllama-server :8011  CUDA1 RTX 5080\nmultimodal: text + image + audio"]
+    F["FAST Brain\nQwen2.5-Omni-7B-Q6_K\nllama-server :8011  CUDA1 RTX 5090 OC\nmultimodal: text + image + audio"]
     G["ARCHITECT Brain\nQwen3.5-27B-Q6_K\nllama-server :8012  CUDA0 RTX 5090\n128K ctx · reasoning · speculative decoding"]
     H["Context Injector\nrag_v1/runtime/context_injector.py\n(parallel: doc-RAG · wiki · search · music)"]
     I["Memory Service\nmemory/service.py\n(episodes · profiles · rules)"]
@@ -209,7 +209,7 @@ sage_kaizen_ai_ingest/rag_v1/wiki/wiki_ingest.py
   │  ├─ 2 embed/write workers (one per GPU: :8031 CUDA0, :8032 CUDA1)
   │  └─ 1 reporter thread
   │  resume-safe by content_hash
-  │  NOTE: wiki ingest port 8032 (CUDA1) conflicts with FAST brain — stop FAST first
+  │  NOTE: wiki ingest port 8032 (CUDA1) shares RTX 5090 OC with FAST brain — stop FAST first to avoid compute contention
   │
   ▼
 MmEmbedClient → POST /embed → jina-clip-v2 FastAPI service
@@ -274,13 +274,13 @@ Config source: config/brains/brains.yaml — no .bat files exist
 
 | Service | Model | Port / Address | GPU | Purpose |
 |---------|-------|----------------|-----|---------|
-| FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (RTX 5080) | Multimodal chat (text + image + audio via mmproj) |
+| FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (RTX 5090 OC) | Multimodal chat (text + image + audio via mmproj) |
 | ARCHITECT brain | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (RTX 5090) | Deep reasoning; 128K ctx; `<think>` tokens; speculative decoding |
 | Summarizer | Qwen3-4B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
 | BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA0 (RTX 5090) | RAG text embeddings (1024-dim) |
 | Wiki embed A | jina-clip-v2 | 8031 | CUDA0 (RTX 5090) | Wikipedia multimodal embeddings (normal operation) |
-| Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (RTX 5080) | Wikipedia ingest only (2nd worker; needs FAST brain stopped) |
-| CLAP embed | clap-htsat-unfused | 8040 | CUDA1 (RTX 5080) | Audio embeddings (512-dim) |
+| Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (RTX 5090 OC) | Wikipedia ingest only (2nd worker; needs FAST brain stopped) |
+| CLAP embed | clap-htsat-unfused | 8040 | CUDA1 (RTX 5090 OC) | Audio embeddings (512-dim) |
 | SearXNG | (metasearch) | 8080 | Docker Desktop | Live web search JSON API |
 | Voice STT/TTS | Whisper distil-large-v3.5 + Kokoro-82M | ZMQ 5790/5791/5792 | CPU (ONNX) | Voice: transcript in, token stream out, barge-in interrupt |
 

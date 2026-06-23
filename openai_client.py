@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -16,6 +17,39 @@ class LlamaServerError(RuntimeError):
 # connection alive so the TCP handshake cost (~0.1–1 ms on loopback) is paid
 # once per server, not once per turn.
 _sessions: dict[str, requests.Session] = {}
+
+# Reference to the currently-active streaming response so it can be closed
+# from outside (e.g. shutdown monitor) to interrupt a long LLM stream.
+_active_stream: requests.Response | None = None
+_active_stream_lock = threading.Lock()
+
+
+def abort_active_stream() -> None:
+    """
+    Close the active streaming HTTP response, if any.
+
+    Causes the blocking recv() inside iter_lines() to raise a ConnectionError,
+    which propagates up through stream_chat_completions() and write_stream(),
+    allowing the Streamlit script to finish and the process to shut down.
+
+    Safe to call from any thread.
+    """
+    global _active_stream
+    with _active_stream_lock:
+        resp = _active_stream
+        _active_stream = None
+    if resp is not None:
+        try:
+            resp.close()
+        except Exception:
+            pass
+    # Also close all sessions so no new streams can start.
+    for s in list(_sessions.values()):
+        try:
+            s.close()
+        except Exception:
+            pass
+    _sessions.clear()
 
 
 def _session(base_url: str) -> requests.Session:
@@ -218,6 +252,7 @@ def stream_chat_completions(
     if thinking_budget != -1:
         payload["thinking_budget"] = int(thinking_budget)
 
+    global _active_stream
     with _session(base).post(url, json=payload, stream=True, timeout=_timeout_tuple(timeouts)) as r:
         if r.status_code // 100 != 2:
             try:
@@ -231,26 +266,33 @@ def stream_chat_completions(
         # which garbles multi-byte UTF-8 characters (e.g. box-drawing, em-dash).
         r.encoding = "utf-8"
 
-        _in_reasoning = False
-        for data in _iter_sse_data_lines(r):
-            if data == "[DONE]":
-                if _in_reasoning:
-                    yield "</think>"
-                return
-            try:
-                obj = json.loads(data)
-                delta = obj["choices"][0].get("delta", {})
-                reasoning = delta.get("reasoning_content")
-                content = delta.get("content")
-                if isinstance(reasoning, str) and reasoning:
-                    if not _in_reasoning:
-                        yield "<think>"
-                        _in_reasoning = True
-                    yield reasoning
-                if isinstance(content, str) and content:
+        with _active_stream_lock:
+            _active_stream = r
+        try:
+            _in_reasoning = False
+            for data in _iter_sse_data_lines(r):
+                if data == "[DONE]":
                     if _in_reasoning:
                         yield "</think>"
-                        _in_reasoning = False
-                    yield content
-            except Exception:
-                continue
+                    return
+                try:
+                    obj = json.loads(data)
+                    delta = obj["choices"][0].get("delta", {})
+                    reasoning = delta.get("reasoning_content")
+                    content = delta.get("content")
+                    if isinstance(reasoning, str) and reasoning:
+                        if not _in_reasoning:
+                            yield "<think>"
+                            _in_reasoning = True
+                        yield reasoning
+                    if isinstance(content, str) and content:
+                        if _in_reasoning:
+                            yield "</think>"
+                            _in_reasoning = False
+                        yield content
+                except Exception:
+                    continue
+        finally:
+            with _active_stream_lock:
+                if _active_stream is r:
+                    _active_stream = None

@@ -17,8 +17,8 @@ It uses **progressive disclosure**:
 ### Primary developer environment
 - VS Code on Windows 11 Pro
 - Python 3.14.3
-- CUDA 13.1
-- Custom `llama.cpp` + custom `llama-cpp-python` linked to the custom build
+- CUDA 13.2.1
+- Custom `llama.cpp` build (MSVC, CUDA SM_120 Blackwell, `ARCHS=1200`)
 
 
 ### Target runtime environments
@@ -32,7 +32,7 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 
 ### Core modules (v1)
 - **Dual brains** (two llama-server instances):
-  - FAST brain (default): `Qwen2.5-Omni-7B-Q6_K` (port 8011, RTX 5080/CUDA1) — multimodal: text + image + audio input via mmproj encoder
+  - FAST brain (default): `Qwen2.5-Omni-7B-Q6_K` (port 8011, RTX 5090 OC/CUDA1) — multimodal: text + image + audio input via mmproj encoder
   - ARCHITECT brain (on demand): `Qwen3.5-27B-Q6_K` (port 8012, RTX 5090/CUDA0) — **128K context**, reasoning mode (`<think>` tokens), speculative decoding (ngram-map-k), hybrid DeltaNet+attention
   - Summarizer (lightweight): `Qwen3-4B-Q8_0` (port 8013, CPU-only) — search evidence summarization before context injection
 - **Router**: selects brain, applies templates, escalates to ARCHITECT when needed (`router.py`)
@@ -68,13 +68,13 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 ### Service / Port Inventory
 | Service | Model | Port | GPU | Purpose |
 |---------|-------|------|-----|---------|
-| FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (5080) | Multimodal chat (text + image + audio via mmproj) |
+| FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (5090 OC) | Multimodal chat (text + image + audio via mmproj) |
 | ARCHITECT brain | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (5090) | Deep reasoning; 128K ctx; `<think>` tokens |
 | Summarizer | Qwen3-4B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
 | BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA0 (5090) | RAG text embeddings (1024-dim) |
-| Wiki embed A | jina-clip-v2 | 8031 | CUDA0 (5090) | Wikipedia multimodal embeddings (normal operation) |
-| Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (5080) | Wikipedia ingest only (2nd worker; FAST brain must be stopped) |
-| CLAP embed | clap-htsat-unfused | 8040 | CUDA1 (5080) | Audio embeddings (512-dim) |
+| Wiki embed A | jina-clip-v2 | 8031 | CUDA0 (5090) | Wikipedia multimodal embeddings (workers A1/A2) |
+| Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (5090 OC) | Wikipedia ingest only (workers B1/B2; stop FAST brain first) |
+| CLAP embed | clap-htsat-unfused | 8040 | CUDA1 (5090 OC) | Audio embeddings (512-dim) |
 | SearXNG | (metasearch) | 8080 | Docker Desktop | Live web search JSON API |
 | Voice STT/TTS | Whisper distil-large-v3.5 + Kokoro-82M | ZMQ 5790/5791/5792 | CPU (ONNX) | Voice: transcript in, token stream out, barge-in |
 
@@ -154,13 +154,15 @@ These are **hard constraints**:
 
 ## 6) CURRENT HARDWARE (Authoritative)
 User rig also known as "my rig":
-- OS: Windows 11 Professional
+- Motherboard: Gigabyte X870E AORUS XTREME AI TOP
 - CPU: AMD Ryzen 9 9950X3D
 - RAM: 192 GB DDR5
-- GPU0: RTX 5090 (32 GB VRAM)
-- GPU1: RTX 5080 (16 GB VRAM)
-- Motherboard: Gigabyte X870E AORUS XTREME AI TOP
+- GPU0: NVIDIA GeForce RTX 5090 (32 GB VRAM) — primary display GPU (3 monitors); ARCHITECT Brain + BGE-M3 embed
+- GPU1: Gigabyte GeForce RTX 5090 OC (32 GB VRAM) — no display; FAST Brain + Wiki embed B + CLAP embed
+- CUDA: 13.2.1
+- Python (this venv): 3.14.3
 - Storage: 40 TB mixed SSD/HDD
+- OS: Windows 11 Professional
 
 ---
 
@@ -213,7 +215,7 @@ git log --all --oneline --grep="<keyword>"
 git show <commit>
 ```
 Past commits document what was tried and abandoned. Key known failures in this repo:
-- **`flash_attn`** — present in `requirements.txt` as a local path reference but intentionally non-functional at runtime for Python-level code. SM_120 (Blackwell, RTX 5090/5080) is unsupported by flash-attn 2.x/3.x/4.x on Windows; `flash_attn.ops.triton.rotary` requires the OpenAI Triton compiler (Linux-only). The llama-server `--flash-attn` flag is separate and works correctly (handled by the C++ runtime, not Python). For Python inference code use PyTorch SDPA (`torch.nn.functional.scaled_dot_product_attention`) with cuDNN SDP backend (`torch.backends.cuda.enable_cudnn_sdp(True)`).
+- **`flash_attn`** — present in `requirements.txt` as a local path reference but intentionally non-functional at runtime for Python-level code. SM_120 (Blackwell, RTX 5090) is unsupported by flash-attn 2.x/3.x/4.x on Windows; `flash_attn.ops.triton.rotary` requires the OpenAI Triton compiler (Linux-only). The llama-server `--flash-attn` flag is separate and works correctly (handled by the C++ runtime, not Python). For Python inference code use PyTorch SDPA (`torch.nn.functional.scaled_dot_product_attention`) with cuDNN SDP backend (`torch.backends.cuda.enable_cudnn_sdp(True)`).
 - **`cmd.exe` for llama-server** — never use; `server_manager.py` spawns the EXE directly via `subprocess.Popen`.
 - **`stdout/stderr` redirection for llama-server** — never use; always `--log-file`.
 - **`.bat` launch scripts** — deleted (`start_q5_server.bat`, `start_q6_server.bat`, `start_embedding_point.bat`). All config is in `config/brains/brains.yaml`. Do not recreate `.bat` files for server launch.
@@ -225,26 +227,42 @@ If a commit message says "reverted", "removed", "uninstalled", or describes a fa
 ## 10) Related and Associated Projects
  - Integrate with Sage Kaizen Voice (voice app) located at F:\Projects\sage_kaizen_ai_voice\
  - Sage Kaizen local-first AI assistant (main app) located at F:\Projects\sage_kaizen_ai\
- - Sage Kaizen ingestation F:\Projects\sage_kaizen_ai_ingest
+ - Sage Kaizen ingest (all pipelines) located at F:\Projects\sage_kaizen_ai_ingest
  - SearXNG - local search engine running at http://localhost:8080/ located at F:\Projects\searxng
+
+### Wiki Ingest — GPU Layout and Thermal Management
+Wiki embed service A (port 8031) runs on **CUDA0 (RTX 5090)**; wiki embed service B (port 8032) runs on **CUDA1 (RTX 5090 OC)**.  
+The RTX 5090 (CUDA0) drives the display (3 monitors) and must not run sustained compute — Windows TDR (2 s) resets the display driver if a CUDA kernel runs too long, causing a black screen requiring reboot.
+
+Before running a long wiki ingest session, set GPU power limits once as Administrator:
+```powershell
+F:\Projects\sage_kaizen_ai_ingest\scripts\set_gpu_limits.ps1
+```
+Limits: GPU0 RTX 5090 → 420 W (stock 575 W; display GPU), GPU1 RTX 5090 OC → 500 W (stock 575 W+; sustained ingest).  
+Then run ingest with `--no-power-limits` (limits persist until reboot).  
+If power limits cannot be applied, `wiki_ingest.py` auto-falls back to 2 workers + 75 ms throttle.  
+Default throttle is 25 ms per worker even with power limits applied (protective baseline).  
+Stop the FAST brain (port 8011) before starting wiki ingest — conservative: wiki-embed-B + FAST brain both run on CUDA1; stopping FAST avoids GPU compute contention during long ingest sessions.
 
 ---
 
-## 11) FAST Brain Model — Upgrade Research Log (2026-04-07, updated 2026-04-19)
+## 11) FAST Brain Model — Upgrade Research Log (2026-04-07, updated 2026-05-24)
 
-### Current State (as of 2026-04-19)
+### Current State (as of 2026-05-24)
 - **Model**: `Qwen2.5-Omni-7B-Q6_K` — **Q6_K downquant applied**; saves ~1.85 GB VRAM vs Q8_0 with negligible quality loss (~0.1–0.2 PPL)
-- **llama.cpp build**: b8639 (early April 2025) — outdated; rebuild recommended for SM_120 Blackwell kernel optimizations
+- **GPU**: Gigabyte GeForce RTX 5090 OC (CUDA1, 32 GB VRAM) — upgraded from RTX 5080 (16 GB) on 2026-05-24
+- **llama.cpp build**: b9305 (63248fc3e) — custom MSVC build with CUDA SM_120 Blackwell kernels (`ARCHS=1200`, `BLACKWELL_NATIVE_FP4=1`)
+- **Context**: 32K (upgraded from 16K — new 32 GB VRAM budget provides ~21.7 GB headroom)
 - **Known limitation**: Mid-response Chinese language code-switching during long-form generation (confirmed Qwen2.5-Omni-7B training data bias; see QwenLM/Qwen2.5 issue #347)
 - **Workaround applied**: `router.py` routes creative writing (`CREATIVE_HINTS`) to ARCHITECT (score +3); `prompt_library.py` `sage_fast_core` includes English-only instruction
 
-### Q6_K VRAM Budget (Applied)
+### Q6_K VRAM Budget (RTX 5090 OC, 32 GB)
 ```
-Model weights:   ~6.25 GB
-mmproj F16:      ~2.64 GB
-KV cache q8_0:   ~0.45 GB
-Compute buffer:  ~0.50 GB
-Total:           ~9.84 GB   (headroom: ~6.2 GB on RTX 5080's 16 GB)
+Model weights:          ~6.25 GB
+mmproj F16:             ~2.64 GB
+KV cache q8_0 @32K:     ~0.90 GB  (doubled from 16K; 28 layers, 4 KV heads, head_dim=128)
+Compute buffer:         ~0.50 GB
+Total:                 ~10.29 GB  (headroom: ~21.7 GB on RTX 5090 OC's 32 GB)
 ```
 
 ### Why No Further Model Upgrade Is Possible Yet
@@ -254,7 +272,7 @@ Audio file upload support (`kind="audio"` in `chat_service.py`) depends on llama
 |---|---|
 | Qwen3-8B / Qwen3-VL-8B | No audio encoder — audio uploads break |
 | Gemma 3 12B | No audio encoder in llama.cpp |
-| Qwen3-Omni-30B-A3B | Fits on 5090 but 5090 is fully occupied by ARCHITECT + BGE-M3 (~29 GB used of 32 GB) |
+| Qwen3-Omni-30B-A3B | Fits on CUDA1 (5090 OC, 32 GB) but would displace FAST brain; no audio upgrade path yet |
 | Qwen3.5-Omni | llama.cpp audio support confirmed incomplete as of 2026-04-19 |
 | Voxtral-Mini-3B | Known crash on audio encoding — llama.cpp issue #21080 |
 | Ultravox v0.5/v0.6 (8B) | Audio-to-text only; no vision, no general reasoning |
@@ -269,7 +287,7 @@ Before proposing or applying a FAST brain model change, verify all of the follow
 | Video input | Client-side frame extraction → image attachments → ARCHITECT | `chat_service.py:183` |
 | Flash attention | `flash_attn: true` in brains.yaml; C++ runtime only (not Python) | `brains.yaml:65` |
 | KV prefix cache | `cache_ram: 512`, `slot_prompt_similarity: 0.10` | `brains.yaml:74,79` |
-| 16K context | `ctx_size: 16384` — 1 image ≈ 1280 tokens, 15104 for conversation | `brains.yaml:53` |
+| 32K context | `ctx_size: 32768` — 1 image ≈ 1280 tokens, ~30K for conversation | `brains.yaml:53` |
 | Port 8011, CUDA1 | Hard-coded in routing and inference session | `brains.yaml:38,43` |
 | TTS voice pipeline | Audio output is text-only; Kokoro handles TTS separately | `voice_bridge.py` |
 
@@ -278,13 +296,13 @@ Monitor these milestones; when any trigger is met, re-evaluate:
 
 1. **Qwen3.5-Omni llama.cpp audio PR merges** — check https://github.com/ggml-org/llama.cpp/pulls for "omni" or "audio" PRs. This is the primary upgrade path when it lands. Model will need 5090 or GPU upgrade (30B+ size).
 
-2. **Voxtral-Mini-3B crash fixed** — track llama.cpp issue #21080. If fixed, Mistral's 3B audio model could run as a lightweight audio-only companion on the 5080 alongside a stronger text model.
+2. **Voxtral-Mini-3B crash fixed** — track llama.cpp issue #21080. If fixed, Mistral's 3B audio model could run as a lightweight audio-only companion on CUDA1 alongside a stronger text model.
 
-3. **Qwen2.5-Omni-14B or larger Omni release** — Alibaba has only released 3B and 7B Omni variants. A 14B would be a direct drop-in upgrade if it fits (~14 GB weights Q6_K = marginal, Q4_K_M = comfortable on 5080).
+3. **Qwen2.5-Omni-14B or larger Omni release** — Alibaba has only released 3B and 7B Omni variants. A 14B would be a direct drop-in upgrade (~14 GB weights Q6_K = marginal, Q4_K_M = comfortable on the RTX 5090 OC's 32 GB; ~21.7 GB headroom available).
 
 4. **Gemma 4 audio support in llama.cpp** — Gemma 4 natively supports audio but llama.cpp audio parsing is not yet implemented. Track https://github.com/ggml-org/llama.cpp/issues.
 
-5. **llama.cpp rebuild** — Current build b8639 predates SM_120 Blackwell kernel optimizations. Rebuilding from latest release (https://github.com/ggml-org/llama.cpp/releases) improves token throughput on RTX 5080/5090 with no model changes needed.
+5. **llama.cpp rebuild** — Current build b9305 (63248fc3e) includes SM_120 Blackwell kernel optimizations. Monitor https://github.com/ggml-org/llama.cpp/releases for newer builds; a Chunk-fused GatedDeltaNet kernel for Blackwell (PR #21074) is in development and would benefit ARCHITECT throughput when merged.
 
 ### Qwen2.5-Omni-7B GGUF Sources
 - Official: https://huggingface.co/ggml-org/Qwen2.5-Omni-7B-GGUF (Q8_0, Q6_K, Q4_K_M, and others)

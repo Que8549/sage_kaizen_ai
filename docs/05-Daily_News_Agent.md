@@ -29,7 +29,7 @@ This design assumes:
   - CPU: AMD Ryzen 9 9950X3D
   - RAM: 192 GB DDR5
   - GPU0: RTX 5090 (32 GB VRAM)
-  - GPU1: RTX 5080 (16 GB VRAM)
+  - GPU1: Gigabyte RTX 5090 OC (32 GB VRAM)
   - Storage: 40 TB mixed SSD/HDD
 - SearXNG is already running locally in Docker instance (http://localhost:8080).
 - APScheduler is used inside Python for recurring jobs and retry logic.

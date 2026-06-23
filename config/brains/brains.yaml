@@ -10,18 +10,18 @@
 #   - server: all llama-server CLI flags grouped by category
 
 # -----------------------------------------------------------------------------
-# FAST Brain — Qwen2.5-Omni-7B Q8_0 — port 8011
-# GPU: RTX 5080 (CUDA1, 16 GB VRAM)
+# FAST Brain — Qwen2.5-Omni-7B Q6_K — port 8011
+# GPU: Gigabyte GeForce RTX 5090 OC (CUDA1, 32 GB VRAM)
 #
 # Replaces the former Qwen2.5-14B Q6_K.
 # Qwen2.5-Omni supports text, image, and audio input via the --mmproj file.
 #
-# VRAM budget on CUDA1 (16 GB):
-#   Model weights Q8_0:        ~8.10 GB
+# VRAM budget on CUDA1 (32 GB):
+#   Model weights Q6_K:        ~6.25 GB
 #   mmproj encoder F16:        ~2.64 GB
-#   KV cache q8_0 @ ctx=16384: ~0.45 GB  (28 layers, 4 KV heads, head_dim=128)
+#   KV cache q8_0 @ ctx=32768: ~0.90 GB  (28 layers, 4 KV heads, head_dim=128)
 #   Compute buffer:            ~0.50 GB
-#   Total:                    ~11.7 GB  → ~4.3 GB headroom  ✓
+#   Total:                    ~10.3 GB  → ~21.7 GB headroom  ✓
 #
 # ARCHITECT (Qwen3.5-27B) on CUDA0 runs simultaneously — no GPU conflict.
 # Audio output (TTS) is NOT supported by llama.cpp; responses are text-only.
@@ -38,7 +38,7 @@ fast:
     host: "127.0.0.1"
     port: 8011
 
-    alias: "Qwen2.5-Omni-7B-Q8_0"
+    alias: "Qwen2.5-Omni-7B-Q6_K"
 
     device: "CUDA1"
     n_gpu_layers: "all"
@@ -50,8 +50,9 @@ fast:
     # Run install_huggingface.py with the *mmproj*F16* pattern to download it.
     mmproj: "E:/Qwen2.5-Omni-7B-GGUF/mmproj-F16.gguf"
 
-    # 16K context: 1 image ≈ 1280 tokens, leaving 15104 for conversation.
-    ctx_size: 16384
+    # 32K context: 1 image ≈ 1280 tokens, leaving ~30K for conversation.
+    # Upgraded from 16K — RTX 5090 OC (32 GB) provides ample VRAM headroom (~21.7 GB).
+    ctx_size: 32768
     batch_size: 2048          # larger batch improves image-token prefill speed
     ubatch_size: 1024         # 1024 halves GPU kernel dispatch rounds vs 512 during RAG prefill
 
@@ -64,6 +65,9 @@ fast:
     no_cont_batching: true
 
     flash_attn: true
+    # q8_0 KV: lossless (<0.1% ppl vs f16) and halves KV read bandwidth vs f16 → better
+    # flash-attention throughput for a memory-bound 7B model. f16 would cost +0.9 GB for
+    # no perceptible quality gain. bf16 is unsafe on Blackwell SM_120 (CPU fallback).
     cache_type_k: "q8_0"
     cache_type_v: "q8_0"
 
@@ -75,12 +79,12 @@ fast:
     cache_ram: 512
 
     # Lower slot-prompt-similarity threshold → more aggressive KV slot reuse.
-    # Default is 0.50 in older builds; 0.10 means 90% of turns will attempt
-    # to reuse the nearest slot's cached prefix rather than starting fresh.
+    # 0.10 is the llama.cpp default as of b9307; setting explicitly for clarity.
+    # 90% of turns will attempt to reuse the nearest slot's cached prefix.
     slot_prompt_similarity: 0.10
 
     fit: true
-    fit_ctx: 16384
+    fit_ctx: 32768
     fit_target: 512
 
     no_warmup: true
@@ -93,31 +97,31 @@ fast:
 
 
 # -----------------------------------------------------------------------------
-# ARCHITECT Brain — Qwen3.5-27B-Uncensored-HauhauCS-Aggressive Q6_K — port 8012
+# ARCHITECT Brain — unsloth/Qwen3.6-27B-MTP-GGUF Q6_K — port 8012
 # GPU: RTX 5090 (CUDA0, 32 GB VRAM)
 #
 # Architecture: Hybrid Gated DeltaNet linear attention + full softmax attention
-#   - 64 layers total; 16 use KV cache (softmax attention), 48 use fixed recurrent state
+#   (architecture id: qwen35; confirmed via GGUF metadata)
+#   - 65 total blocks: 64 transformer layers + 1 MTP prediction head
+#   - full_attention_interval=4 → 16/64 layers use KV cache (softmax attention)
+#   - 48 layers use fixed recurrent DeltaNet state (no KV cost)
 #   - KV cache VRAM cost is ~75% lower than a pure-Transformer model of the same size
-#   - Natively multimodal (text + image + video) via mmproj vision encoder
 #   - 262K native context; model card recommends >= 128K for thinking mode
 #
 # VRAM budget on CUDA0 (32 GB):
-#   Model weights Q6_K:        ~21.0 GB
-#   mmproj encoder F16:         ~0.9 GB  (885 MB vision encoder, when enabled)
-#   KV cache q8_0 @ ctx=131072:~4.0 GB  (16 KV layers, 32 heads, head_dim=128)
+#   Model weights Q6_K:        ~21.3 GB  (22884406400 bytes; +0.3 GB vs non-MTP)
+#   MTP head weights:          included above (~310 MB, 1 extra block)
+#   KV cache q8_0 @ ctx=131072: ~4.0 GB  (16 KV layers, 4 KV heads, head_dim=256)
+#   MTP draft KV cache q8_0:   ~0.05 GB (was f16 ~0.1 GB; quantizable via spec_draft_type_k/v since b9307)
 #   Compute buffer:             ~1.5 GB
-#   Total w/ mmproj:           ~27.4 GB  → ~4.6 GB headroom  ✓
+#   Total (no mmproj):         ~26.85 GB → ~5.15 GB headroom  ✓  (above 2 GB fit_target floor)
 #
-# Multimodal setup (optional — requires downloading vision encoder):
-#   huggingface-cli download HauhauCS/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive \
-#     --include "mmproj-Qwen3.5-27B-Uncensored-HauhauCS-Aggressive-f16.gguf" \
-#     --local-dir E:/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive
-#   Then uncomment the mmproj line below.
+# MTP heads: 1 (block_count=65 - 64 transformer = 1 MTP head)
+# → spec_draft_n_max: 1; expect ~1.4–1.6x speedup at ~80% draft acceptance rate
 # -----------------------------------------------------------------------------
 architect:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
-  model: "E:/HauhauCS_Qwen3.6-27B-Uncensored-HauhauCS-Balanced/Qwen3.6-27B-Uncensored-HauhauCS-Balanced-Q6_K_P.gguf"
+  model: "E:/unsloth_Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q6_K.gguf"
   log: "F:/Projects/sage_kaizen_ai/logs/q6_server.log"
   startup_timeout_s: 360    # 6 minutes — 27B model loads; allow extra for mmproj if enabled
 
@@ -125,7 +129,7 @@ architect:
     host: "127.0.0.1"
     port: 8012               # ARCHITECT brain lives on 8012
 
-    alias: "Qwen3.5-27B-Q6_K"
+    alias: "Qwen3.6-27B-MTP-Q6_K"
 
     # The 27B model runs on the larger GPU
     device: "CUDA0"
@@ -140,14 +144,15 @@ architect:
     # mmproj: "E:/Qwen3.5-27B-Uncensored-HauhauCS-Aggressive/mmproj-Qwen3.5-27B-Uncensored-HauhauCS-Aggressive-f16.gguf"
 
     # Context — model trained to 262K; model card requires >= 128K for thinking mode.
-    # Only 16/64 layers use KV cache; at 128K q8_0 KV costs ~4 GB (5090 has ~4.6 GB headroom).
+    # Only 16/64 transformer layers use KV cache; at 128K q8_0 KV costs ~4 GB (5090 has ~5.15 GB headroom).
     ctx_size: 131072          # 128K — meets model thinking-mode requirement
     batch_size: 2048          # logical batch (llama.cpp default); better prefill throughput
     ubatch_size: 1024         # 1024 halves GPU kernel dispatch rounds vs 512 during RAG prefill
 
-    # More threads for the heavier model
-    threads: 22
-    threads_batch: 22
+    # 16 threads = physical P-core count on 9950X3D; avoid HT scheduling overhead
+    # during GPU-bound decode (DeltaNet forward pass saturates CUDA; CPU threads idle)
+    threads: 16
+    threads_batch: 16
     threads_http: 8
 
     parallel: 1
@@ -162,36 +167,38 @@ architect:
     no_cont_batching: true
 
     flash_attn: true
-    cache_type_k: "q8_0"     # near-lossless; halves KV memory vs f16
-    cache_type_v: "q8_0"     # only 16/64 layers use KV — pressure to go lower is minimal
+    # q8_0 KV at 128K ctx costs ~4 GB (16/64 layers use KV; DeltaNet layers use recurrent state).
+    # Upgraded from q4_0 (was ~2 GB): q4_0 V cache degrades reasoning quality by ~1.4–1.5 pp;
+    # ARCHITECT is exclusively a reasoning/thinking model so lossless KV is worth the 2 GB cost.
+    # ~5.15 GB headroom remains after upgrade (above the 2 GB fit_target floor).
+    # NOTE: bf16 is unsafe on Blackwell SM_120 — falls back to CPU (100% CPU usage). Use f16/q8_0.
+    # Symmetric K+V types required for fused Flash Attention kernels (no asymmetric split).
+    cache_type_k: "q8_0"
+    cache_type_v: "q8_0"
 
-    # SWA full cache — Qwen3.5-27B's 16 softmax-attention layers use sliding window attention.
-    # Without this flag llama.cpp may use a smaller rolling window, silently losing context
-    # beyond the SWA window.  Enabling full-size SWA cache preserves coherence across the
-    # full 128K context at the cost of the KV VRAM already budgeted above.
-    swa_full: true
+    # swa_full: intentionally omitted.
+    # Qwen3.6-27B's 16 full-attention layers are not SWA (sliding window attention) —
+    # they are standard full-context attention.  llama.cpp logs "swa_full is not supported
+    # by this model, it will be disabled" at startup; the flag is a no-op for this arch.
 
-    # KV cache reuse via prefix shifting — big latency win for RAG-heavy turns.
-    # The system prompt + injected RAG/wiki/search context is an identical prefix
-    # shared across most turns.  With cache_reuse=256, llama-server attempts to
-    # shift and reuse at least 256 cached tokens rather than re-prefilling from scratch.
-    cache_reuse: 256
+    # cache_reuse: intentionally omitted.
+    # The MTP draft context logs "cache_reuse is not supported by this context, it will
+    # be disabled" at startup.  Re-enable if a future build adds MTP cache_reuse support.
 
     # Raise server process priority so ARCHITECT turns are not preempted by background tasks.
     prio: 2                   # high (0=normal, 1=medium, 2=high, 3=realtime)
 
-    # KV prefix cache in host RAM (see FAST brain notes above for rationale).
-    # 256 MiB is smaller because ARCHITECT already has aggressive prefix
-    # checkpointing (checkpoint_every_n_tokens: 4096) + cache_reuse: 256.
-    # Together these cover the reuse space; cache_ram covers the cross-turn case.
+    # KV prefix cache in host RAM — stores the most-recently computed KV prefix
+    # so the next turn with the same system-prompt + RAG prefix skips re-prefilling.
+    # 256 MiB covers the full system prompt + typical RAG injection.
     cache_ram: 256
 
     # Aggressive slot-reuse for the single ARCHITECT slot (parallel=1).
-    # With one slot there is no contention, so the lower threshold is safe.
+    # 0.10 is the llama.cpp default as of b9307; setting explicitly for clarity.
     slot_prompt_similarity: 0.10
 
     fit: true
-    fit_target: 2048  # 3072<-orig value # 3 GB buffer; extra headroom for 128K ctx + optional mmproj
+    fit_target: 2048  # 2 GB free-VRAM floor; ~5.15 GB actual headroom at q8_0 KV
     fit_ctx: 131072
 
     no_warmup: true
@@ -211,27 +218,50 @@ architect:
     #   reasoning_budget: 8000
     #   reasoning_budget_message: "Wrap up reasoning and provide the answer."
 
-    # ── Speculative decoding (draftless n-gram) ───────────────────────────────
-    # ngram-map-k: builds a frequency hash-map of n-gram patterns seen in the
-    # current context and uses them as draft tokens.  No separate model needed.
-    # Expected: ~70% draft acceptance → ~1.7x effective generation throughput.
+    # ── Speculative decoding (MTP — built-in prediction heads) ───────────────
+    # Qwen3.6-27B contains 1 native MTP head (GGUF confirmed: block_count=65,
+    # architecture=qwen35, full_attention_interval=4).  draft-mtp runs this head
+    # as part of the main forward pass — no separate model required.
     #
-    # IMPORTANT: DO NOT use ngram-mod with Qwen3.5 hybrid models.
-    # Issues #19232 and #19267 document crashes and hangs with hybrid attention
-    # architectures.  ngram-map-k is stable and preferred.
+    # Each forward pass produces 2 candidate tokens: the main token + 1 MTP draft.
+    # If the draft is accepted (~80% expected) one full LLM call is saved.
+    # Expected: ~1.4–1.6x generation throughput increase over baseline.
     #
-    # Minor q8_0 KV compat note: ~5% overhead vs f16 KV — acceptable tradeoff
-    # for the 2x VRAM saving and near-zero quality loss of q8_0.
-    spec_type: "ngram-map-k"
-    spec_ngram_size_n: 5      # 5-token lookup patterns — sweet spot for reasoning chains
-    draft_max: 48             # propose up to 48 draft tokens per step
-    draft_min: 16             # always propose at least 16 (avoids tiny unproductive batches)
+    # spec_draft_n_max MUST equal the number of MTP heads (1 here).
+    # Setting it higher than head count has no effect and is silently ignored.
+    #
+    # Known issue: llama.cpp #23302 — rare non-deterministic committed token on
+    # Qwen3.x MTP models.  Monitor output quality; revert to ngram-map-k below
+    # if observed.
+    #
+    # Fallback config (uncomment + comment above if MTP is unstable):
+    # ngram-map-k4v (new in b9307) is an improved variant of ngram-map-k;
+    # both are valid alternatives:
+    #   spec_type: "ngram-map-k"          # or "ngram-map-k4v" (b9307+)
+    #   spec_ngram_map_k_size_n: 5
+    #   spec_ngram_map_k_size_m: 48
+    #   spec_draft_n_max: 48
+    #   spec_draft_n_min: 16
+    spec_type: "draft-mtp"
+    spec_draft_n_max: 1          # 1 MTP head (block_count 65 = 64 transformer + 1 MTP)
+    spec_draft_n_min: 1          # always propose the MTP draft; never skip it
+
+    # Quantize the MTP head's KV cache from f16 → q8_0 (new in b9307).
+    # Previously "not configurable"; --spec-draft-type-k/v were added in b9307.
+    # Saves ~50% of the MTP draft KV cache VRAM (~0.05 GB vs ~0.1 GB at f16).
+    # Draft token sampling (--spec-draft-backend-sampling) is now GPU-accelerated
+    # by default in b9307 — no flag needed, free throughput win.
+    spec_draft_type_k: "q8_0"
+    spec_draft_type_v: "q8_0"
 
     # ── Prefill checkpoints ───────────────────────────────────────────────────
     # Creates a KV-state snapshot every 4096 tokens during the initial RAG prompt
     # injection (prefill phase).  For a 4–16K RAG prefix this creates 1–4
     # checkpoints; subsequent turns whose prefix matches a checkpoint avoid full
     # reprocessing.  Works correctly alongside swa_full: true.
+    #
+    # 4096 is intentional — b9307 changed the default to 8192, but 4096 gives
+    # more granular checkpoints for our 4–16K RAG prefill window.
     #
     # Issue #20225 note: without swa_full, Qwen3.5 hybrid models invalidate
     # checkpoints on every turn (causing full reprocessing).  swa_full: true
@@ -277,7 +307,7 @@ embed:
     # BGE-M3 produces 1024-dimensional embeddings.
     # ctx_size should match your ingest chunk size (rag_v1 default: 1200 chars ~ 300 tokens)
     ctx_size: 2048
-    batch_size: 2048          # large batch — embedding is cheap per token vs generation
+    batch_size: 512           # must equal ubatch_size for pooling embed servers (llama.cpp b9037+)
     ubatch_size: 512
 
     threads: 20
@@ -320,8 +350,23 @@ wiki_embed:
     # Maximum batch sizes enforced by the service endpoints.
     # wiki_ingest.py uses the same values as its per-call batch size so that
     # ingest calls always stay within the service limits.
-    text_batch: 256
-    image_batch: 96
+    #
+    # Throughput note: jina-clip-v2 image encoding has perfectly linear latency
+    # scaling with batch size (no GPU parallelism benefit from larger batches —
+    # xFormers EVA02-L14 attention tiles sequentially at 512×512 resolution).
+    # Throughput scales with concurrent workers, not batch size.
+    # text_batch: JinaBERT text encoder benefits greatly from large batches;
+    #   512 fills ~17 pages per HTTP call (avg 30 chunks/page) on the 32 GB
+    #   RTX 5090 OC (CUDA1), raising GPU matmul utilization from ~50-60%
+    #   (batch=256) to ~80-90% (batch=512). Previously 256 on the 16 GB 5080.
+    #   wiki_ingest._run_worker accumulates chunks across pages until text_batch
+    #   is reached before calling embed_text() — larger batch = fewer HTTP calls.
+    # image_batch: optimal range is 4–8; 8 minimises HTTP call overhead while
+    #   keeping per-call latency short enough that workers stay responsive.
+    #   Image embedding latency scales linearly (no GPU parallelism benefit from
+    #   larger batches — EVA02-L14 tiles sequentially at 512×512 resolution).
+    text_batch: 512
+    image_batch: 8
 
     # CUDA0 contention guard: after idle_timeout_s seconds of no requests,
     # the service offloads jina-clip-v2 from GPU to CPU (freeing ~2 GB VRAM).
@@ -381,8 +426,8 @@ wiki_embed:
 # No HuggingFace download required at service start.
 #
 # GPU assignment (ARCHITECT brain always on CUDA0/5090):
-#   CUDA0 (RTX 5090) — wiki embed service (jina-clip-v2) + ARCHITECT brain
-#   CUDA1 (RTX 5080) — CLAP embed service (audio, freed when FAST brain off)
+#   CUDA0 (RTX 5090)    — wiki embed service (jina-clip-v2) + ARCHITECT brain
+#   CUDA1 (RTX 5090 OC) — CLAP embed service (audio, freed when FAST brain off)
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 # Live Web Search — SearXNG private instance
@@ -550,7 +595,7 @@ media_embed:
   clap_model_dir: "E:/clap-htsat-unfused"
 
   log: "F:/Projects/sage_kaizen_ai/logs/clap_embed_service.log"
-  startup_timeout_s: 300    # model load + torch.compile JIT + warmup = ~150-200 s on CUDA1
+  startup_timeout_s: 300    # model load + torch.compile JIT + warmup = ~150-200 s on CUDA1 (RTX 5090 OC)
 
   # Image embedding — delegates to the always-running wiki embed service.
   image_service:
@@ -562,5 +607,5 @@ media_embed:
   audio_service:
     host: "127.0.0.1"
     port: 8040              # CLAP embed service (laion/clap-htsat-unfused, 512-dim)
-    device: "cuda:1"        # RTX 5080; override via CLAP_DEVICE env var
+    device: "cuda:1"        # RTX 5090 OC (CUDA1); override via CLAP_DEVICE env var
     audio_batch: 32         # audio files per /embed/audio call

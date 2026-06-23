@@ -72,6 +72,67 @@ logging.getLogger("tornado.application").addFilter(_stop_race_filter)
 logging.getLogger("tornado.general").addFilter(_stop_race_filter)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Graceful Ctrl+C / shutdown handling ──────────────────────────────────────
+# Problem: Streamlit waits for the current script execution to finish before
+# stopping its runtime.  If the script is in the middle of live.write_stream()
+# streaming tokens from a long ARCHITECT response, Streamlit never gets to stop
+# its IOLoop, so the process never exits — regardless of how many times CTRL-C
+# is pressed.
+#
+# Fix (two layers):
+#   1. Shutdown monitor (daemon thread): polls Streamlit's RuntimeState every
+#      300 ms; when STOPPING is detected it calls abort_active_stream() which
+#      closes the underlying HTTP socket.  This raises a ConnectionError inside
+#      requests.iter_lines(), propagates through write_stream()'s generator,
+#      and is caught by the existing `except Exception` block in the UI script.
+#      The script finishes, Streamlit can stop, sys.exit() fires, atexit runs.
+#
+#   2. Force-exit watchdog (atexit): once atexit starts (sys.exit called), a
+#      daemon thread gives remaining cleanup handlers 8 s then calls
+#      os._exit(0), bypassing any blocked thread-join in _python_exit().
+
+import atexit
+import os as _os
+
+def _start_shutdown_monitor() -> None:
+    """Start a daemon thread that aborts the active LLM stream on shutdown."""
+    def _monitor() -> None:
+        import time
+        try:
+            from streamlit.runtime import RuntimeState, get_instance
+        except ImportError:
+            return
+        while True:
+            time.sleep(0.3)
+            try:
+                rt = get_instance()
+                if rt is not None and rt.state in (
+                    RuntimeState.STOPPING, RuntimeState.STOPPED
+                ):
+                    from openai_client import abort_active_stream
+                    abort_active_stream()
+                    return
+            except Exception:
+                pass
+
+    threading.Thread(
+        target=_monitor, daemon=True, name="shutdown-monitor"
+    ).start()
+
+_start_shutdown_monitor()
+
+
+def _force_exit_watchdog() -> None:
+    """Atexit handler: force os._exit(0) after 8 s if shutdown stalls."""
+    def _bomb() -> None:
+        import time
+        time.sleep(8)
+        _os._exit(0)
+    threading.Thread(target=_bomb, daemon=True, name="force-exit-watchdog").start()
+
+atexit.register(_force_exit_watchdog)
+# ─────────────────────────────────────────────────────────────────────────────
+
 from chat_service import ChatService, MediaAttachment, TurnConfig
 from document_parser import (
     ACCEPTED_EXTENSIONS as _DOC_ACCEPTED_EXTENSIONS,

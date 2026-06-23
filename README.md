@@ -163,10 +163,10 @@ Designed and tested on a high-performance workstation:
 - AMD Ryzen 9 9950X3D
 - 192GB DDR5
 - RTX 5090 (32GB VRAM)
-- RTX 5080 (16GB VRAM)
+- Gigabyte RTX 5090 OC (32GB VRAM)
 - 40TB storage
 - Windows 11 Pro
-- Custom CUDA 13.1 llama.cpp build
+- Custom CUDA 13.2.1 llama.cpp build (b9305, 63248fc3e)
 
 Also integrates with:
 - Raspberry Pi 4 / 5 nodes
@@ -178,7 +178,6 @@ Also integrates with:
 🛠 Core Technology Stack
 - llama.cpp (CUDA build)
 - llama-server
-- llama-cpp-python
 - Streamlit
 - PostgreSQL 18 + pgvector
 - ZeroMQ

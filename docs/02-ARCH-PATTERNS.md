@@ -12,7 +12,7 @@ Two independent llama-server instances with distinct roles:
 
 | Brain | Model | Port | GPU | Role |
 |-------|-------|------|-----|------|
-| FAST | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (RTX 5080) | Default; multimodal (text + image + audio); low-latency |
+| FAST | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (RTX 5090 OC) | Default; multimodal (text + image + audio); low-latency |
 | ARCHITECT | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (RTX 5090) | Deep reasoning; 128K context; `<think>` tokens; speculative decoding |
 
 ### Why
@@ -257,7 +257,7 @@ Review runs are dominated by ARCHITECT inference (minutes per node). Overhead is
 Long-running background tasks (Wiki ingest, model consolidation) coordinate with active chat sessions to avoid GPU contention.
 
 ### Why
-- Wiki ingest on CUDA1 (5080) conflicts with FAST brain (also CUDA1)
+- Wiki ingest on CUDA1 (RTX 5090 OC) shares GPU compute with FAST brain (also CUDA1)
 - Running ingest during a live chat session causes inference timeouts
 
 ### Implementation

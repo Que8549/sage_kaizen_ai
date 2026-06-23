@@ -19,8 +19,8 @@ _SYSTEM_PROMPT = """\
 You are validating a llama-server configuration file (brains.yaml) for Sage Kaizen.
 
 Hardware context:
-  - GPU0: RTX 5090, 32 GB VRAM (CUDA0) — ARCHITECT brain + BGE-M3 embed
-  - GPU1: RTX 5080, 16 GB VRAM (CUDA1) — FAST brain (audio+vision mmproj)
+  - GPU0: RTX 5090, 32 GB VRAM (CUDA0) — ARCHITECT brain + BGE-M3 embed (display GPU)
+  - GPU1: Gigabyte RTX 5090 OC, 32 GB VRAM (CUDA1) — FAST brain (audio+vision mmproj)
   - CPU: AMD Ryzen 9 9950X3D, 16 physical cores / 32 threads
   - RAM: 192 GB DDR5
 
@@ -40,7 +40,7 @@ Check for these specific issues and report each as [CRITICAL], [HIGH], [MEDIUM],
    - q8_0 = 1 byte/element, q4_0 = 0.5 byte/element, f16 = 2 bytes/element
 
 3. Context window:
-   - FAST: ctx_size=16384 (model max: 32K; fine for audio+vision use)
+   - FAST: ctx_size=32768 (upgraded from 16K; RTX 5090 OC 32 GB provides ~21.7 GB headroom)
    - ARCHITECT: ctx_size=131072 (model requires >=128K for thinking mode; verified)
    - batch_size should not exceed ctx_size
 

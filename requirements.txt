@@ -64,8 +64,6 @@ langsmith==0.7.28
 lazy-loader==0.5
 librosa==0.11.0
 libzim==3.8.0
-# Editable install with no version control (llama_cpp_python==0.3.16)
--e f:\projects\sage_kaizen_ai\llama-cpp-python
 llvmlite==0.47.0
 lxml==6.0.2
 lyricsgenius==3.11.0
