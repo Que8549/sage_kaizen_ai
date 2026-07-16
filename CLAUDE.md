@@ -60,7 +60,7 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
   - `input_guard.py` — prompt-injection defense for all external content (RAG chunks, web snippets)
   - `env_utils.py` — per-call env var accessors (`env_bool`, `env_int`, `env_float`, `env_str`); re-read every turn
   - `mermaid_streamlit.py` — Mermaid diagram detection and rendering
-  - `sk_logging.py` — centralized rotating log configuration
+  - `sk_logging.py` — centralized rotating log configuration; also mirrors structured log records into PostgreSQL (`log` schema, best-effort, see §12)
   - `pg_settings.py` — Pydantic BaseSettings for PostgreSQL DSN
   - `voice_bridge.py` — ZMQ bridge binding ports 5790/5791/5792 for the voice app
 - Review `config/brains/brains.yaml` for latest AI models and all server settings
@@ -149,6 +149,10 @@ These are **hard constraints**:
 5. **Review service uses the existing PostgreSQL connection (`pg_settings.py`) for LangGraph checkpoint persistence**
    - Tables live in the `langgraph` schema (not `public`) — run `scripts/setup_langgraph_schema.sql` once as superuser before first review run
    - Do not introduce a separate database connection for the review service
+
+6. **PostgreSQL schema migrations for cross-project concerns live in this (main) project**
+   - `log/db/log_schema.sql` (structured logging, §12) follows this rule — run `scripts/setup_log_schema.sql` once as superuser first, then `log/db/log_schema.sql` as `sage`
+   - **Known exception**: `news/db/news_schema.sql` and `news/db/migrations/` live in and are git-tracked by `sage_kaizen_ai_ingest`, not here — a pre-existing precedent from before this rule was made explicit. Don't treat it as license to add new schema files outside this project; it's flagged here rather than silently left inconsistent.
 
 ---
 
@@ -312,3 +316,74 @@ Monitor these milestones; when any trigger is met, re-evaluate:
 ### Qwen2.5-Omni-7B GGUF Sources
 - Official: https://huggingface.co/ggml-org/Qwen2.5-Omni-7B-GGUF (Q8_0, Q6_K, Q4_K_M, and others)
 - Unsloth: https://huggingface.co/unsloth/Qwen2.5-Omni-7B-GGUF (extensive quant options including IQ variants)
+
+---
+
+## 12) Structured Logging → PostgreSQL (`log` schema)
+
+Added 2026-07-16. Every structured, `logging`-module-based log file across
+`sage_kaizen_ai`, `sage_kaizen_ai_ingest`, and `sage_kaizen_ai_voice` is
+mirrored (best-effort, non-blocking) into a matching table in the dedicated
+`log` Postgres schema, in addition to — never instead of — the existing
+rotating `.log` files.
+
+**Setup (one-time, run in order):**
+```powershell
+# 1. As postgres superuser (pgAdmin or psql -U postgres)
+psql -U postgres -d sage_kaizen -f scripts/setup_log_schema.sql
+# 2. As sage
+psql -U sage -d sage_kaizen -f log/db/log_schema.sql
+```
+Apply BOTH before relying on any project's DB logging — the handler degrades
+silently to file-only when the schema/tables are missing, so getting this
+sequencing right matters more than the safety net.
+
+**Tables** (one per source `.log` file, `id bigint GENERATED ALWAYS AS
+IDENTITY PRIMARY KEY` for fast sequential indexing — a deliberate deviation
+from the house `uuid PRIMARY KEY DEFAULT gen_random_uuid()` convention used
+elsewhere, chosen specifically for this append-only high-volume workload):
+`log.sage_kaizen`, `log.sage_kaizen_ingest`, `log.sage_kaizen_voice`,
+`log.news_agent` (shared by main + ingest, disambiguated by
+`source_project`), `log.media_ingest`, `log.wiki_ingest`. Plus
+`log.all_logs`, a `UNION ALL` convenience view across all six for run_id-scoped
+cross-component queries:
+```sql
+SELECT * FROM log.all_logs WHERE run_id = '...' ORDER BY log_date;
+```
+
+**Out of scope (deliberately, not yet implemented)**: raw subprocess-captured
+stdout/stderr logs (embed-service crash tracebacks, uvicorn banners) and
+llama-server's own native log format — neither is reliably parseable as
+structured rows. Both remain file-only.
+
+**Mechanism** — `sk_logging.py`'s `PostgresLogHandler` (one local copy per
+project, same "N local copies" convention as the rest of this file): a
+bounded, non-blocking queue + dedicated consumer thread batches records
+(flush every ~2s or ~200 records) into the mapped `log.<table>` via a
+dedicated psycopg3 connection, reading fields natively off each `LogRecord`
+(never parsing the formatted log text). Never a hard dependency: missing
+psycopg, unset DSN, unreachable DB, or a missing schema all degrade silently
+to file-only logging, with at most one diagnostic notice (to a dedicated
+`sk_logging_internal.log`, never stdout/stderr, never recursing into the DB
+handler that's failing) per state transition. Flush-on-exit is registered via
+`atexit` — DB writes are batched, but the file `.log` remains the
+authoritative source for the last few lines before an abrupt process death
+(e.g. a BSOD); the DB copy is a queryable aggregate, not a disaster-forensics
+replacement for that specific case.
+
+**`run_id` correlation**: every process computes one `run_id` (UUID) at
+`sk_logging` import time (`os.environ.get("SAGE_KAIZEN_RUN_ID") or
+str(uuid.uuid4())`), stamped onto every `LogRecord` in that process via
+`logging.setLogRecordFactory()` (process-global — covers root-logger/
+third-party-library capture too, not just per-logger handlers). Subprocess
+launch sites that spawn a sibling Python process using `sk_logging.py` (e.g.
+wiki-embed services, CLAP) propagate `SAGE_KAIZEN_RUN_ID` in the child's env,
+so one logical run's rows share a `run_id` across process boundaries. This is
+a NEW, process-level correlation axis — deliberately separate from the
+existing job-level `run_id` in `news_runs` (per-job, not per-process) and the
+voice project's turn-level ZMQ `session_id`; not unifying those.
+
+**No native partitioning yet** — Postgres best-practice guidance is to
+partition at ~50-100GB or 100M+ rows; not there. Converting to a partitioned
+table later is a well-documented, mechanical migration once volume actually
+warrants it.
