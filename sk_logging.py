@@ -7,13 +7,24 @@ from __future__ import annotations
 #
 # 2026-07-16: added PostgresLogHandler — a buffered, non-blocking handler that
 # mirrors structured log records into the `log` schema (see
-# log/db/log_schema.sql) alongside the existing rotating file. It is
-# best-effort and never a hard dependency: if psycopg, the DSN, or the
-# schema/tables are unavailable, logging silently degrades to file-only. DB
-# writes are batched (up to ~2s delay) — the .log file remains the
-# authoritative source for the last few lines before an abrupt process death;
-# the DB copy is a queryable, correlatable aggregate, not a replacement
-# disaster-forensics source for that specific case.
+# log/db/log_schema.sql).
+#
+# 2026-07-16 (same day, follow-up #1): for every file_name in _TABLE_MAP, this
+# went DB-ONLY — the rotating file was retired after end-to-end verification,
+# per explicit decision to make Postgres the sole source of truth for these
+# six log sources and eliminate the redundant on-disk copy.
+#
+# 2026-07-16 (same day, follow-up #2): a SMALL rotating file
+# (FALLBACK_MAX_BYTES/FALLBACK_BACKUP_CNT) was re-added for those six
+# sources as a crash-safety net — PostgresLogHandler batches records in
+# memory for up to ~2s/200 records before they reach Postgres, and a hard
+# crash (e.g. a BSOD) gives no chance to flush that buffer. This file writes
+# synchronously per log call, independent of the DB batching, so a crash
+# can't lose the data — it's just no longer automatically in Postgres until
+# someone reconciles the two (manual step; no auto-replay was built). It is
+# NOT a second permanent archive: deliberately small, its only job is to
+# bridge a crash window. file_names NOT in _TABLE_MAP still get the
+# standard-size RotatingFileHandler as their only copy, unchanged.
 
 from pathlib import Path
 import atexit
@@ -81,6 +92,13 @@ _EXCEPTION_CAP = 131072     # 128 KB
 _QUEUE_MAXSIZE = 20000
 _FLUSH_INTERVAL_S = 2.0
 _FLUSH_BATCH_SIZE = 200
+
+# Crash-safety fallback file sizing for _TABLE_MAP-mapped loggers (added
+# 2026-07-16, same day as the DB-only change) — deliberately small: this
+# file's job is to bridge a crash window (PostgresLogHandler's in-memory
+# batching), not to be a second permanent archive alongside Postgres.
+FALLBACK_MAX_BYTES = 1 * 1024 * 1024  # 1 MB
+FALLBACK_BACKUP_CNT = 2
 
 # Dedicated internal-diagnostics logger for "DB down"/"DB recovered" notices.
 # Must NEVER get a PostgresLogHandler attached (would recurse into the outage
@@ -312,7 +330,25 @@ def get_postgres_handler(file_name: str) -> logging.Handler | None:
 
 def get_logger(name: str, *, file_name: str = "sage_kaizen.log") -> logging.Logger:
     """
-    Idempotent rotating-file + buffered-Postgres logger.
+    Idempotent logger with a rotating file handler plus, for file_names
+    mapped in _TABLE_MAP, a buffered Postgres handler too.
+
+    2026-07-16: for mapped file_names, the file went DB-only (Postgres as
+    sole source of truth). 2026-07-16 (same day, follow-up): a small rotating
+    file was re-added for those six sources as a crash-safety net —
+    PostgresLogHandler batches records in memory for up to ~2s/200 records
+    before they reach Postgres, and a hard crash (e.g. a BSOD) gives no
+    chance to flush that buffer. Every log call now writes to this file
+    synchronously (same mechanism file logging always used here), completely
+    independent of the DB batching, so a crash can't lose it. Deliberately
+    small (FALLBACK_MAX_BYTES/FALLBACK_BACKUP_CNT) — its job is to bridge a
+    crash window, not to be a second permanent archive; Postgres remains the
+    intended long-term store, and recovering from this file after a real
+    incident is a manual step, not automatic.
+
+    Unmapped file_names (no DB destination exists for them) get the
+    standard-size rotating file as their only copy, as before.
+
     Safe to call repeatedly across Streamlit reruns.
     """
     logger = logging.getLogger(name)
@@ -322,21 +358,24 @@ def get_logger(name: str, *, file_name: str = "sage_kaizen.log") -> logging.Logg
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
+    is_db_backed = file_name in _TABLE_MAP
+    max_bytes = FALLBACK_MAX_BYTES if is_db_backed else 5 * 1024 * 1024
+    backup_count = FALLBACK_BACKUP_CNT if is_db_backed else 5
+
     log_dir = project_root() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / file_name
 
     handler = logging.handlers.RotatingFileHandler(
         filename=str(log_path),
-        maxBytes=5 * 1024 * 1024,
-        backupCount=5,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
         encoding="utf-8",
     )
     handler.setFormatter(logging.Formatter(
         fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
-
     logger.addHandler(handler)
 
     pg_handler = get_postgres_handler(file_name)

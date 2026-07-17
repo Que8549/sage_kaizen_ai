@@ -324,8 +324,31 @@ Monitor these milestones; when any trigger is met, re-evaluate:
 Added 2026-07-16. Every structured, `logging`-module-based log file across
 `sage_kaizen_ai`, `sage_kaizen_ai_ingest`, and `sage_kaizen_ai_voice` is
 mirrored (best-effort, non-blocking) into a matching table in the dedicated
-`log` Postgres schema, in addition to — never instead of — the existing
-rotating `.log` files.
+`log` Postgres schema.
+
+**DB-only, then a crash-safety file was re-added — both same day, 2026-07-16**:
+after applying the schema and verifying end-to-end that all six tables
+receive every record (a live write-then-read check per table, not just "the
+code looks right"), the rotating `.log` files these six loggers used to also
+write were retired — explicit decision to make Postgres the sole source of
+truth and eliminate the redundant on-disk copy. This immediately created a
+real gap: `PostgresLogHandler` batches records in memory for up to ~2s/200
+records before they reach Postgres, and a hard crash (e.g. a BSOD) gives no
+chance to flush that buffer — so a crash could lose the last few seconds of
+logs entirely, which was exactly the kind of loss this whole feature was
+built to prevent. Fixed the same day: a **small** `RotatingFileHandler`
+(`FALLBACK_MAX_BYTES` / `FALLBACK_BACKUP_CNT` in `sk_logging.py` — 1 MB × 2
+backups) was re-attached alongside `PostgresLogHandler` for all six sources.
+Every log call now writes to this file synchronously (same mechanism file
+logging always used here), completely independent of the DB batching, so a
+crash can't lose the data. It is deliberately small and NOT a second
+permanent archive — Postgres remains the intended long-term store; if a
+crash ever does cause a gap in the DB, reconciling this file back into
+Postgres is a manual step, not automatic (no write-ahead-log/replay system
+was built — that was considered and explicitly declined in favor of this
+simpler, lower-risk mechanism). `file_names` not in the six-table map are
+unaffected either way — they always had (and keep) the standard-size
+rotating file as their only copy.
 
 **Setup (one-time, run in order):**
 ```powershell
@@ -361,15 +384,21 @@ project, same "N local copies" convention as the rest of this file): a
 bounded, non-blocking queue + dedicated consumer thread batches records
 (flush every ~2s or ~200 records) into the mapped `log.<table>` via a
 dedicated psycopg3 connection, reading fields natively off each `LogRecord`
-(never parsing the formatted log text). Never a hard dependency: missing
-psycopg, unset DSN, unreachable DB, or a missing schema all degrade silently
-to file-only logging, with at most one diagnostic notice (to a dedicated
-`sk_logging_internal.log`, never stdout/stderr, never recursing into the DB
-handler that's failing) per state transition. Flush-on-exit is registered via
-`atexit` — DB writes are batched, but the file `.log` remains the
-authoritative source for the last few lines before an abrupt process death
-(e.g. a BSOD); the DB copy is a queryable aggregate, not a disaster-forensics
-replacement for that specific case.
+(never parsing formatted text). Never raises: missing psycopg, unset DSN,
+unreachable DB, or a missing schema all degrade to a silent drop (bounded
+queue, oldest dropped first), with at most one diagnostic notice per state
+transition — written to a dedicated `sk_logging_internal.log`, never
+stdout/stderr, never recursing into the DB handler that's failing. This
+internal-diagnostics file exists purely to report on the DB path's own
+health, not as a mirror of application log content — that role now belongs
+to the small crash-safety `RotatingFileHandler` described above, which each
+of the six sources also writes.
+Flush-on-exit is registered via `atexit`, but DB writes are still batched up
+to ~2s — see the DB-only tradeoff note above for what that means now that
+there's no file behind it. `get_logger(name, file_name=...)` for any
+`file_name` **not** in the six-table map still gets a plain
+`RotatingFileHandler` as before — there's no DB destination for those, so
+file logging remains their only copy and was never touched by this change.
 
 **`run_id` correlation**: every process computes one `run_id` (UUID) at
 `sk_logging` import time (`os.environ.get("SAGE_KAIZEN_RUN_ID") or
