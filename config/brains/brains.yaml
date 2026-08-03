@@ -366,8 +366,15 @@ wiki_embed:
     host: "127.0.0.1"
     port: 8031
 
-    # PyTorch device for the model (CUDA0 = RTX 5090)
-    device: "cuda:0"
+    # PyTorch device for the model.
+    # CUDA1 = RTX 5090 OC, the headless compute card.  NOT CUDA0: that card
+    # drives three monitors, and running torch.compile autotune on the display
+    # GPU is the documented Windows TDR trigger (ingest CLAUDE.md §6).
+    # Was "cuda:0" until the 2026-08-03 audit — wiki_ingest.py always passes an
+    # explicit device= per service (A/B -> cuda:1, C -> cuda:0 only with
+    # --gpu0-workers 1, D -> cuda:2), so this value was never reached from there,
+    # but it is the fallback for any other consumer of this config block.
+    device: "cuda:1"
 
     # Maximum batch sizes enforced by the service endpoints.
     # wiki_ingest.py uses the same values as its per-call batch size so that
