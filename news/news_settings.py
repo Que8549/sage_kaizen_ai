@@ -21,9 +21,9 @@ Usage:
 """
 from __future__ import annotations
 
-import threading
 from functools import cached_property
 
+from lazy import lazy_singleton
 from pg_settings import PgSettings
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -37,17 +37,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # it to look for NEWS_PG_USER instead of PG_USER.  We avoid the conflict by
 # keeping NewsSettings as a plain BaseSettings subclass and delegating pg_dsn
 # to a separate PgSettings instance that has no prefix.
-_pg_settings: PgSettings | None = None
-_pg_settings_lock = threading.Lock()
-
-
+@lazy_singleton
 def _get_pg_settings() -> PgSettings:
-    global _pg_settings
-    if _pg_settings is None:
-        with _pg_settings_lock:
-            if _pg_settings is None:
-                _pg_settings = PgSettings()
-    return _pg_settings
+    return PgSettings()
 
 
 class NewsSettings(BaseSettings):
@@ -160,15 +152,7 @@ class NewsSettings(BaseSettings):
 # ---------------------------------------------------------------------------
 # Module-level lazy singleton — one instance per process.
 # ---------------------------------------------------------------------------
-_settings_instance: NewsSettings | None = None
-_settings_lock = threading.Lock()
-
-
+@lazy_singleton
 def get_news_settings() -> NewsSettings:
     """Return the process-wide NewsSettings singleton."""
-    global _settings_instance
-    if _settings_instance is None:
-        with _settings_lock:
-            if _settings_instance is None:
-                _settings_instance = NewsSettings()
-    return _settings_instance
+    return NewsSettings()

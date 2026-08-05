@@ -485,78 +485,70 @@ def start_server_from_config(brain: BrainConfig) -> tuple[bool, str]:
 # Public API: ensure_* functions (called by InferenceSession)                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def ensure_embed_running(servers: ManagedServers) -> tuple[bool, str]:
-    base_url = servers.embed.base_url
+def _ensure_brain_running(brain: BrainConfig, label: str) -> tuple[bool, str]:
+    """
+    Bring one llama-server up, or confirm it already is.
 
-    if find_pid_by_port(servers.embed_port) is not None:
+    Steps, in order:
+      1. If something is listening on the port AND answers a readiness probe,
+         it is already up — return without touching it.
+      2. Otherwise clear the port. Something listening but not answering is a
+         stale or wedged process; respawning on an occupied port would fail.
+      3. Spawn from the BrainConfig (which came from brains.yaml).
+      4. Block until /health answers or the configured timeout expires,
+         aborting early on a fatal marker in the server's own log.
+
+    `label` appears in the returned status strings, which the Streamlit status
+    panel renders verbatim.
+
+    Extracted 2026-08-05: ensure_embed_running / ensure_q5_running /
+    ensure_q6_running / ensure_summarizer_running were four copies of this
+    body differing only in which BrainConfig they read and what they called
+    themselves.
+    """
+    base_url = brain.base_url
+
+    if find_pid_by_port(brain.port) is not None:
         ok, how = _http_ready(base_url, timeout_s=1.0)
         if ok:
-            return True, f"EMBED already ready ({how})"
+            return True, f"{label} already ready ({how})"
 
-    stop_server_on_port(servers.embed_port)
+    stop_server_on_port(brain.port)
 
-    ok, msg = start_server_from_config(servers.embed)
+    ok, msg = start_server_from_config(brain)
     if not ok:
-        return False, f"EMBED start failed: {msg}"
+        return False, f"{label} start failed: {msg}"
 
     return _wait_for_ready(
-        host=servers.host,
-        port=servers.embed_port,
+        host=brain.host,
+        port=brain.port,
         base_url=base_url,
-        timeout_s=servers.embed_start_timeout_s,
-        log_path=servers.embed_log,
+        timeout_s=brain.startup_timeout_s,
+        log_path=brain.log,
     )
+
+
+def ensure_embed_running(servers: ManagedServers) -> tuple[bool, str]:
+    """Start the BGE-M3 embedding server (port 8020) if not already running."""
+    return _ensure_brain_running(servers.embed, "EMBED")
 
 
 def ensure_q5_running(servers: ManagedServers) -> tuple[bool, str]:
-    # Embedding server must be ready before the chat brain starts
+    """
+    Start the FAST brain (port 8011) if not already running.
+
+    The embedding server is brought up first: RAG retrieval runs on every turn,
+    so a chat brain without embeddings would answer without context.
+    """
     ok, msg = ensure_embed_running(servers)
     if not ok:
         return False, f"Embeddings not ready: {msg}"
-
-    base_url = servers.fast.base_url
-
-    if find_pid_by_port(servers.q5_port) is not None:
-        ok, how = _http_ready(base_url, timeout_s=1.0)
-        if ok:
-            return True, f"Q5 already ready ({how})"
-
-    stop_server_on_port(servers.q5_port)
-
-    ok, msg = start_server_from_config(servers.fast)
-    if not ok:
-        return False, f"Q5 start failed: {msg}"
-
-    return _wait_for_ready(
-        host=servers.host,
-        port=servers.q5_port,
-        base_url=base_url,
-        timeout_s=servers.q5_start_timeout_s,
-        log_path=servers.q5_log,
-    )
+    return _ensure_brain_running(servers.fast, "Q5")
 
 
 def ensure_q6_running(servers: ManagedServers) -> tuple[bool, str]:
-    base_url = servers.architect.base_url
-
-    if find_pid_by_port(servers.q6_port) is not None:
-        ok, how = _http_ready(base_url, timeout_s=1.0)
-        if ok:
-            return True, f"Q6 already ready ({how})"
-
-    stop_server_on_port(servers.q6_port)
-
-    ok, msg = start_server_from_config(servers.architect)
-    if not ok:
-        return False, f"Q6 start failed: {msg}"
-
-    return _wait_for_ready(
-        host=servers.host,
-        port=servers.q6_port,
-        base_url=base_url,
-        timeout_s=servers.q6_start_timeout_s,
-        log_path=servers.q6_log,
-    )
+    """Start the ARCHITECT brain (port 8012) if not already running."""
+    return _ensure_brain_running(servers.architect, "Q6")
 
 
 def ensure_summarizer_running(servers: ManagedServers) -> tuple[bool, str]:
@@ -569,25 +561,4 @@ def ensure_summarizer_running(servers: ManagedServers) -> tuple[bool, str]:
     """
     if servers.summarizer is None:
         return False, "summarizer: section not configured in brains.yaml"
-
-    s = servers.summarizer
-    base_url = s.base_url
-
-    if find_pid_by_port(s.port) is not None:
-        ok, how = _http_ready(base_url, timeout_s=1.0)
-        if ok:
-            return True, f"Summarizer already ready ({how})"
-
-    stop_server_on_port(s.port)
-
-    ok, msg = start_server_from_config(s)
-    if not ok:
-        return False, f"Summarizer start failed: {msg}"
-
-    return _wait_for_ready(
-        host=s.host,
-        port=s.port,
-        base_url=base_url,
-        timeout_s=s.startup_timeout_s,
-        log_path=s.log,
-    )
+    return _ensure_brain_running(servers.summarizer, "Summarizer")

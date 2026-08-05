@@ -136,11 +136,18 @@ def _collect_diff(mode: str, target: str) -> tuple[str, list[str], list[str]]:
     elif mode == "file":
         changed_files = [target] if target else []
         diff_text     = _safe_git(main_repo, "diff", "HEAD", "--", target) if target else ""
-        # Also read the file content for full context
-        full_path = MAIN_ROOT / target
-        if full_path.exists():
-            content = full_path.read_text(encoding="utf-8", errors="replace")
-            diff_text += f"\n\n<file_content path=\"{target}\">\n{content[:8000]}\n</file_content>"
+        # Also read the file content for full context.
+        #
+        # Guarded on `target` and on is_file(), not just exists(): MAIN_ROOT / ""
+        # is MAIN_ROOT itself, a directory, which passes exists() and then makes
+        # read_text() raise PermissionError. Reachable from
+        # parse_review_command("review the file") with no path, which yields
+        # mode="file", target="". Fixed 2026-08-05.
+        if target:
+            full_path = MAIN_ROOT / target
+            if full_path.is_file():
+                content = full_path.read_text(encoding="utf-8", errors="replace")
+                diff_text += f"\n\n<file_content path=\"{target}\">\n{content[:8000]}\n</file_content>"
 
     elif mode == "regression":
         base = target or "HEAD~1"

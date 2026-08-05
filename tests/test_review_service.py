@@ -492,34 +492,36 @@ class TestCollectDiff:
         assert changed == ["router.py"]
         assert overflow == []
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "known defect: _collect_diff('file', '') crashes. "
-            "MAIN_ROOT / '' is MAIN_ROOT itself — a directory — so the "
-            "`if full_path.exists()` guard passes and read_text() raises "
-            "PermissionError on the directory. The `if target else ''` guard "
-            "one line above protects the git call but not this branch. "
-            "Reachable via `parse_review_command('review the file')` with no "
-            "path, which yields mode='file', target=''. Outside the bugs-1-7 "
-            "scope for this pass; fix = guard on `target` before touching the "
-            "filesystem, or check is_file() rather than exists()."
-        ),
-    )
     def test_file_mode_with_no_target(self):
+        """
+        Regression: MAIN_ROOT / "" is MAIN_ROOT itself — a directory — so the
+        old `if full_path.exists()` guard passed and read_text() raised
+        PermissionError. Reachable from parse_review_command("review the file")
+        with no path, which yields mode="file", target="". Fixed 2026-08-05 by
+        guarding on `target` and on is_file() rather than exists().
+        """
         repo = MagicMock()
         repo.git.execute.return_value = ""
         with patch.object(sc.git, "Repo", return_value=repo):
-            diff, changed, _ = sc._collect_diff("file", "")
-        assert changed == [] and diff == ""
+            diff, changed, overflow = sc._collect_diff("file", "")
+        assert changed == [] and diff == "" and overflow == []
 
-    def test_file_mode_with_no_target_currently_raises(self):
-        """Pins the defect above so a fix must update both tests together."""
+    def test_file_mode_with_a_directory_target_does_not_crash(self):
+        """A target naming a directory must be skipped, not read."""
         repo = MagicMock()
         repo.git.execute.return_value = ""
         with patch.object(sc.git, "Repo", return_value=repo):
-            with pytest.raises((PermissionError, IsADirectoryError, OSError)):
-                sc._collect_diff("file", "")
+            diff, changed, _ = sc._collect_diff("file", "rag_v1")
+        assert changed == ["rag_v1"]
+        assert "<file_content" not in diff
+
+    def test_file_mode_with_a_missing_target_is_tolerated(self):
+        repo = MagicMock()
+        repo.git.execute.return_value = "the diff"
+        with patch.object(sc.git, "Repo", return_value=repo):
+            diff, changed, _ = sc._collect_diff("file", "does_not_exist_xyz.py")
+        assert changed == ["does_not_exist_xyz.py"]
+        assert "<file_content" not in diff
 
     def test_regression_mode_defaults_to_head_prev(self):
         repo = MagicMock()

@@ -219,8 +219,9 @@ class TestFormatForContext:
 
 class TestGetMarketClientSingleton:
     def test_is_a_singleton(self):
-        with patch.object(mc, "_client", None):
-            assert mc.get_market_client() is mc.get_market_client()
+        mc.get_market_client.reset()
+        assert mc.get_market_client() is mc.get_market_client()
+        mc.get_market_client.reset()
 
     def test_built_once_under_concurrency(self):
         built: list[int] = []
@@ -230,15 +231,14 @@ class TestGetMarketClientSingleton:
             time.sleep(0.02)
             return MagicMock()
 
-        with (
-            patch.object(mc, "_client", None),
-            patch.object(mc, "MarketClient", side_effect=_slow),
-        ):
+        mc.get_market_client.reset()
+        with patch.object(mc, "MarketClient", side_effect=_slow):
             threads = [threading.Thread(target=mc.get_market_client) for _ in range(8)]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join()
+        mc.get_market_client.reset()
 
         assert len(built) == 1
 
@@ -310,21 +310,37 @@ class TestNewsIntentGate:
     def test_recognises_market_queries(self, resolver, text):
         assert resolver._is_market_query(text) is True
 
-    def test_market_gate_matches_the_query_its_comment_claims_to_exclude(self, resolver):
+    def test_market_gate_rejects_vague_value_questions(self, resolver):
         """
-        _is_market_query's comment reads:
+        Fixed 2026-08-05. _MARKET_PHRASES used to be one flat tuple whose
+        comment claimed it kept "strict matching to avoid false positives on
+        queries like 'how much is this worth'" — while "how much is" was
+        itself in the list, so that exact example matched.
 
-            # Market queries contain specific financial terms — keep strict
-            # matching to avoid false positives on queries like
-            # "how much is this worth".
-
-        But "how much is" IS in _MARKET_PHRASES, so that exact example matches.
-        Harmless in practice — _extract_ticker then finds no instrument and the
-        turn falls through — but the comment describes behaviour the code does
-        not have. Pinned rather than fixed: outside the bugs-1-7 scope.
+        The phrases are now tiered: weak ones like "how much is" additionally
+        require a nameable instrument.
         """
-        assert "how much is" in nr._MARKET_PHRASES
-        assert resolver._is_market_query("how much is this worth") is True
+        assert resolver._is_market_query("how much is this worth") is False
+
+    def test_weak_phrase_with_an_instrument_is_a_market_query(self, resolver):
+        assert resolver._is_market_query("how much is nvidia") is True
+
+    def test_strong_phrases_need_no_instrument(self, resolver):
+        assert resolver._is_market_query("what is the stock price") is True
+
+    @pytest.mark.parametrize("phrase", nr._MARKET_PHRASES_WEAK)
+    def test_every_weak_phrase_alone_is_rejected(self, resolver, phrase):
+        assert resolver._is_market_query(phrase) is False
+
+    @pytest.mark.parametrize("phrase", nr._MARKET_PHRASES_STRONG)
+    def test_every_strong_phrase_alone_is_accepted(self, resolver, phrase):
+        assert resolver._is_market_query(phrase) is True
+
+    def test_tiers_partition_the_legacy_phrase_tuple(self):
+        assert set(nr._MARKET_PHRASES) == (
+            set(nr._MARKET_PHRASES_STRONG) | set(nr._MARKET_PHRASES_WEAK)
+        )
+        assert not (set(nr._MARKET_PHRASES_STRONG) & set(nr._MARKET_PHRASES_WEAK))
 
 
 class TestResolveRouting:
@@ -436,34 +452,59 @@ class TestExtractTicker:
         assert resolver._extract_ticker("how are you today") is None
 
     @pytest.mark.parametrize(
-        "text,spurious_ticker",
+        "text",
         [
-            ("what is the price of something", "ETH-USD"),   # "som-ETH-ing"
-            ("I like goldfish", "GC=F"),                     # "GOLD-fish"
-            ("the gold standard for testing", "GC=F"),
-            ("a big oil painting", "CL=F"),
-            ("a meta-analysis of the data", "META"),
+            "what is the price of something",   # "som-ETH-ing"
+            "I like goldfish",                  # "GOLD-fish"
+            "an amderivative product",          # "AMD-erivative"
+            "a meta-analysis of the data",      # hyphenated compound
+            "the bitcoinery of it all",
         ],
     )
-    def test_short_aliases_match_inside_unrelated_words(
-        self, resolver, text, spurious_ticker
-    ):
+    def test_short_aliases_no_longer_match_inside_words(self, resolver, text):
         """
-        KNOWN DEFECT — _extract_ticker uses bare `name in txt_lower` substring
-        matching over _NAME_TO_TICKER, whose keys include 3-4 letter aliases
-        ("eth", "btc", "amd", "dow", "oil", "gold", "meta"). Those match inside
-        ordinary words: "something" contains "eth", "goldfish" contains "gold".
+        Fixed 2026-08-05. _extract_ticker used bare `name in txt_lower` over
+        _NAME_TO_TICKER, whose keys include 3-4 letter aliases ("eth", "btc",
+        "amd", "dow", "oil", "gold", "meta"). Those matched inside ordinary
+        words — "something" contains "eth", "goldfish" contains "gold" — so a
+        turn mentioning a goldfish got a live gold-futures price injected.
 
-        Reachable whenever _is_market_query also fires — and that gate is loose
-        (see test_market_gate_matches_the_query_its_comment_claims_to_exclude),
-        so e.g. "how much is this goldfish worth" injects a live gold-futures
-        price into the prompt.
-
-        Pinned, not fixed: outside the bugs-1-7 scope. Fix = word-boundary
-        matching (`re.search(rf"\\b{re.escape(name)}\\b", ...)`) rather than
-        `in`, which also makes the longest-match sort unnecessary.
+        Matching is now word-bounded.
         """
-        assert resolver._extract_ticker(text) == spurious_ticker
+        assert resolver._extract_ticker(text) is None
+
+    @pytest.mark.parametrize(
+        "text,ticker",
+        [
+            ("how is gold doing", "GC=F"),
+            ("the price of oil", "CL=F"),
+            ("what about eth", "ETH-USD"),
+            ("meta earnings", "META"),
+            ("amd stock", "AMD"),
+            ("how is the dow", "^DJI"),
+        ],
+    )
+    def test_short_aliases_still_match_as_whole_words(self, resolver, text, ticker):
+        """The fix must not break legitimate short-alias lookups."""
+        assert resolver._extract_ticker(text) == ticker
+
+    def test_punctuation_bearing_alias_still_matches(self, resolver):
+        r"""Plain `` misbehaves around "&"; the matcher uses [\w-] lookarounds."""
+        assert resolver._extract_ticker("how is the s&p 500 doing") == "^GSPC"
+
+    def test_longest_alias_wins(self, resolver):
+        """Names are tried longest-first, so "intel" beats the shorter "amd"."""
+        assert resolver._extract_ticker("amd vs intel") == "INTC"
+
+    def test_standalone_common_words_still_match(self, resolver):
+        """
+        "gold"/"oil" as whole words do resolve. That is intended: word-boundary
+        matching cannot tell the commodity from the idiom ("the gold standard"),
+        and it does not need to — _extract_ticker is only reached once
+        _is_market_query has already fired, which those phrases never do.
+        """
+        assert resolver._extract_ticker("the gold standard") == "GC=F"
+        assert resolver._is_market_query("the gold standard") is False
 
 
 class TestResolveMarket:
@@ -471,7 +512,7 @@ class TestResolveMarket:
     def client(self):
         c = MagicMock()
         c.format_for_context.return_value = "FORMATTED"
-        with patch.object(mc, "_client", c):
+        with patch.object(mc, "get_market_client", return_value=c):
             yield c
 
     def test_unidentifiable_instrument_returns_none(self, resolver, client):
@@ -520,11 +561,10 @@ class TestResolveNewsContextEntryPoint:
 
 class TestGetNewsResolverSingleton:
     def test_is_a_singleton(self):
-        with (
-            patch.object(nr, "_resolver", None),
-            patch.object(nr, "NewsResolver", return_value=MagicMock()),
-        ):
+        nr.get_news_resolver.reset()
+        with patch.object(nr, "NewsResolver", return_value=MagicMock()):
             assert nr.get_news_resolver() is nr.get_news_resolver()
+        nr.get_news_resolver.reset()
 
     def test_built_once_under_concurrency(self):
         built: list[int] = []
@@ -534,14 +574,13 @@ class TestGetNewsResolverSingleton:
             time.sleep(0.02)
             return MagicMock()
 
-        with (
-            patch.object(nr, "_resolver", None),
-            patch.object(nr, "NewsResolver", side_effect=_slow),
-        ):
+        nr.get_news_resolver.reset()
+        with patch.object(nr, "NewsResolver", side_effect=_slow):
             threads = [threading.Thread(target=nr.get_news_resolver) for _ in range(8)]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join()
+        nr.get_news_resolver.reset()
 
         assert len(built) == 1

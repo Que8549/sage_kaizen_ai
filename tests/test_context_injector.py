@@ -31,13 +31,11 @@ from router import RouteDecision
 @pytest.fixture(autouse=True)
 def reset_singletons():
     """Each test starts with cold module-level singletons."""
-    with (
-        patch.object(ci, "_rag_settings", None),
-        patch.object(ci, "_rag_injector", None),
-        patch.object(ci, "_wiki_retriever", None),
-        patch.object(ci, "_music_retriever", None),
-    ):
-        yield
+    for accessor in (ci._rag_pair, ci._get_wiki_retriever, ci._get_music_retriever):
+        accessor.reset()
+    yield
+    for accessor in (ci._rag_pair, ci._get_wiki_retriever, ci._get_music_retriever):
+        accessor.reset()
 
 
 @pytest.fixture(autouse=True)
@@ -601,9 +599,20 @@ class TestLazySingletons:
         ):
             a = ci._ensure_rag()
             b = ci._ensure_rag()
-        assert a == b
+        assert a is b
         S.assert_called_once()
         I.assert_called_once()
+
+    def test_reset_forces_reconstruction(self):
+        """LazySingleton.reset() is the supported test hook."""
+        with (
+            patch.object(ci, "RagSettings") as S,
+            patch.object(ci, "RagInjector"),
+        ):
+            ci._ensure_rag()
+            ci._rag_pair.reset()
+            ci._ensure_rag()
+        assert S.call_count == 2
 
     def test_ensure_rag_constructs_once_under_concurrency(self):
         calls: list[int] = []

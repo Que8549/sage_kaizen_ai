@@ -583,8 +583,9 @@ from memory import embedder as emb
 class TestEmbedder:
     @pytest.fixture(autouse=True)
     def _reset(self):
-        with patch.object(emb, "_singleton", None):
-            yield
+        emb._get_client.reset()
+        yield
+        emb._get_client.reset()
 
     def test_empty_input_short_circuits(self):
         with patch.object(emb, "_get_client") as gc:

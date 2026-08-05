@@ -23,14 +23,15 @@ restarting the app.  Startup configuration uses pydantic-settings BaseSettings
 
 Lazy singletons
 ---------------
-_rag_settings, _rag_injector, and _wiki_retriever are initialised on first
-call rather than at import time, so a misconfigured DB or missing wiki package
-never crashes the app at startup.
+The RAG pair and the wiki/music retrievers are initialised on first call rather
+than at import time, so a misconfigured DB or missing wiki package never
+crashes the app at startup.  All three use @lazy_singleton (lazy.py), which
+provides the double-checked locking these need — they are constructed from the
+worker pool below, where an unsynchronised initialiser is a real race.
 """
 from __future__ import annotations
 
 import json
-import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Callable, TypeVar
@@ -52,6 +53,7 @@ _POOL = ThreadPoolExecutor(max_workers=_FANOUT * 2, thread_name_prefix="rag_par"
 
 from env_utils import env_bool, env_int
 from input_guard import sanitize_chunk
+from lazy import lazy_singleton
 from rag_v1.config.rag_settings import RagSettings
 from rag_v1.runtime.router_integration import RagInjector, _prepend_context
 from sk_logging import get_logger
@@ -112,60 +114,45 @@ _LOG = get_logger("sage_kaizen.context_injector")
 # Lazy singletons
 # ---------------------------------------------------------------------------
 
-_rag_settings: RagSettings | None = None
-_rag_injector: RagInjector | None = None
-_wiki_retriever: "WikiRetriever | None" = None
-_music_retriever: "MusicRetriever | None" = None
-
-# These three initialisers are reached from _POOL's worker threads, so the
-# bare `if X is None: X = ...` they used to run was a genuine race: two workers
-# could both see None and both construct.  For WikiRetriever that is not merely
-# wasteful — each instance calls _ensure_service(), so a lost race meant two
-# cold torch/CUDA initialisations of jina-clip-v2 on the same physical GPU at
-# once, the failure mode sage_kaizen_ai_ingest hit twice (its CLAUDE.md §15,
-# 2026-05-28 and 2026-07-18) and had to serialise startup to stop.
+# These initialisers are reached from _POOL's worker threads, so a bare
+# `if X is None: X = ...` is a genuine race: two workers can both see None and
+# both construct.  For WikiRetriever that is not merely wasteful — each
+# instance calls _ensure_service(), so a lost race meant two cold torch/CUDA
+# initialisations of jina-clip-v2 on the same physical GPU at once, the failure
+# mode sage_kaizen_ai_ingest hit twice (its CLAUDE.md §15, 2026-05-28 and
+# 2026-07-18) and had to serialise startup to stop.
 #
-# Double-checked locking, matching chat_service._get_memory() and
-# memory.db.get_pool(), which already did this correctly.
-_singleton_lock = threading.Lock()
+# @lazy_singleton (lazy.py) provides the double-checked locking, one lock per
+# accessor so these three never contend with each other.  It also does not
+# cache a None return, which is what lets the optional-dependency guards below
+# stay inside the factory.
+
+
+@lazy_singleton
+def _rag_pair() -> tuple[RagInjector, RagSettings]:
+    settings = RagSettings()
+    return RagInjector(settings), settings
 
 
 def _ensure_rag() -> tuple[RagInjector, RagSettings]:
-    global _rag_settings, _rag_injector
-    if _rag_injector is not None and _rag_settings is not None:
-        return _rag_injector, _rag_settings
-    with _singleton_lock:
-        if _rag_injector is None:
-            _rag_settings = RagSettings()
-            _rag_injector = RagInjector(_rag_settings)
-    return _rag_injector, _rag_settings  # type: ignore[return-value]
+    """Return the shared (RagInjector, RagSettings) pair, building it once."""
+    return _rag_pair()
 
 
+@lazy_singleton
 def _get_music_retriever() -> "MusicRetriever | None":
-    global _music_retriever
     if not _MUSIC_AVAILABLE:
         return None
-    if _music_retriever is not None:
-        return _music_retriever
     _, settings = _ensure_rag()
-    with _singleton_lock:
-        if _music_retriever is None:
-            _music_retriever = MusicRetriever(pg_dsn=settings.pg_dsn)
-    return _music_retriever
+    return MusicRetriever(pg_dsn=settings.pg_dsn)
 
 
+@lazy_singleton
 def _get_wiki_retriever() -> "WikiRetriever | None":
-    global _wiki_retriever
     if not _WIKI_AVAILABLE:
         return None
-    if _wiki_retriever is not None:
-        return _wiki_retriever
-    # _ensure_rag() takes the same lock, so resolve settings before acquiring it.
     _, settings = _ensure_rag()
-    with _singleton_lock:
-        if _wiki_retriever is None:
-            _wiki_retriever = WikiRetriever(pg_dsn=settings.pg_dsn)
-    return _wiki_retriever
+    return WikiRetriever(pg_dsn=settings.pg_dsn)
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +485,30 @@ _TOTAL_CONTEXT_BUDGET_S: float = max(_WORKER_TIMEOUTS.values())
 _T = TypeVar("_T")
 
 
+def _prepend_to_last_user(
+    messages: list[dict[str, Any]], prefix: str
+) -> list[dict[str, Any]]:
+    """
+    Return a copy of `messages` with `prefix` prepended to the last user turn.
+
+    A no-op returning the same list when `prefix` is empty or no user message
+    exists.  Never mutates the input: the target message is replaced with a
+    shallow copy, so the caller's list and dicts are untouched.
+
+    Extracted 2026-08-05 — this walk-backwards-find-user-prepend-break loop was
+    written out four times in apply_rag_and_wiki_parallel (wiki, search, music,
+    news), once per context source.
+    """
+    if not prefix:
+        return messages
+    out = list(messages)
+    for i in reversed(range(len(out))):
+        if out[i].get("role") == "user":
+            out[i] = {**out[i], "content": _prepend_context(out[i]["content"], prefix)}
+            break
+    return out
+
+
 def _collect(
     fut: "Future[Any]",
     name: str,
@@ -633,37 +644,14 @@ def apply_rag_and_wiki_parallel(
         }),
     )
 
-    # Inject wiki context into already-RAG-enriched messages
+    # Inject each context block into the last user turn.  Order matters: each
+    # call prepends, so the LAST one applied ends up outermost — closest to the
+    # user's question, which is where the most time-sensitive material belongs.
     out = list(rag_messages)
-    if wiki_ctx_block:
-        for i in reversed(range(len(out))):
-            if out[i].get("role") == "user":
-                prefix = f"<wiki_context>\n{wiki_ctx_block}\n</wiki_context>\n\n"
-                out[i] = {**out[i], "content": _prepend_context(out[i]["content"], prefix)}
-                break
-
-    # Inject search context outermost (closest to the user question)
-    if search_ctx_block:
-        for i in reversed(range(len(out))):
-            if out[i].get("role") == "user":
-                prefix = f"{search_ctx_block}\n\n"
-                out[i] = {**out[i], "content": _prepend_context(out[i]["content"], prefix)}
-                break
-
-    # Inject music context outermost (closest to the user question)
-    if music_ctx_block:
-        for i in reversed(range(len(out))):
-            if out[i].get("role") == "user":
-                prefix = f"{music_ctx_block}\n\n"
-                out[i] = {**out[i], "content": _prepend_context(out[i]["content"], prefix)}
-                break
-
-    # Inject news context outermost (closest to the user question; only when triggered)
-    if news_ctx_block:
-        for i in reversed(range(len(out))):
-            if out[i].get("role") == "user":
-                prefix = f"{news_ctx_block}\n\n"
-                out[i] = {**out[i], "content": _prepend_context(out[i]["content"], prefix)}
-                break
+    out = _prepend_to_last_user(out, f"<wiki_context>\n{wiki_ctx_block}\n</wiki_context>\n\n"
+                                     if wiki_ctx_block else "")
+    out = _prepend_to_last_user(out, f"{search_ctx_block}\n\n" if search_ctx_block else "")
+    out = _prepend_to_last_user(out, f"{music_ctx_block}\n\n" if music_ctx_block else "")
+    out = _prepend_to_last_user(out, f"{news_ctx_block}\n\n" if news_ctx_block else "")
 
     return out, rag_sources, wiki_images if wiki_ctx_block else [], search_evidence, music_ctx_block

@@ -1,159 +1,235 @@
 """
 tests/test_pg.py
 
-Unit tests for rag_v1/db/pg.py — thread-local PostgreSQL connection caching.
+Unit tests for rag_v1/db/pg.py.
 
-Key behaviors under test:
-1. get_conn returns a cached connection on subsequent calls (same thread).
-2. conn_ctx yields the cached connection and evicts it on exception.
-3. A closed connection is replaced by a fresh one.
-4. Connections are NOT shared between threads.
+Rewritten 2026-08-05: this module moved from a hand-rolled threading.local()
+connection cache onto psycopg_pool.ConnectionPool, converging with memory/db.py
+(the project previously had two different connection strategies).
+
+The pool is mocked — nothing here opens a socket.
 """
 from __future__ import annotations
 
 import threading
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+import rag_v1.db.pg as pg
 
-DSN = "postgresql://user:pass@localhost/testdb"
+DSN = "postgresql://user@localhost/testdb"
+DSN2 = "postgresql://user@localhost/other"
 
 
 @pytest.fixture(autouse=True)
-def clear_thread_local():
-    """Reset thread-local connection cache before every test."""
-    from rag_v1.db import pg as pg_module
-    if hasattr(pg_module._local, "cache"):
-        pg_module._local.cache.clear()
-    yield
-    if hasattr(pg_module._local, "cache"):
-        pg_module._local.cache.clear()
+def clean_pools():
+    """Each test starts with no pools registered."""
+    with patch.dict(pg._pools, {}, clear=True):
+        yield
 
 
-def _make_open_conn():
-    conn = MagicMock()
-    conn.closed = False
-    return conn
+@pytest.fixture
+def fake_pool_cls():
+    """Patch ConnectionPool with a factory recording constructor kwargs."""
+    created: list[MagicMock] = []
 
+    def _factory(**kwargs):
+        pool = MagicMock()
+        pool.init_kwargs = kwargs
+        conn = MagicMock()
+        pool.connection.return_value.__enter__ = MagicMock(return_value=conn)
+        pool.connection.return_value.__exit__ = MagicMock(return_value=False)
+        pool.conn = conn
+        created.append(pool)
+        return pool
 
-# ---------------------------------------------------------------------------
-# get_conn
-# ---------------------------------------------------------------------------
-
-class TestGetConn:
-    def test_returns_connection(self):
-        mock_conn = _make_open_conn()
-        with patch("psycopg.connect", return_value=mock_conn):
-            from rag_v1.db.pg import get_conn
-            conn = get_conn(DSN)
-            assert conn is mock_conn
-
-    def test_caches_connection_on_second_call(self):
-        mock_conn = _make_open_conn()
-        with patch("psycopg.connect", return_value=mock_conn) as mock_connect:
-            from rag_v1.db.pg import get_conn
-            c1 = get_conn(DSN)
-            c2 = get_conn(DSN)
-            assert c1 is c2
-            # psycopg.connect called only once
-            assert mock_connect.call_count == 1
-
-    def test_reconnects_when_connection_is_closed(self):
-        conn1 = _make_open_conn()
-        conn2 = _make_open_conn()
-        with patch("psycopg.connect", side_effect=[conn1, conn2]) as mock_connect:
-            from rag_v1.db.pg import get_conn
-            c1 = get_conn(DSN)
-            # Simulate server closing the connection
-            c1.closed = True
-            c2 = get_conn(DSN)
-            assert c2 is conn2
-            assert mock_connect.call_count == 2
-
-    def test_different_dsn_different_connection(self):
-        conn_a = _make_open_conn()
-        conn_b = _make_open_conn()
-        dsn_a = "postgresql://a/db"
-        dsn_b = "postgresql://b/db"
-        with patch("psycopg.connect", side_effect=[conn_a, conn_b]):
-            from rag_v1.db.pg import get_conn
-            ca = get_conn(dsn_a)
-            cb = get_conn(dsn_b)
-            assert ca is conn_a
-            assert cb is conn_b
-
-    def test_different_threads_get_different_connections(self):
-        connections: list = []
-        lock = threading.Lock()
-
-        def worker():
-            conn = _make_open_conn()
-            with patch("psycopg.connect", return_value=conn):
-                from rag_v1.db.pg import get_conn
-                c = get_conn("postgresql://localhost/db")
-                with lock:
-                    connections.append(c)
-
-        t1 = threading.Thread(target=worker)
-        t2 = threading.Thread(target=worker)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
-        # Each thread should have received its own mock connection object
-        assert len(connections) == 2
+    with patch.object(pg, "ConnectionPool", side_effect=_factory) as cls:
+        cls.check_connection = MagicMock(name="check_connection")
+        yield cls, created
 
 
 # ---------------------------------------------------------------------------
-# conn_ctx
+# Pool creation
+# ---------------------------------------------------------------------------
+
+class TestGetPool:
+    def test_creates_a_pool_on_first_use(self, fake_pool_cls):
+        cls, created = fake_pool_cls
+        pg._get_pool(DSN)
+        assert len(created) == 1
+        assert cls.call_args.kwargs["conninfo"] == DSN
+
+    def test_reuses_the_pool_for_the_same_dsn(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        assert pg._get_pool(DSN) is pg._get_pool(DSN)
+        assert len(created) == 1
+
+    def test_separate_pools_per_dsn(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        assert pg._get_pool(DSN) is not pg._get_pool(DSN2)
+        assert len(created) == 2
+
+    def test_opens_eagerly(self, fake_pool_cls):
+        cls, _ = fake_pool_cls
+        pg._get_pool(DSN)
+        assert cls.call_args.kwargs["open"] is True
+
+    def test_uses_dict_rows_and_autocommit(self, fake_pool_cls):
+        """RAG reads are single-statement; autocommit avoids idle-in-transaction."""
+        cls, _ = fake_pool_cls
+        pg._get_pool(DSN)
+        kw = cls.call_args.kwargs["kwargs"]
+        assert kw["autocommit"] is True
+        assert kw["row_factory"] is pg.dict_row
+
+    def test_validates_connections_on_checkout(self, fake_pool_cls):
+        """
+        The reason for moving off threading.local(): a connection killed
+        server-side stayed cached and every first query after a Postgres
+        restart failed.
+        """
+        cls, _ = fake_pool_cls
+        pg._get_pool(DSN)
+        assert cls.call_args.kwargs["check"] is cls.check_connection
+
+    def test_pool_is_bounded(self, fake_pool_cls):
+        cls, _ = fake_pool_cls
+        pg._get_pool(DSN)
+        assert cls.call_args.kwargs["min_size"] == pg._POOL_MIN_SIZE
+        assert cls.call_args.kwargs["max_size"] == pg._POOL_MAX_SIZE
+        assert pg._POOL_MIN_SIZE < pg._POOL_MAX_SIZE
+
+    def test_max_size_covers_the_context_injector_fanout(self):
+        """The executor is sized at 2x a 5-way fan-out; the pool must not be the bottleneck."""
+        from rag_v1.runtime.context_injector import _POOL
+        assert pg._POOL_MAX_SIZE >= _POOL._max_workers
+
+    def test_checkout_timeout_is_shorter_than_the_shortest_worker_budget(self):
+        """
+        Pool exhaustion should fail one context source fast, not consume that
+        worker's whole ceiling. music/news have the tightest budget at 10 s.
+        """
+        from rag_v1.runtime.context_injector import _WORKER_TIMEOUTS
+        assert pg._POOL_TIMEOUT_S < min(_WORKER_TIMEOUTS.values())
+
+    def test_created_once_under_concurrency(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        barrier = threading.Barrier(8)
+
+        def _race():
+            barrier.wait()
+            pg._get_pool(DSN)
+
+        threads = [threading.Thread(target=_race) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(created) == 1, f"pool built {len(created)} times — lock is broken"
+
+
+# ---------------------------------------------------------------------------
+# conn_ctx / get_conn
 # ---------------------------------------------------------------------------
 
 class TestConnCtx:
-    def test_yields_connection(self):
-        mock_conn = _make_open_conn()
-        with patch("psycopg.connect", return_value=mock_conn):
-            from rag_v1.db.pg import conn_ctx
-            with conn_ctx(DSN) as conn:
-                assert conn is mock_conn
+    def test_yields_a_connection(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        with pg.conn_ctx(DSN) as conn:
+            assert conn is created[0].conn
 
-    def test_evicts_connection_on_exception(self):
-        conn1 = _make_open_conn()
-        conn2 = _make_open_conn()
-        with patch("psycopg.connect", side_effect=[conn1, conn2]) as mock_connect:
-            from rag_v1.db.pg import conn_ctx, get_conn
+    def test_returns_the_connection_on_exit(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        with pg.conn_ctx(DSN):
+            pass
+        created[0].connection.return_value.__exit__.assert_called_once()
 
-            # First context — force an exception to evict
-            with pytest.raises(RuntimeError):
-                with conn_ctx(DSN) as conn:
-                    raise RuntimeError("DB error")
+    def test_returns_the_connection_on_exception(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        with pytest.raises(RuntimeError):
+            with pg.conn_ctx(DSN):
+                raise RuntimeError("query blew up")
+        created[0].connection.return_value.__exit__.assert_called_once()
 
-            # conn1 should have been closed
-            conn1.close.assert_called_once()
+    def test_exception_propagates(self, fake_pool_cls):
+        with pytest.raises(ValueError, match="boom"):
+            with pg.conn_ctx(DSN):
+                raise ValueError("boom")
 
-            # Next get_conn must reconnect (conn1 was evicted)
-            c = get_conn(DSN)
-            assert c is conn2
-            assert mock_connect.call_count == 2
 
-    def test_does_not_evict_on_success(self):
-        conn1 = _make_open_conn()
-        conn2 = _make_open_conn()
-        with patch("psycopg.connect", side_effect=[conn1, conn2]) as mock_connect:
-            from rag_v1.db.pg import conn_ctx, get_conn
+class TestGetConn:
+    def test_is_a_context_manager(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        with pg.get_conn(DSN) as conn:
+            assert conn is created[0].conn
 
-            with conn_ctx(DSN):
-                pass  # success, no exception
+    def test_returns_the_connection_on_exit(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        with pg.get_conn(DSN):
+            pass
+        created[0].connection.return_value.__exit__.assert_called_once()
 
-            # Connection is still cached; get_conn should return same object
-            c = get_conn(DSN)
-            assert c is conn1
-            assert mock_connect.call_count == 1
+    def test_shares_the_pool_with_conn_ctx(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        with pg.get_conn(DSN):
+            pass
+        with pg.conn_ctx(DSN):
+            pass
+        assert len(created) == 1
 
-    def test_reraises_original_exception(self):
-        mock_conn = _make_open_conn()
-        with patch("psycopg.connect", return_value=mock_conn):
-            from rag_v1.db.pg import conn_ctx
-            with pytest.raises(ValueError, match="boom"):
-                with conn_ctx(DSN):
-                    raise ValueError("boom")
+
+# ---------------------------------------------------------------------------
+# close_all_pools
+# ---------------------------------------------------------------------------
+
+class TestCloseAllPools:
+    def test_closes_every_pool(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        pg._get_pool(DSN)
+        pg._get_pool(DSN2)
+        pg.close_all_pools()
+        for pool in created:
+            pool.close.assert_called_once()
+
+    def test_clears_the_registry(self, fake_pool_cls):
+        pg._get_pool(DSN)
+        pg.close_all_pools()
+        assert pg._pools == {}
+
+    def test_is_safe_with_no_pools(self):
+        pg.close_all_pools()
+
+    def test_survives_a_close_failure(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        pg._get_pool(DSN)
+        created[0].close.side_effect = OSError("already gone")
+        pg.close_all_pools()      # must not raise
+        assert pg._pools == {}
+
+    def test_next_use_reopens(self, fake_pool_cls):
+        _, created = fake_pool_cls
+        pg._get_pool(DSN)
+        pg.close_all_pools()
+        pg._get_pool(DSN)
+        assert len(created) == 2
+
+
+# ---------------------------------------------------------------------------
+# Convergence with memory/db.py
+# ---------------------------------------------------------------------------
+
+class TestSingleConnectionStrategy:
+    def test_both_modules_use_psycopg_pool(self):
+        """
+        Before 2026-08-05 the project had two connection strategies:
+        memory/db.py used ConnectionPool while rag_v1/db/pg.py hand-rolled a
+        threading.local() cache. They now agree.
+        """
+        from memory import db as mdb
+        assert mdb.ConnectionPool is pg.ConnectionPool
+
+    def test_rag_pg_no_longer_uses_thread_local(self):
+        assert not hasattr(pg, "_local")
+        assert not hasattr(pg, "_thread_conn")

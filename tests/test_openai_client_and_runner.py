@@ -763,39 +763,34 @@ class TestWebResearcher:
             out = self._run(wr.web_researcher_node(_state_with_scope()))
         assert isinstance(out["web_research"], str)
 
-    # ── KNOWN DEFECT ─────────────────────────────────────────────────────
-    # _searxng_search() formats each hit with `r.content`, but WebResult has
-    # no `content` field — it is `snippet` (verified against the dataclass).
-    # The AttributeError is swallowed by the function's own
-    # `except Exception: return ""`, so EVERY successful SearXNG search is
-    # silently discarded and web_research is always "".
+    # ── FIXED 2026-08-05 ─────────────────────────────────────────────────
+    # _searxng_search() formatted each hit with `r.content`, but WebResult has
+    # no `content` field — it is `snippet`. The AttributeError was swallowed by
+    # the function's own `except Exception: return ""`, so EVERY successful
+    # SearXNG search was silently discarded and web_research was always "".
     #
-    # Net effect: the web_researcher node has never contributed anything to a
-    # review, and the failure is invisible because the node is designed to
-    # degrade quietly when SearXNG is down — it looks like SearXNG is always
-    # down. Fix is one word: r.content -> r.snippet.
-    #
-    # Outside the bugs-1-7 scope agreed for this pass; xfail(strict) so the
-    # build flags it the moment it IS fixed.
+    # The node had therefore never contributed anything to a review, and the
+    # failure was invisible because it degrades quietly by design when SearXNG
+    # is down — it just looked like SearXNG was always down.
 
-    _DEFECT = "known defect: _searxng_search reads r.content; WebResult has .snippet"
-
-    @pytest.mark.xfail(strict=True, reason=_DEFECT)
-    def test_results_should_be_formatted_into_the_block(self):
+    def test_results_are_formatted_into_the_block(self):
         with patch("search.search_orchestrator.get_orchestrator",
                    return_value=_orchestrator([_real_result()])):
             out = self._run(wr.web_researcher_node(_state_with_scope()))
         assert "Blackwell perf" in out["web_research"]
 
-    def test_results_are_currently_always_discarded(self):
-        """Pins the defect so a fix must update this test too."""
+    def test_result_snippet_and_url_are_included(self):
         with patch("search.search_orchestrator.get_orchestrator",
                    return_value=_orchestrator([_real_result()])):
             out = self._run(wr.web_researcher_node(_state_with_scope()))
-        assert out["web_research"] == "", (
-            "web_researcher returned content — the r.content defect is fixed; "
-            "delete this test and un-xfail test_results_should_be_formatted_into_the_block"
-        )
+        assert "details" in out["web_research"]
+        assert "https://x" in out["web_research"]
+
+    def test_missing_snippet_does_not_crash(self):
+        with patch("search.search_orchestrator.get_orchestrator",
+                   return_value=_orchestrator([_real_result(snippet="")])):
+            out = self._run(wr.web_researcher_node(_state_with_scope()))
+        assert "Blackwell perf" in out["web_research"]
 
     def test_webresult_has_snippet_not_content(self):
         """The direct statement of the mismatch."""

@@ -3,85 +3,136 @@ rag_v1/db/pg.py
 
 PostgreSQL connection helpers for the RAG pipeline.
 
-Connection caching
+Connection pooling
 ------------------
 psycopg.connect() performs a full TCP handshake + SSL + auth round-trip on
-every call (typically 5–50 ms on localhost).  With 2–4 parallel DB queries per
-chat turn (doc-RAG, wiki-RAG, possibly feedback) that overhead compounds.
+every call (typically 5–50 ms on localhost).  With 5 parallel DB queries per
+chat turn (doc-RAG, wiki-RAG, music, news, memory) that overhead compounds.
 
-`get_conn` caches one connection *per thread* via threading.local().  This is
-safe because:
-  - The RAG thread pool (ThreadPoolExecutor, max_workers=4) keeps its threads
-    alive for the process lifetime, so cached connections persist across turns.
-  - Each worker thread uses its own connection independently — no mutex needed.
-  - autocommit=True means every SELECT is its own implicit transaction; no
-    explicit BEGIN/COMMIT is needed for read-only RAG queries.
-  - On any failure the connection is evicted so the next call reconnects cleanly.
+This module wraps ``psycopg_pool.ConnectionPool``, the same primitive
+``memory/db.py`` already used — the project had two different connection
+strategies before 2026-08-05, and this is the surviving one.
 
-get_conn() is a drop-in replacement: callers that do `with get_conn(dsn) as conn`
-still work because psycopg3 Connection.__exit__ is a no-op in autocommit mode.
+Why the pool rather than the previous threading.local() cache
+-------------------------------------------------------------
+The old implementation cached one connection per (thread, DSN) forever and only
+evicted it when a query *raised*.  That has two problems the pool solves:
+
+  1. A connection killed server-side — Postgres restart, idle timeout,
+     ``pg_terminate_backend`` — stayed in the cache looking healthy, so the
+     first query after any such event always failed and only the *second*
+     succeeded.  ``ConnectionPool(check=...)`` validates on checkout instead.
+  2. The cache grew with the thread pool and never shrank.  Since
+     context_injector's executor was resized to 10 workers, that was up to 10
+     idle connections per DSN held open for the process lifetime.  The pool
+     bounds this with min_size/max_size.
+
+The public API is unchanged: ``get_conn(dsn)`` and ``conn_ctx(dsn)`` still work
+as before for every existing call site.
 """
 from __future__ import annotations
 
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import cast
+from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row, DictRow
+from psycopg_pool import ConnectionPool
+
+from sk_logging import get_logger
+
+_LOG = get_logger("sage_kaizen.rag_v1.db.pg")
+
+# One pool per DSN.  Keyed rather than a single global because the retrievers
+# are constructed with an explicit dsn argument and tests use a fake one.
+# ConnectionPool is generic over its connection type; the bare form defaults
+# to Connection[TupleRow], which our dict_row kwargs contradict.
+_pools: dict[str, ConnectionPool[Any]] = {}
+_pools_lock = threading.Lock()
+
+# Sized for the context injector's fan-out (5 concurrent workers per turn,
+# executor capped at 10) plus headroom for the memory service's background
+# episode writer.  min_size=1 keeps one connection warm so the first query of a
+# session does not pay the handshake.
+_POOL_MIN_SIZE = 1
+_POOL_MAX_SIZE = 12
+
+# Seconds to wait for a free connection before raising.  Deliberately shorter
+# than context_injector's shortest per-worker ceiling (10 s for music/news) so
+# that pool exhaustion surfaces as a fast, logged failure for one context
+# source rather than consuming that worker's whole budget.
+_POOL_TIMEOUT_S = 8.0
 
 
-# Per-thread connection cache:  {dsn: connection}
-_local = threading.local()
-
-
-def _thread_conn(dsn: str) -> psycopg.Connection[DictRow]:
-    """Return or create a cached autocommit connection for this thread + DSN."""
-    if not hasattr(_local, "cache"):
-        _local.cache = {}
-    cache: dict[str, psycopg.Connection[DictRow]] = _local.cache
-
-    conn: psycopg.Connection[DictRow] | None = cache.get(dsn)
-    if conn is None or conn.closed:
-        conn = cast(
-            psycopg.Connection[DictRow],
-            psycopg.connect(dsn, row_factory=dict_row, autocommit=True),  # type: ignore[arg-type]
-        )
-        cache[dsn] = conn
-
-    return conn
-
-
-def get_conn(dsn: str) -> psycopg.Connection[DictRow]:
-    """
-    Return a thread-local cached connection for the given DSN.
-
-    The first call per thread/DSN opens the connection; subsequent calls
-    return the cached connection instantly (no TCP overhead).
-
-    Callers may use the returned connection directly or as a context manager:
-        with get_conn(dsn) as conn:   # __exit__ is a no-op in autocommit mode
-            rows = conn.execute(sql, params).fetchall()
-    """
-    return _thread_conn(dsn)
+def _get_pool(dsn: str) -> ConnectionPool[Any]:
+    """Return (creating on first use) the shared pool for this DSN."""
+    pool = _pools.get(dsn)
+    if pool is not None:
+        return pool
+    with _pools_lock:
+        # Double-checked: another thread may have opened it while we waited.
+        pool = _pools.get(dsn)
+        if pool is None:
+            pool = ConnectionPool(
+                conninfo=dsn,
+                min_size=_POOL_MIN_SIZE,
+                max_size=_POOL_MAX_SIZE,
+                timeout=_POOL_TIMEOUT_S,
+                kwargs={"row_factory": dict_row, "autocommit": True},
+                # Validate on checkout so a server-side disconnect costs a
+                # transparent reconnect instead of failing the caller's query.
+                check=ConnectionPool.check_connection,
+                open=True,
+            )
+            _pools[dsn] = pool
+            _LOG.info(
+                "rag_v1.db.pg | pool opened (min=%d max=%d timeout=%.0fs)",
+                _POOL_MIN_SIZE, _POOL_MAX_SIZE, _POOL_TIMEOUT_S,
+            )
+    return pool
 
 
 @contextmanager
 def conn_ctx(dsn: str) -> Iterator[psycopg.Connection[DictRow]]:
     """
-    Context manager that yields a thread-local cached connection.
+    Yield a pooled autocommit connection with dict rows.
 
-    On exception, closes and evicts the connection so the next caller
-    gets a fresh one (handles server-side disconnects gracefully).
+    The connection is returned to the pool on exit, including on exception.
+    Callers must not hold the connection beyond the ``with`` block.
     """
-    conn = _thread_conn(dsn)
-    try:
+    with _get_pool(dsn).connection() as conn:
+        yield conn  # type: ignore[misc]
+
+
+@contextmanager
+def get_conn(dsn: str) -> Iterator[psycopg.Connection[DictRow]]:
+    """
+    Alias of :func:`conn_ctx`, kept for the existing call sites.
+
+    NOTE: this is a context manager, not a bare connection.  It was already
+    used as ``with get_conn(dsn) as conn:`` everywhere, which worked under the
+    old thread-local implementation because psycopg's ``Connection.__exit__``
+    is a no-op in autocommit mode.  Under the pool that ``with`` is load-bearing
+    — it is what returns the connection — so the signature is now honest about
+    it rather than relying on a coincidence.
+    """
+    with conn_ctx(dsn) as conn:
         yield conn
-    except Exception:
+
+
+def close_all_pools() -> None:
+    """
+    Close every open pool.  For test teardown and clean process shutdown.
+
+    Safe to call when no pool was ever opened.
+    """
+    with _pools_lock:
+        pools = list(_pools.values())
+        _pools.clear()
+    for pool in pools:
         try:
-            conn.close()
+            pool.close()
         except Exception:
-            pass
-        getattr(_local, "cache", {}).pop(dsn, None)
-        raise
+            _LOG.debug("rag_v1.db.pg | pool close failed (ignored)", exc_info=True)

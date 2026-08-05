@@ -152,6 +152,14 @@ The ARCHITECT brain uses these results to:
 
 If SearXNG is unavailable, the `web_researcher` node logs a warning and continues without web context — review does not fail.
 
+> **Historical note (fixed 2026-08-05):** that quiet-degradation design hid a
+> real bug for the node's entire life. `_searxng_search()` formatted each hit
+> with `r.content`, but `WebResult`'s field is `snippet` — the resulting
+> `AttributeError` was caught by the same `except Exception` that handles
+> "SearXNG is down", so **every successful search returned `""`** and
+> `web_research` was always empty. It looked exactly like SearXNG being
+> permanently unavailable. Found by writing the first tests for this node.
+
 ---
 
 ## 7. Performance & Latency Review (Mandatory)

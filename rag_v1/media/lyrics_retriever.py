@@ -124,15 +124,15 @@ class LyricsRetriever:
         return out
 
     def _query(self, qvec: list[float], top_k: int) -> list[LyricsResult]:
-        conn: psycopg.Connection[DictRow] = get_conn(self._pg_dsn)
-        try:
+        # `with` is load-bearing: it returns the connection to the pool.
+        # This used to call conn.close() on the thread-local cached connection,
+        # which defeated that cache entirely.
+        with get_conn(self._pg_dsn) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 rows = cur.execute(
                     _SQL_SEARCH,
                     (qvec, qvec, self._max_distance, qvec, top_k),
                 ).fetchall()
-        finally:
-            conn.close()
 
         return [
             LyricsResult(

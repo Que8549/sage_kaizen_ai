@@ -344,8 +344,9 @@ class TestOrchestratorSearch:
 
 class TestGetOrchestrator:
     def test_is_a_singleton(self):
-        with patch.object(so, "_orchestrator", None):
-            assert get_orchestrator() is get_orchestrator()
+        get_orchestrator.reset()
+        assert get_orchestrator() is get_orchestrator()
+        get_orchestrator.reset()
 
     def test_built_once_under_concurrency(self):
         built: list[int] = []
@@ -355,15 +356,14 @@ class TestGetOrchestrator:
             time.sleep(0.02)
             return MagicMock()
 
-        with (
-            patch.object(so, "_orchestrator", None),
-            patch.object(so, "SearchOrchestrator", side_effect=_slow),
-        ):
+        get_orchestrator.reset()
+        with patch.object(so, "SearchOrchestrator", side_effect=_slow):
             threads = [threading.Thread(target=get_orchestrator) for _ in range(8)]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join()
+        get_orchestrator.reset()
 
         assert len(built) == 1
 
@@ -640,9 +640,13 @@ class TestMmEmbedClient:
         assert MmEmbedClient(host="127.0.0.1", port=8031).health() is None
 
     @respx.mock
-    def test_health_none_on_non_dict_payload(self):
+    def test_health_non_dict_payload_yields_an_empty_dict(self):
+        """
+        {} not None: "answered but said nothing useful" must stay
+        distinguishable from "did not answer", which is what None means.
+        """
         respx.get(f"{JINA}/health").mock(return_value=httpx.Response(200, json=["ok"]))
-        assert MmEmbedClient(host="127.0.0.1", port=8031).health() is None
+        assert MmEmbedClient(host="127.0.0.1", port=8031).health() == {}
 
     @respx.mock
     def test_ping_delegates_to_health(self):
@@ -715,26 +719,39 @@ class TestMediaEmbedClients:
 
     @respx.mock
     def test_audio_client_ping_requires_loaded(self):
+        """CLAP answers 200 while still loading, so 2xx alone is not enough."""
         respx.get(f"{CLAP}/health").mock(
             return_value=httpx.Response(200, json={"loaded": False})
         )
         assert AudioEmbedClient().ping() is False
 
+    @respx.mock
+    def test_audio_client_ping_true_when_loaded(self):
+        respx.get(f"{CLAP}/health").mock(
+            return_value=httpx.Response(200, json={"loaded": True})
+        )
+        assert AudioEmbedClient().ping() is True
+
     def test_clients_target_the_documented_ports(self):
         """jina-clip-v2 on 8031, CLAP on 8040 per the CLAUDE.md inventory."""
-        assert ImageEmbedClient()._base.endswith(":8031")
-        assert AudioEmbedClient()._base.endswith(":8040")
+        assert ImageEmbedClient().base_url.endswith(":8031")
+        assert AudioEmbedClient().base_url.endswith(":8040")
 
     @respx.mock
-    def test_image_client_wraps_errors_in_retryerror(self, no_retry_sleep):
+    def test_image_client_reraises_the_original_error(self, no_retry_sleep):
         """
-        Contrast with MmEmbedClient above: media_embed_client's @retry has no
-        reraise=True, so callers get tenacity.RetryError wrapping the real
-        HTTPStatusError rather than the error itself. Pinned because the two
-        sibling clients disagree on this and a caller catching
-        httpx.HTTPStatusError specifically would miss it here.
+        Fixed 2026-08-05. media_embed_client's @retry had no reraise=True, so
+        callers got tenacity.RetryError wrapping the real HTTPStatusError while
+        the sibling MmEmbedClient re-raised the error itself — a caller
+        catching httpx.HTTPStatusError worked against one and silently missed
+        the other. All embed clients now share one retry policy.
         """
-        import tenacity
         respx.post(f"{JINA}/embed/image").mock(return_value=httpx.Response(400))
-        with pytest.raises(tenacity.RetryError):
+        with pytest.raises(httpx.HTTPStatusError):
             ImageEmbedClient().embed_image_bytes([b"x"])
+
+    @respx.mock
+    def test_audio_client_reraises_the_original_error(self, no_retry_sleep):
+        respx.post(f"{CLAP}/embed/audio").mock(return_value=httpx.Response(500))
+        with pytest.raises(httpx.HTTPStatusError):
+            AudioEmbedClient().embed_audio_bytes([b"x"])

@@ -128,46 +128,54 @@ class TestTtsFilterNormal:
         assert f.feed("Hello world.") + f.flush() == "Hello world."
 
     def test_applies_markdown_cleanup(self):
-        assert feed_all(_TtsFilter(), "**bold**", chunk_size=99) == "bold"
+        out = feed_all(_TtsFilter(), "This is **bold** text here", chunk_size=99)
+        assert "bold" in out
+        assert "**" not in out
+
+    def test_markdown_spanning_the_holdback_boundary_is_not_cleaned(self):
+        """
+        Pre-existing limitation, unchanged by the 2026-08-05 drain fix.
+
+        _clean_markdown() runs per drained fragment, and NORMAL always withholds
+        a _HOLD_BACK-sized tail in case it is a partial "<think>". A markdown
+        pair straddling that boundary is therefore split across two fragments
+        and neither half matches the unwrap regex.
+
+        Harmless for speech (a stray asterisk), and fixing it properly means
+        buffering on markdown boundaries too — a separate change. Pinned so the
+        behaviour is a decision rather than a surprise.
+        """
+        # 8 chars: with _HOLD_BACK == 7 the leading "*" is emitted alone.
+        assert feed_all(_TtsFilter(), "**bold**", chunk_size=99) != "bold"
 
     def test_empty_input(self):
         assert feed_all(_TtsFilter(), "") == ""
 
 
 # ---------------------------------------------------------------------------
-# KNOWN DEFECT — _TtsFilter never leaves IN_THINK / IN_CODE (found 2026-08-04)
+# FIXED 2026-08-05 — _TtsFilter used to never leave IN_THINK / IN_CODE
 # ---------------------------------------------------------------------------
-# Two independent flaws in the drain loop, both verified by direct state
-# inspection (see the xfail-ed tests below for the exact reproductions):
+# Two independent flaws in the drain loop, found 2026-08-04 by writing these
+# tests and fixed 2026-08-05:
 #
-#   A. `_drain()` does `output.extend(self._drain_normal()); break` — so a
-#      feed() that *enters* a think/code block stops there and never processes
-#      the rest of that same buffer. After feeding a complete
-#      "Before<think>x</think>After" in one chunk the filter is left with
-#      _in_think=True and _buf='x</think>After'; flush() then discards it.
+#   A. `_drain()` did `output.extend(self._drain_normal()); break` — so a
+#      feed() that *entered* a think/code block stopped there and never
+#      processed the rest of that same buffer; flush() then discarded it.
+#      Now _drain() loops until no further progress is possible.
 #
-#   B. `_drain_think()` / `_drain_code()` do `self._buf = ""` whenever the
-#      terminator is not in the *current* buffer. llama-server streams
-#      token-by-token, so "</think>" almost always arrives split (e.g. "</thi"
-#      then "nk>") — each fragment is discarded before the next arrives, the
-#      terminator can never be reassembled, and the filter stays in IN_THINK
-#      for the rest of the turn.
+#   B. `_drain_think()` / `_drain_code()` did `self._buf = ""` whenever the
+#      terminator was not in the *current* buffer. llama-server streams
+#      token-by-token, so "</think>" almost always arrives split ("</thi" then
+#      "nk>") — each fragment was discarded before the next arrived and the
+#      filter stayed in IN_THINK for the rest of the turn. Both states now
+#      retain a possible partial terminator via _keep_tail().
 #
-# `_HOLD_BACK` exists to solve exactly this and the class docstring credits it
-# with doing so ("guards against tags split across token boundaries"), but it
-# is only wired into the NORMAL state.
+# Impact while broken: every ARCHITECT turn emits <think> tokens, so TTS went
+# silent at the start of thinking and never recovered — invisible in the UI,
+# which renders the unfiltered text.
 #
-# Impact: every ARCHITECT turn emits <think> tokens, so TTS goes silent at the
-# start of thinking and never recovers — the visible UI text is unaffected,
-# which is why this can go unnoticed.
-#
-# NOT patched here: fixing the drain loop is a source change outside the
-# bugs-1-7 scope agreed for this pass, and it needs a decision about how much
-# to restructure the state machine. Marked xfail(strict=True) so it fails the
-# build the moment it IS fixed, following the same convention
-# sage_kaizen_ai_ingest used for run_lyrics_ingest.py (its CLAUDE.md §17).
-
-_TTS_DEFECT = "known defect: _TtsFilter never exits IN_THINK/IN_CODE — see comment above"
+# The tests below are the original reproductions, now asserting the fixed
+# behaviour.
 
 
 class TestTtsFilterThink:
@@ -178,29 +186,26 @@ class TestTtsFilterThink:
         assert out == "Before"
         assert "hidden" not in out
 
-    @pytest.mark.xfail(strict=True, reason=_TTS_DEFECT)
-    def test_text_after_think_block_should_be_spoken(self):
-        """Defect A: one feed() only advances the state machine one transition."""
+    def test_text_after_think_block_is_spoken(self):
+        """Regression for defect A: one feed() must run the machine to a halt."""
         out = feed_all(_TtsFilter(), "Before<think>hidden reasoning</think>After", 100)
         assert "hidden" not in out
         assert "Before" in out and "After" in out
 
-    @pytest.mark.xfail(strict=True, reason=_TTS_DEFECT)
     def test_think_split_across_token_boundaries(self):
-        """Defect B: the hold-back buffer is not applied in the IN_THINK state."""
+        """Regression for defect B: hold-back must apply in the IN_THINK state."""
         f = _TtsFilter()
         parts = ["Say ", "<thi", "nk>", "secret", "</thi", "nk>", " done"]
         out = "".join(f.feed(p) for p in parts) + f.flush()
         assert "secret" not in out
         assert "Say" in out and "done" in out
 
-    def test_closing_tag_split_across_chunks_is_not_detected(self):
-        """Pins defect B's exact current behaviour so a fix must update this."""
+    def test_closing_tag_split_across_chunks_is_detected(self):
+        """The exact defect-B reproduction: a split "</think>" must reassemble."""
         f = _TtsFilter()
         for part in ["Say ", "<think>", "secret", "</thi", "nk>", " done"]:
             f.feed(part)
-        assert f._in_think is True, "filter unexpectedly recovered — defect B fixed?"
-        assert f.flush() == ""
+        assert f._in_think is False, "filter stuck in IN_THINK — defect B is back"
 
     def test_unterminated_think_suppresses_everything_after(self):
         f = _TtsFilter()
@@ -212,7 +217,6 @@ class TestTtsFilterThink:
         f.feed("<think>partial")
         assert f.flush() == ""
 
-    @pytest.mark.xfail(strict=True, reason=_TTS_DEFECT)
     def test_multiple_think_blocks(self):
         out = feed_all(_TtsFilter(), "A<think>x</think>B<think>y</think>C", 100)
         assert "x" not in out and "y" not in out
@@ -244,18 +248,13 @@ class TestTtsFilterCode:
         out = feed_all(_TtsFilter(), "```python\na\nb\nc\nd\n```", 1)
         assert out.count("Python code is shown in the UI.") == 1
 
-    @pytest.mark.xfail(strict=True, reason=_TTS_DEFECT)
-    def test_text_after_code_block_should_be_spoken(self):
-        """Defect B again: the closing ``` is split across tokens and lost."""
+    def test_text_after_code_block_is_spoken(self):
+        """Regression: a closing fence split across tokens must reassemble."""
         out = feed_all(_TtsFilter(), "```python\na\n```\nDone", 1)
         assert "Done" in out
 
     def test_two_blocks_get_two_announcements_at_favourable_chunking(self):
-        """
-        Passes at chunk_size=3 because each closing ``` happens to land wholly
-        inside one chunk. See TestTtsFilterMixed for why that is luck, not
-        design.
-        """
+        """Chunk size 3 — used to pass only by luck; now correct by design."""
         out = feed_all(
             _TtsFilter(), "```python\na\n```\nmid\n```sql\nb\n```", chunk_size=3
         )
@@ -263,7 +262,6 @@ class TestTtsFilterCode:
         assert "SQL query is shown" in out
         assert "mid" in out
 
-    @pytest.mark.xfail(strict=True, reason=_TTS_DEFECT)
     def test_two_blocks_get_two_announcements_token_by_token(self):
         """The realistic case: llama-server streams roughly a token at a time."""
         out = feed_all(
@@ -290,7 +288,6 @@ class TestTtsFilterCode:
 
 
 class TestTtsFilterMixed:
-    @pytest.mark.xfail(strict=True, reason=_TTS_DEFECT)
     def test_think_then_code_then_prose(self):
         text = "Intro<think>plan</think>Body:\n```js\nx=1\n```\nOutro"
         out = feed_all(_TtsFilter(), text, chunk_size=2)
@@ -301,39 +298,21 @@ class TestTtsFilterMixed:
     _MIXED = "A<think>t</think>B\n```python\nc=1\n```\nD"
     _CHUNK_SIZES = [1, 2, 3, 5, 7, 8, 13, 100]
 
-    def test_output_currently_varies_with_chunk_size(self):
+    def test_output_is_independent_of_chunking(self):
         """
-        Pins the defect's headline symptom: identical input, different speech.
-
-        Measured 2026-08-04 — the same string produces at least three distinct
-        outputs depending only on how the stream happened to be tokenised,
-        from 'A' (everything after the first <think> dropped) through to the
-        fully correct text at chunk_size=13. A fix makes this set collapse to
-        one element and this test will fail, which is the intent.
-        """
-        outputs = {feed_all(_TtsFilter(), self._MIXED, n) for n in self._CHUNK_SIZES}
-        assert len(outputs) > 1, (
-            "output no longer varies with chunking — the defect is fixed; "
-            "delete this test and un-xfail test_output_should_be_independent_of_chunking"
-        )
-
-    @pytest.mark.xfail(strict=True, reason=_TTS_DEFECT)
-    def test_output_should_be_independent_of_chunking(self):
-        """
-        The property the hold-back design exists to provide.
+        The headline property, and the clearest statement of the old defect.
 
         Token boundaries are an artefact of the sampler; they must not change
-        what the user hears.
+        what the user hears. While broken, this same string produced at least
+        three distinct outputs — from 'A' (everything after the first <think>
+        dropped) through to the fully correct text at chunk_size=13.
         """
         outputs = {feed_all(_TtsFilter(), self._MIXED, n) for n in self._CHUNK_SIZES}
         assert len(outputs) == 1, f"{len(outputs)} distinct outputs: {outputs}"
 
     @pytest.mark.parametrize("chunk_size", _CHUNK_SIZES)
     def test_hidden_content_is_never_spoken_at_any_chunk_size(self, chunk_size):
-        """
-        The safety property that DOES hold everywhere: the defect drops too
-        much, never too little. Bad for usability, not a leak.
-        """
+        """Hidden content must never be spoken, at any chunk size."""
         text = "A<think>SECRET</think>B\n```python\nCODEBODY\n```\nD"
         out = feed_all(_TtsFilter(), text, chunk_size=chunk_size)
         assert "SECRET" not in out

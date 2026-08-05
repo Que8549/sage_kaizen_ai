@@ -42,7 +42,7 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 - **RAG v1**: ingest (folder + RSS + web + ZIM) into PostgreSQL + pgvector; parallel query-time retrieval
   - `rag_v1/wiki/` — Wikipedia multimodal RAG (jina-clip-v2 embeddings, text + image)
   - `rag_v1/media/` — Cross-modal ingest: images (jina-clip-v2, 1024-dim) + audio (CLAP, 512-dim)
-  - `rag_v1/embed/` — BGE-M3 embed client (wraps port 8020)
+  - `rag_v1/embed/` — `BaseHttpEmbedClient` (shared pooled transport for all four embed clients) + BGE-M3 client (port 8020)
   - `rag_v1/retrieve/` — retriever + citation formatting
   - `rag_v1/runtime/context_injector.py` — parallel 5-worker assembly (doc-RAG · wiki · search · music · news)
   - `rag_v1/runtime/router_integration.py` — `RagInjector` wires router decisions to context_injector
@@ -53,12 +53,13 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
   - `review_service/graph.py` — sequential StateGraph: scope → subprocess_checks → web_researcher → architect_reviewer → flags_sanity → docs_drift → synthesizer → human_gate → output_writer
   - `review_service/runner.py` — ReviewRunner; background daemon thread with isolated asyncio event loop
   - `review_service/checkpointer.py` — AsyncPostgresSaver using pg_settings.py DSN; dedicated `langgraph` schema
-  - `review_service/trigger.py` — `is_review_command()` heuristic; called by router.py
+  - `review_service/trigger.py` — `is_review_command()` heuristic; called by `ui_streamlit_server.py` (not router.py)
   - `review_service/output/` — review_writer, adr_writer, patch_writer (write to `reviews/`, `docs/03-DECISIONS/`, `patches/`)
 - **Supporting root-level modules**:
   - `document_parser.py` — multi-format doc extraction (docx, xlsx, csv, code, txt, etc.)
   - `input_guard.py` — prompt-injection defense for all external content (RAG chunks, web snippets)
   - `env_utils.py` — per-call env var accessors (`env_bool`, `env_int`, `env_float`, `env_str`); re-read every turn
+  - `lazy.py` — `@lazy_singleton`: the one thread-safe lazy singleton helper; every process-wide accessor uses it (see §14)
   - `mermaid_streamlit.py` — Mermaid diagram detection and rendering
   - `sk_logging.py` — centralized rotating log configuration; also mirrors structured log records into PostgreSQL (`log` schema, best-effort, see §12)
   - `pg_settings.py` — Pydantic BaseSettings for PostgreSQL DSN
@@ -72,7 +73,7 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 | ARCHITECT brain | Qwen3.6-27B-MTP-Q6_K | 8012 | CUDA0 (5090) | Deep reasoning; 128K ctx; `<think>` tokens |
 | Summarizer | Qwen3-4B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
 | BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA0 (5090) | RAG text embeddings (1024-dim) |
-| Wiki embed A | jina-clip-v2 | 8031 | CUDA0 (5090) | Wikipedia multimodal embeddings (workers A1/A2) |
+| Wiki embed A | jina-clip-v2 | 8031 | CUDA1 (5090 OC) | Wikipedia multimodal embeddings (workers A1/A2); also serves media image embeds |
 | Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (5090 OC) | Wikipedia ingest only (workers B1/B2; stop FAST brain first) |
 | CLAP embed | clap-htsat-unfused | 8040 | CUDA1 (5090 OC) | Audio embeddings (512-dim) |
 | SearXNG | (metasearch) | 8080 | Docker Desktop | Live web search JSON API |
@@ -150,7 +151,14 @@ These are **hard constraints**:
    - Tables live in the `langgraph` schema (not `public`) — run `scripts/setup_langgraph_schema.sql` once as superuser before first review run
    - Do not introduce a separate database connection for the review service
 
-6. **PostgreSQL schema migrations for cross-project concerns live in this (main) project**
+6. **`cuda:0` is display-only** — it drives three monitors. `cuda:1` (RTX 5090 OC) and `cuda:2` (RTX 5080 eGPU) are the compute GPUs.
+   - Enforced by `WikiRetriever`'s `DisplayGpuRefused` guard, which checks the *effective* device, not just config
+   - The only sanctioned cuda:0 compute is `wiki_ingest.py --gpu0-workers 1` in the ingest project
+   - See §10 and sage_kaizen_ai_ingest CLAUDE.md §19
+
+7. **Seven shared modules resolve to THIS repo for both projects** — changing them is a cross-project change (see §13)
+
+8. **PostgreSQL schema migrations for cross-project concerns live in this (main) project**
    - `log/db/log_schema.sql` (structured logging, §12) follows this rule — run `scripts/setup_log_schema.sql` once as superuser first, then `log/db/log_schema.sql` as `sage`
    - **Known exception**: `news/db/news_schema.sql` and `news/db/migrations/` live in and are git-tracked by `sage_kaizen_ai_ingest`, not here — a pre-existing precedent from before this rule was made explicit. Don't treat it as license to add new schema files outside this project; it's flagged here rather than silently left inconsistent.
 
@@ -162,7 +170,7 @@ User rig also known as "my rig":
 - CPU: AMD Ryzen 9 9950X3D
 - RAM: 192 GB DDR5 Speed: 6400 MT/s
 - GPU0: CUDA 0 - NVIDIA GeForce RTX 5090 (32GB VRAM) — primary display GPU (3 monitors); ARCHITECT Brain + BGE-M3 embed
-- GPU1: CUDA 1 - Gigabyte GeForce RTX 5090 OC (32GB VRAM) — no display; FAST Brain + Wiki embed B + CLAP embed
+- GPU1: CUDA 1 - Gigabyte GeForce RTX 5090 OC (32GB VRAM) — no display; FAST Brain + Wiki embed A **and** B + CLAP embed
 - GPU2: CUDA 2 - Gigabyte GeForce RTX 5080 (16GB VRAM) — no display; 
   - Connected by MinisForum DEG2 OCuLink eGPU Dock via USB-C (https://www.minisforum.com/products/deg2). 
   - The MinisForum DEG2 OCuLink eGPU Dock has a 2TB SSD drive.
@@ -240,8 +248,32 @@ If a commit message says "reverted", "removed", "uninstalled", or describes a fa
  - SearXNG - local search engine running at http://localhost:8080/ located at F:\Projects\searxng
 
 ### Wiki Ingest — GPU Layout and Thermal Management
-Wiki embed service A (port 8031) runs on **CUDA0 (RTX 5090)**; wiki embed service B (port 8032) runs on **CUDA1 (RTX 5090 OC)**.  
-The RTX 5090 (CUDA0) drives the display (3 monitors) and must not run sustained compute — Windows TDR (2 s) resets the display driver if a CUDA kernel runs too long, causing a black screen requiring reboot.
+
+**cuda:0 is display-only.** The RTX 5090 at CUDA0 drives three monitors and must
+not run sustained compute — Windows TDR (2 s) resets the display driver if a CUDA
+kernel runs too long, causing a black screen requiring reboot. cuda:1 (RTX 5090 OC)
+and cuda:2 (RTX 5080 eGPU) are the compute GPUs.
+
+Wiki embed services A (port 8031) and B (port 8032) both run on **CUDA1
+(RTX 5090 OC)**. Service A was documented as CUDA0 until 2026-08-05; that was
+never true of the ingest path (`wiki_ingest.py` passes an explicit `device=`
+per service) but it *was* the value in `brains.yaml`, which is what any other
+consumer falls back to — including this app's chat-time `WikiRetriever`.
+Corrected in `brains.yaml` (commit a1ac499), in
+`WikiEmbedServiceConfig.device`, and enforced by a hard guard:
+
+- `rag_v1/wiki/wiki_retriever.py` raises `DisplayGpuRefused` rather than
+  starting `mm_embed_service` on cuda:0, checking the **effective** device
+  (`WIKI_EMBED_DEVICE` env var, then `brains.yaml`) so it holds even if a
+  config regresses.
+- It pins the validated device into the child's environment, closing the hole
+  where an inherited `WIKI_EMBED_DEVICE=cuda:0` silently beat `brains.yaml`.
+- It reads `/health`'s `device` field rather than trusting a bare ping, so a
+  service this process did not start is also checked.
+
+The only sanctioned use of cuda:0 is `wiki_ingest.py`'s optional C worker under
+an explicit `--gpu0-workers 1`. See sage_kaizen_ai_ingest's CLAUDE.md §19 for
+the audit this mirrors.
 
 Before running a long wiki ingest session, set GPU power limits once as Administrator:
 ```powershell
@@ -386,7 +418,7 @@ bounded, non-blocking queue + dedicated consumer thread batches records
 dedicated psycopg3 connection, reading fields natively off each `LogRecord`
 (never parsing formatted text). Never raises: missing psycopg, unset DSN,
 unreachable DB, or a missing schema all degrade to a silent drop (bounded
-queue, oldest dropped first), with at most one diagnostic notice per state
+queue, newest dropped — see `_BoundedQueueHandler.enqueue`), with at most one diagnostic notice per state
 transition — written to a dedicated `sk_logging_internal.log`, never
 stdout/stderr, never recursing into the DB handler that's failing. This
 internal-diagnostics file exists purely to report on the DB path's own
@@ -416,3 +448,103 @@ voice project's turn-level ZMQ `session_id`; not unifying those.
 partition at ~50-100GB or 100M+ rows; not there. Converting to a partitioned
 table later is a well-documented, mechanical migration once volume actually
 warrants it.
+
+---
+
+## 13) CROSS-PROJECT MODULE OWNERSHIP — this repo wins (measured 2026-08-04/05)
+
+**Six modules are physically duplicated between this project and
+`sage_kaizen_ai_ingest`, and in every case the copy in THIS repo is the one
+Python actually imports — in both projects.** Editing the ingest copy has no
+runtime effect.
+
+Measured from the *ingest* venv (`python -c "import _bootstrap, X; print(X.__file__)"`):
+
+| Module | Resolves to |
+|---|---|
+| `sk_logging` | **this repo** |
+| `pg_settings` | **this repo** |
+| `openai_client` | **this repo** |
+| `rag_v1.db.pg` | **this repo** |
+| `rag_v1.wiki.wiki_embed_config` | **this repo** |
+| `rag_v1.wiki.mm_embed_client` | **this repo** |
+| `rag_v1.media.media_embed_client` | **this repo** |
+| `rag_v1.wiki.wiki_ingest` | ingest (exists only there) |
+| `rag_v1.ingest.*`, `rag_v1.media.media_ingest` | ingest (exist only there) |
+
+**Cause.** `sage_kaizen_ai_ingest/_bootstrap.py` inserts each project root only
+`if _s not in sys.path`. With both projects `pip install -e`'d into a venv both
+roots are already present, so both inserts are skipped and the `.pth` ordering
+decides — which puts `F:\Projects\sage_kaizen_ai` at `sys.path[0]`. The ingest
+project's own docs described the opposite intent; see its CLAUDE.md §20.
+
+**What this means when working here.** Any change to one of those seven modules
+is a **cross-project change**. `rag_v1/media/media_embed_client.py` in
+particular is driven at volume by the ingest media pipeline, not by anything in
+this app — which is how it went years with an unpooled HTTP client nobody
+noticed (§14 below). Before changing one, check the ingest project's call sites.
+
+The last two rows of that table were discovered on 2026-08-05 and are **not** in
+ingest §20's version of it.
+
+---
+
+## 14) CODE-QUALITY REFACTOR — 2026-08-04/05
+
+A senior-review pass over the whole app. Twelve defects fixed and five shared
+abstractions extracted. Every item below has regression tests.
+
+### Defects found and fixed
+
+| # | Defect | Impact |
+|---|---|---|
+| 1 | `health_check()` probed four paths sequentially, each paying the full connect timeout | **8.03 s** to decide a server was down, on every ambiguous-score turn and every UI status refresh. Now short-circuits on transport failure: **2.00 s** (measured both) |
+| 2 | `PostgresLogHandler` read `record.exc_info`, which `QueueHandler.prepare()` had already stripped | `log.<table>.exception` was **always NULL**; tracebacks were folded into `description` and truncated |
+| 3 | `WikiEmbedServiceConfig.device` defaulted to `cuda:0` | Chat-time wiki retrieval could load jina-clip-v2 onto the display GPU. See §10 |
+| 4 | 8 lazy singletons had no lock | Two context-injector workers could each construct a `WikiRetriever` → two cold CUDA inits on one GPU |
+| 5 | Context collection used five sequential `.result(timeout=)` calls | Worst case was their **sum, 85 s**, not the max the docstring promised. Now one shared 30 s deadline |
+| 6 | `llm_route()` returned without calling `_log_decision()` | `route_json` was missing for exactly the ambiguous turns |
+| 7 | Dead imports, per-call constant rebuilds, a `trimmed` off-by-one, unpruned `_spawned_procs` | |
+| 8 | `_TtsFilter` advanced one state transition per `feed()`, and discarded the buffer when a terminator was not in the current chunk | **Voice went silent at the start of every ARCHITECT turn and never recovered.** `</think>` almost never arrives whole from a token stream. Invisible in the UI, which renders unfiltered text |
+| 9 | `web_researcher._searxng_search` read `r.content`; `WebResult` has `.snippet` | The `except Exception` swallowed the `AttributeError`, so **every successful SearXNG search was silently discarded**. The node had never contributed to a review |
+| 10 | `_extract_ticker` substring-matched 3–4 letter aliases | `"something"` contains `eth`, `"goldfish"` contains `gold` — a turn mentioning a goldfish got a live gold-futures price injected. Now word-bounded, hyphen included in the boundary class |
+| 11 | `_collect_diff("file", "")` → `MAIN_ROOT / ""` is a directory, `.exists()` passed, `read_text()` raised | Crash, reachable from `parse_review_command("review the file")` |
+| 12 | `_is_market_query`'s comment named `"how much is this worth"` as the false positive it avoided — while `"how much is"` was in the list | Phrases are now tiered: weak ones additionally require a nameable instrument |
+
+### Shared abstractions extracted
+
+- **`lazy.py` → `@lazy_singleton`** — replaces ~10 hand-rolled
+  `global X; if X is None` blocks, only two of which were locked. One lock per
+  accessor; a `None` return is not cached (the optional-dependency accessors
+  rely on that); `.reset()` for tests.
+- **`rag_v1/embed/base_client.py` → `BaseHttpEmbedClient`** — one pooled
+  `httpx.Client`, one `/health` semantic, one retry policy (`reraise=True`), one
+  `close()` contract for all four embed clients. `ImageEmbedClient` was a second
+  implementation of `MmEmbedClient` (same host, same endpoints) and is now a
+  thin subclass; the name is kept because ingest imports it. **Both media
+  clients were unpooled**, building and discarding a TCP connection per call
+  while driven at volume by ingest — directly relevant to that project's
+  unresolved ephemeral-port-exhaustion lead (its §15 candidate 4), which
+  recorded that `MmEmbedClient` was checked and pooled but never checked these.
+- **`server_manager._ensure_brain_running()`** — the four `ensure_*_running`
+  functions were one body copied four times.
+- **`context_injector._prepend_to_last_user()`** — the walk-backwards-find-user
+  loop was written out once per context source.
+- **`rag_v1/db/pg.py` onto `psycopg_pool.ConnectionPool`** — converges with
+  `memory/db.py`; the project had two connection strategies. The old
+  `threading.local()` cache only evicted on exception, so the first query after
+  any server-side disconnect always failed; and three call sites called
+  `conn.close()` on the shared cached connection, defeating the cache entirely.
+
+### Test suite
+
+239 tests → **1404**, coverage **27.7% → 82.9%**, `fail_under = 80` enforced.
+`tests/test_coverage_config.py` guards the coverage config itself: `news/` and
+`rag_v1/` are namespace packages and coverage only descends into *regular*
+packages, so every directory has to be listed by hand — a list that rots
+silently, because an unlisted directory is absent from the report rather than
+reported as 0%. That understated the denominator by ~390 statements before it
+was found.
+
+`ui_streamlit_server.py` and `code_download.py` are deliberately unmeasured,
+with the reason recorded in `pyproject.toml`.

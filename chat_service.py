@@ -259,7 +259,7 @@ class ChatService:
 
         # Document routing:
         #   Any text/code/Office document attachment → ARCHITECT (Qwen3.5-27B, 128K context).
-        #   FAST (Qwen2.5-Omni-7B) only has 16K context; large documents would overflow it.
+        #   FAST (Qwen2.5-Omni-7B) has 32K context; large documents would overflow it.
         #   Documents need deep analysis that ARCHITECT handles more reliably than FAST.
         if cfg.document_attachments:
             n_docs  = len(cfg.document_attachments)

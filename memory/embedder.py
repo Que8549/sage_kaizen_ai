@@ -10,8 +10,7 @@ Design rules:
 """
 from __future__ import annotations
 
-import threading
-
+from lazy import lazy_singleton
 from rag_v1.embed.embed_client import EmbedClient
 from sk_logging import get_logger
 
@@ -22,23 +21,18 @@ _BGE_BASE_URL = "http://127.0.0.1:8020"
 _BGE_MODEL    = "bge-m3"
 _DIMS         = 1024
 
-_singleton: EmbedClient | None = None
-# Double-checked locking — memory embedding is reached from the memory
-# service's background episode-write thread as well as the request path, and a
-# lost race would leak an EmbedClient (and its httpx connection pool).
-_singleton_lock = threading.Lock()
-
-
+@lazy_singleton
 def _get_client() -> EmbedClient:
-    global _singleton
-    if _singleton is None:
-        with _singleton_lock:
-            if _singleton is None:
-                _singleton = EmbedClient(
-                    base_url=_BGE_BASE_URL, model=_BGE_MODEL, timeout_s=30.0
-                )
-                _LOG.debug("embedder | BGE-M3 client initialised at %s", _BGE_BASE_URL)
-    return _singleton
+    """
+    Process-wide BGE-M3 client.
+
+    Locked: reached from the memory service's background episode-write thread
+    as well as the request path, and a lost race would leak an EmbedClient
+    (and its httpx connection pool).
+    """
+    client = EmbedClient(base_url=_BGE_BASE_URL, model=_BGE_MODEL, timeout_s=30.0)
+    _LOG.debug("embedder | BGE-M3 client initialised at %s", _BGE_BASE_URL)
+    return client
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:

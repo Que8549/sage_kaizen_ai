@@ -185,15 +185,16 @@ class MediaRetriever:
     # ------------------------------------------------------------------ #
 
     def _query_images(self, qvec: list[float], top_k: int) -> list[MediaResult]:
-        conn: psycopg.Connection[DictRow] = get_conn(self._pg_dsn)
-        try:
+        # `with` is load-bearing: it returns the connection to the pool.
+        # This used to call conn.close() on the thread-local cached connection,
+        # which defeated that cache entirely — every query paid a fresh
+        # handshake and the next caller found a closed connection.
+        with get_conn(self._pg_dsn) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 rows = cur.execute(
                     _SQL_SEARCH_IMAGES,
                     (qvec, qvec, self._max_dist, qvec, top_k),
                 ).fetchall()
-        finally:
-            conn.close()
 
         return [
             MediaResult(
@@ -207,15 +208,16 @@ class MediaRetriever:
         ]
 
     def _query_audio(self, qvec: list[float], top_k: int) -> list[MediaResult]:
-        conn: psycopg.Connection[DictRow] = get_conn(self._pg_dsn)
-        try:
+        # `with` is load-bearing: it returns the connection to the pool.
+        # This used to call conn.close() on the thread-local cached connection,
+        # which defeated that cache entirely — every query paid a fresh
+        # handshake and the next caller found a closed connection.
+        with get_conn(self._pg_dsn) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 rows = cur.execute(
                     _SQL_SEARCH_AUDIO,
                     (qvec, qvec, self._max_dist, qvec, top_k),
                 ).fetchall()
-        finally:
-            conn.close()
 
         return [
             MediaResult(
