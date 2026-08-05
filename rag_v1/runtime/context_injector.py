@@ -30,13 +30,25 @@ never crashes the app at startup.
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
+
+# Number of independent fetches launched per chat turn:
+# doc-RAG, wiki-RAG, search, music, news.
+_FANOUT = 5
 
 # Module-level executor — threads are kept alive for the process lifetime so
 # thread creation cost is paid once, not on every chat turn.
-# max_workers=5 covers the five parallel fetches: doc-RAG, wiki-RAG, search, music, news.
-_POOL = ThreadPoolExecutor(max_workers=5, thread_name_prefix="rag_par")
+#
+# Sized at 2x the fan-out, not 1x.  At max_workers=_FANOUT a *second*
+# concurrent turn (the in-process news scheduler, or a voice turn overlapping a
+# UI turn) found all five threads busy and its tasks sat in the queue — while
+# Future.result(timeout=...) counts from the moment it is called, not from when
+# the task starts running.  A queued task could therefore blow its timeout
+# having never executed, silently dropping that context source from the turn.
+_POOL = ThreadPoolExecutor(max_workers=_FANOUT * 2, thread_name_prefix="rag_par")
 
 from env_utils import env_bool, env_int
 from input_guard import sanitize_chunk
@@ -105,12 +117,27 @@ _rag_injector: RagInjector | None = None
 _wiki_retriever: "WikiRetriever | None" = None
 _music_retriever: "MusicRetriever | None" = None
 
+# These three initialisers are reached from _POOL's worker threads, so the
+# bare `if X is None: X = ...` they used to run was a genuine race: two workers
+# could both see None and both construct.  For WikiRetriever that is not merely
+# wasteful — each instance calls _ensure_service(), so a lost race meant two
+# cold torch/CUDA initialisations of jina-clip-v2 on the same physical GPU at
+# once, the failure mode sage_kaizen_ai_ingest hit twice (its CLAUDE.md §15,
+# 2026-05-28 and 2026-07-18) and had to serialise startup to stop.
+#
+# Double-checked locking, matching chat_service._get_memory() and
+# memory.db.get_pool(), which already did this correctly.
+_singleton_lock = threading.Lock()
+
 
 def _ensure_rag() -> tuple[RagInjector, RagSettings]:
     global _rag_settings, _rag_injector
-    if _rag_injector is None:
-        _rag_settings = RagSettings()
-        _rag_injector = RagInjector(_rag_settings)
+    if _rag_injector is not None and _rag_settings is not None:
+        return _rag_injector, _rag_settings
+    with _singleton_lock:
+        if _rag_injector is None:
+            _rag_settings = RagSettings()
+            _rag_injector = RagInjector(_rag_settings)
     return _rag_injector, _rag_settings  # type: ignore[return-value]
 
 
@@ -118,9 +145,12 @@ def _get_music_retriever() -> "MusicRetriever | None":
     global _music_retriever
     if not _MUSIC_AVAILABLE:
         return None
-    if _music_retriever is None:
-        _, settings = _ensure_rag()
-        _music_retriever = MusicRetriever(pg_dsn=settings.pg_dsn)
+    if _music_retriever is not None:
+        return _music_retriever
+    _, settings = _ensure_rag()
+    with _singleton_lock:
+        if _music_retriever is None:
+            _music_retriever = MusicRetriever(pg_dsn=settings.pg_dsn)
     return _music_retriever
 
 
@@ -128,9 +158,13 @@ def _get_wiki_retriever() -> "WikiRetriever | None":
     global _wiki_retriever
     if not _WIKI_AVAILABLE:
         return None
-    if _wiki_retriever is None:
-        _, settings = _ensure_rag()
-        _wiki_retriever = WikiRetriever(pg_dsn=settings.pg_dsn)
+    if _wiki_retriever is not None:
+        return _wiki_retriever
+    # _ensure_rag() takes the same lock, so resolve settings before acquiring it.
+    _, settings = _ensure_rag()
+    with _singleton_lock:
+        if _wiki_retriever is None:
+            _wiki_retriever = WikiRetriever(pg_dsn=settings.pg_dsn)
     return _wiki_retriever
 
 
@@ -325,7 +359,6 @@ def _fetch_search_result(
         _LOG.info("search_rag | SAGE_SEARCH_SUMMARIZE=false — injecting raw snippets")
 
     # Build context block — prefer summary, fall back to raw snippets
-    from datetime import datetime, timezone
     fetched = evidence.fetched_at[:16].replace("T", " ") + " UTC"
     cats    = ", ".join(evidence.categories_queried)
 
@@ -352,8 +385,7 @@ def _fetch_search_result(
     )
 
     # Return a new evidence with the summary attached so the UI can display it
-    from search.models import SearchEvidence as _SE
-    enriched_evidence = _SE(
+    enriched_evidence = SearchEvidence(
         query             = evidence.query,
         results           = evidence.results,
         fetched_at        = evidence.fetched_at,
@@ -436,6 +468,61 @@ def _fetch_news_result(user_text: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# Parallel collection
+# ---------------------------------------------------------------------------
+
+# Per-worker ceiling: stops a hung SearXNG fetch, a slow jina-clip GPU restore,
+# or a stalled DB query from monopolising the turn.  Real work is much faster;
+# these are safety limits, not expected durations.  wiki's 20 s is safe because
+# _ensure_service() fires a warmup embed before returning, so CUDA JIT is
+# absorbed at service startup rather than here.
+#
+# Module-level constant: this used to be rebuilt inside the function on every
+# chat turn.
+_WORKER_TIMEOUTS: dict[str, float] = {
+    "rag": 15.0, "wiki": 20.0, "search": 30.0, "music": 10.0, "news": 10.0,
+}
+
+# Ceiling on total wall-clock time spent collecting context, shared across all
+# five workers.
+#
+# The five fetches genuinely run in parallel, but they used to be *collected*
+# with five independent `fut.result(timeout=per_worker)` calls — and those
+# timeouts are sequential, so the worst case was their SUM (15+20+30+10+10 =
+# 85 s), not the max the docstring promised.  A single deadline started at
+# submit time makes the worst case match the design: the slowest worker's
+# ceiling, and no more.
+_TOTAL_CONTEXT_BUDGET_S: float = max(_WORKER_TIMEOUTS.values())
+
+_T = TypeVar("_T")
+
+
+def _collect(
+    fut: "Future[Any]",
+    name: str,
+    deadline: float,
+    fallback: _T,
+    label: str,
+) -> _T:
+    """
+    Wait for one context worker, bounded by both its own ceiling and the shared
+    deadline, and fall back rather than fail.
+
+    Returns `fallback` on timeout or any exception — a missing context source
+    degrades the answer, it never breaks the turn.
+    """
+    remaining = min(_WORKER_TIMEOUTS[name], deadline - time.monotonic())
+    try:
+        return fut.result(timeout=max(0.0, remaining))
+    except Exception:
+        _LOG.exception(
+            "%s worker timed out or failed (budget %.1fs); continuing without %s",
+            name, max(0.0, remaining), label,
+        )
+        return fallback
+
+
 def apply_rag_and_wiki_parallel(
     messages: list[dict[str, Any]],
     user_text: str,
@@ -483,44 +570,24 @@ def apply_rag_and_wiki_parallel(
     music_fut  = _POOL.submit(_fetch_music_result, user_text, decision)
     news_fut   = _POOL.submit(_fetch_news_result, user_text)
 
-    # Per-worker timeout: prevents a hung SearXNG fetch, slow jina-clip GPU
-    # restore, or stalled DB query from blocking the turn indefinitely.
-    # Values are generous (doc-RAG: 15 s, wiki: 20 s, search+summarize: 30 s,
-    # music: 10 s, news: 10 s) — real work is much faster; these are safety ceilings.
-    # TimeoutError is caught and logged; the turn continues with partial context.
-    # wiki: 20 s is safe because _ensure_service() now fires a warmup embed
-    # before returning, so CUDA JIT is absorbed at service startup, not here.
-    _WORKER_TIMEOUTS = {"rag": 15, "wiki": 20, "search": 30, "music": 10, "news": 10}
+    # One deadline shared by all five collections, started at submit time.
+    deadline = time.monotonic() + _TOTAL_CONTEXT_BUDGET_S
 
-    try:
-        rag_messages, rag_sources = rag_fut.result(timeout=_WORKER_TIMEOUTS["rag"])
-    except Exception:
-        _LOG.exception("RAG worker timed out or failed; continuing without doc-RAG")
-        rag_messages, rag_sources = messages, []
-
-    try:
-        wiki_ctx_block, wiki_images = wiki_fut.result(timeout=_WORKER_TIMEOUTS["wiki"])
-    except Exception:
-        _LOG.exception("Wiki worker timed out or failed; continuing without wiki context")
-        wiki_ctx_block, wiki_images = "", []
-
-    try:
-        search_ctx_block, search_evidence = search_fut.result(timeout=_WORKER_TIMEOUTS["search"])
-    except Exception:
-        _LOG.exception("Search worker timed out or failed; continuing without search context")
-        search_ctx_block, search_evidence = "", None
-
-    try:
-        music_ctx_block = music_fut.result(timeout=_WORKER_TIMEOUTS["music"])
-    except Exception:
-        _LOG.exception("Music worker timed out or failed; continuing without music context")
-        music_ctx_block = ""
-
-    try:
-        news_ctx_block = news_fut.result(timeout=_WORKER_TIMEOUTS["news"])
-    except Exception:
-        _LOG.exception("News worker timed out or failed; continuing without news context")
-        news_ctx_block = ""
+    rag_messages, rag_sources = _collect(
+        rag_fut, "rag", deadline, (messages, []), "doc-RAG",
+    )
+    wiki_ctx_block, wiki_images = _collect(
+        wiki_fut, "wiki", deadline, ("", []), "wiki context",
+    )
+    search_ctx_block, search_evidence = _collect(
+        search_fut, "search", deadline, ("", None), "search context",
+    )
+    music_ctx_block = _collect(
+        music_fut, "music", deadline, "", "music context",
+    )
+    news_ctx_block = _collect(
+        news_fut, "news", deadline, "", "news context",
+    )
 
     # ── Token budget guardrails ────────────────────────────────────────────
     # Trim wiki and search context blocks before injection so that a single
@@ -533,7 +600,11 @@ def apply_rag_and_wiki_parallel(
         "SAGE_RAG_WIKI_FAST_MAX_CHARS" if is_fast else "SAGE_RAG_WIKI_ARCH_MAX_CHARS",
         default=4_000 if is_fast else 16_000,
     )
-    if wiki_ctx_block and len(wiki_ctx_block) > wiki_max:
+    # Track trimming explicitly.  The structured log used to re-derive this as
+    # `len(block) >= max` *after* truncation, which reported trimmed=True for a
+    # block that happened to land exactly on the budget and was never touched.
+    wiki_trimmed = bool(wiki_ctx_block) and len(wiki_ctx_block) > wiki_max
+    if wiki_trimmed:
         wiki_ctx_block = wiki_ctx_block[:wiki_max] + "\n[... wiki context trimmed to budget ...]"
         _LOG.info("wiki_rag | trimmed to budget | brain=%s max_chars=%d", decision.brain, wiki_max)
 
@@ -541,7 +612,8 @@ def apply_rag_and_wiki_parallel(
         "SAGE_SEARCH_FAST_MAX_CHARS" if is_fast else "SAGE_SEARCH_ARCH_MAX_CHARS",
         default=2_000 if is_fast else 6_000,
     )
-    if search_ctx_block and len(search_ctx_block) > search_max:
+    search_trimmed = bool(search_ctx_block) and len(search_ctx_block) > search_max
+    if search_trimmed:
         search_ctx_block = search_ctx_block[:search_max] + "\n[... search context trimmed to budget ...]"
         _LOG.info("search_rag | trimmed to budget | brain=%s max_chars=%d", decision.brain, search_max)
 
@@ -556,8 +628,8 @@ def apply_rag_and_wiki_parallel(
             "music_chars":       len(music_ctx_block) if music_ctx_block else 0,
             "news_chars":        len(news_ctx_block) if news_ctx_block else 0,
             "wiki_images":       len(wiki_images),
-            "wiki_trimmed":      bool(wiki_ctx_block and len(wiki_ctx_block) >= wiki_max),
-            "search_trimmed":    bool(search_ctx_block and len(search_ctx_block) >= search_max),
+            "wiki_trimmed":      wiki_trimmed,
+            "search_trimmed":    search_trimmed,
         }),
     )
 

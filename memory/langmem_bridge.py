@@ -370,15 +370,22 @@ class LangMemBridgeSync:
 # ---------------------------------------------------------------------------
 
 _bridge_singleton: LangMemBridgeSync | None = None
+# Double-checked locking.  LangMemBridgeSync owns a background event loop
+# thread, so a lost race would start two of them — one of which nothing holds a
+# reference to and nothing will ever stop.
+_bridge_lock = threading.Lock()
 
 
 def get_langmem_bridge() -> LangMemBridgeSync:
     """
     Get or create the module-level LangMemBridgeSync singleton.
 
-    Call start() before first use.  Safe to call multiple times.
+    Call start() before first use.  Safe to call multiple times, and safe to
+    call concurrently.
     """
     global _bridge_singleton
     if _bridge_singleton is None:
-        _bridge_singleton = LangMemBridgeSync()
+        with _bridge_lock:
+            if _bridge_singleton is None:
+                _bridge_singleton = LangMemBridgeSync()
     return _bridge_singleton

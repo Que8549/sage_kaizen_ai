@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any, Iterator, NamedTuple
 
 import requests
 
@@ -96,52 +96,85 @@ def _normalize_base_url(base_url: str) -> str:
     return b
 
 
-def _probe_get(base: str, path: str, *, timeouts: HttpTimeouts) -> tuple[bool, str]:
+# Readiness probe order (llama.cpp documented endpoints).  Different
+# llama-server builds/roles expose different subsets, hence the fallbacks.
+_HEALTH_PATHS: tuple[str, ...] = ("/health", "/v1/health", "/v1/models", "/props")
+
+
+class _ProbeResult(NamedTuple):
+    ok: bool
+    detail: str
+    # True when the request failed below the HTTP layer — nothing accepted the
+    # connection, or it accepted and never answered.  See health_check().
+    transport_failed: bool
+
+
+def _probe_get(base: str, path: str, *, timeouts: HttpTimeouts) -> _ProbeResult:
     """
-    Returns (ok, detail). ok is True if HTTP 200.
-    detail includes status code or exception type.
+    Probe one readiness path.
+
+    Returns (ok, detail, transport_failed).
+      ok               — True on HTTP 200.
+      detail           — "OK (<path>)", "<path>=<status>", or "<path>=<ExcName>".
+      transport_failed — True for connect refusal/timeout or read timeout, i.e.
+                         a failure that says something about the *endpoint*
+                         rather than about this particular path.
     """
     url = f"{base}{path}"
     try:
         r = _session(base).get(url, timeout=_timeout_tuple(timeouts))
         if r.status_code == 200:
-            return True, f"OK ({path})"
-        return False, f"{path}={r.status_code}"
+            return _ProbeResult(True, f"OK ({path})", False)
+        # A real HTTP response — the server is listening and answering, this
+        # path just isn't the right one (404) or isn't ready yet (503).
+        return _ProbeResult(False, f"{path}={r.status_code}", False)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        # ConnectionError covers refusal and DNS/socket failures; Timeout covers
+        # ConnectTimeout and ReadTimeout.  requests' ConnectTimeout subclasses
+        # both, so ordering these two in one except clause is safe.
+        return _ProbeResult(False, f"{path}={type(e).__name__}", True)
     except Exception as e:
-        return False, f"{path}={type(e).__name__}"
+        return _ProbeResult(False, f"{path}={type(e).__name__}", False)
 
 
 def health_check(base_url: str, *, timeouts: HttpTimeouts) -> tuple[bool, str]:
     """
     Returns (ok, detail).
 
-    Probes readiness in this order (llama.cpp documented endpoints):
-      1) GET /health
-      2) GET /v1/health
-      3) GET /v1/models
-      4) GET /props
+    Probes readiness over _HEALTH_PATHS in order and returns True on the first
+    HTTP 200, otherwise False with a combined detail string.
 
-    We return True on the first success (HTTP 200), otherwise False with a combined detail string.
+    Short-circuit on transport failure
+    ----------------------------------
+    Every path is on the same host:port.  If a probe cannot reach that endpoint
+    at all — connection refused, connect timeout, or read timeout — the
+    remaining paths cannot possibly succeed, so we stop instead of paying the
+    timeout again for each one.
+
+    This is not a micro-optimisation.  Before this change a down server cost
+    4 x connect_s to diagnose: measured 8.03 s against a closed port with the
+    HttpTimeouts(connect_s=2.0, read_s=5.0) that ChatService.decide_route()
+    uses on every ambiguous-score turn, and twice that for the UI's two-brain
+    status panel on every rerun.  It is now bounded by a single probe.
+
+    A non-200 HTTP *response* is not a transport failure: the server is up and
+    answering, so the remaining paths are still worth trying (an older build may
+    404 on /health but serve /v1/models).
     """
     base = _normalize_base_url(base_url)
+    details: list[str] = []
 
-    ok, d1 = _probe_get(base, "/health", timeouts=timeouts)
-    if ok:
-        return True, d1
+    for path in _HEALTH_PATHS:
+        result = _probe_get(base, path, timeouts=timeouts)
+        if result.ok:
+            return True, result.detail
+        details.append(result.detail)
+        if result.transport_failed:
+            skipped = len(_HEALTH_PATHS) - len(details)
+            suffix = f"; {skipped} probe(s) skipped — endpoint unreachable" if skipped else ""
+            return False, f"not ready ({'; '.join(details)}{suffix})"
 
-    ok, d2 = _probe_get(base, "/v1/health", timeouts=timeouts)
-    if ok:
-        return True, d2
-
-    ok, d3 = _probe_get(base, "/v1/models", timeouts=timeouts)
-    if ok:
-        return True, d3
-
-    ok, d4 = _probe_get(base, "/props", timeouts=timeouts)
-    if ok:
-        return True, d4
-
-    return False, f"not ready ({d1}; {d2}; {d3}; {d4})"
+    return False, f"not ready ({'; '.join(details)})"
 
 
 def discover_model_id(base_url: str, *, timeouts: HttpTimeouts) -> str | None:

@@ -236,7 +236,7 @@ If a commit message says "reverted", "removed", "uninstalled", or describes a fa
 ## 10) Related and Associated Projects
  - Integrate with Sage Kaizen Voice (voice app) located at F:\Projects\sage_kaizen_ai_voice\
  - Sage Kaizen local-first AI assistant (main app) located at F:\Projects\sage_kaizen_ai\
- - Sage Kaizen ingest (all pipelines) located at F:\Projects\sage_kaizen_ai_ingest
+ - Sage Kaizen ingest (ingest app) located at F:\Projects\sage_kaizen_ai_ingest
  - SearXNG - local search engine running at http://localhost:8080/ located at F:\Projects\searxng
 
 ### Wiki Ingest — GPU Layout and Thermal Management

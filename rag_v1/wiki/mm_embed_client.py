@@ -46,11 +46,33 @@ class MmEmbedClient:
 
     def ping(self, timeout_s: float = 5.0) -> bool:
         """Return True if the embed service is reachable and healthy."""
+        return self.health(timeout_s=timeout_s) is not None
+
+    def health(self, timeout_s: float = 5.0) -> dict | None:
+        """
+        Return the parsed /health payload, or None if unreachable/unhealthy.
+
+        The service reports which device the model is actually loaded on:
+
+            {"status": "ok", "device": "cuda:1", "model": "jina-clip-v2",
+             "loaded": true, "offloaded": false, "idle_timeout_s": 120.0}
+
+        `ping()` only proves that *something* answered; callers that need to
+        know *where* the model is loaded — see WikiRetriever's display-GPU
+        guard — must read `device` from here instead.
+
+        Note that /health returns 503 (not 200) once the service's CUDA context
+        has failed permanently, so an unhealthy service returns None here rather
+        than a payload with a stale device string.
+        """
         try:
             r = self._client.get(f"{self.base_url}/health", timeout=timeout_s)
-            return r.is_success
+            if not r.is_success:
+                return None
+            payload = r.json()
+            return payload if isinstance(payload, dict) else None
         except Exception:
-            return False
+            return None
 
     # ------------------------------------------------------------------ #
     # Text embeddings                                                      #

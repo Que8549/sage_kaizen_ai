@@ -20,20 +20,97 @@ filterwarnings = [
     "ignore::UserWarning",
 ]
 
+[project]
+name = "sage-kaizen"
+version = "0.1.0"
+description = "Sage Kaizen — local-first dual-brain AI assistant"
+requires-python = ">=3.14"
+
+[project.optional-dependencies]
+# Test/dev tooling.  Deliberately NOT in requirements.txt, which pins the
+# runtime environment (torch/CUDA wheels, llama.cpp deps) and is regenerated
+# from the venv.  Install with:  pip install -e ".[dev]"
+dev = [
+    "pytest>=9.0",
+    "pytest-mock>=3.15",
+    "pytest-cov>=7.1",
+    "coverage>=7.15",
+    # respx: mock router for httpx.  The six httpx-based clients
+    # (searxng_client, mm_embed_client, media_embed_client, embed_client)
+    # are far cleaner to exercise through respx than hand-built MagicMocks.
+    "respx>=0.23",
+    # freezegun: pins datetime.now() for fetched_at / staleness assertions.
+    "freezegun>=1.5",
+]
+
 [tool.coverage.run]
-source = ["."]
+# Explicit source roots as DIRECTORY PATHS, not just "." and not package
+# names.  Two things force this:
+#
+#   1. `news/` and `rag_v1/` have no top-level __init__.py — they are
+#      namespace packages shared with sage_kaizen_ai_ingest.  Given only ".",
+#      coverage does not walk into an unimported namespace sub-package, so
+#      modules that no test imports vanish from the report entirely instead of
+#      reporting 0% (measured 2026-08-04: this understated the denominator by
+#      ~390 statements).
+#   2. sage_kaizen_ai_ingest is `pip install -e`'d into THIS venv, so
+#      `rag_v1.__path__` spans both repos.  Naming "rag_v1" as a package would
+#      let coverage resolve it through that shared __path__ and pull in (or
+#      skip) the wrong copy.  A "./rag_v1" directory path is unambiguous —
+#      it can only mean this repo's copy.
+#
+# Net effect: the denominator is deterministic and covers only our own code.
+# NOTE: coverage descends into a source directory's sub-directories only when
+# they are REGULAR packages (have __init__.py).  Every rag_v1/ sub-directory is
+# a namespace package, so listing "./rag_v1" alone finds nothing — each
+# sub-package has to be named.  Verified 2026-08-04: without these, the report
+# silently omitted context_injector.py, media_retriever.py and citations.py.
+source = [
+    ".",
+    "./memory",
+    "./news",
+    "./review_service",
+    "./search",
+    "./rag_v1/config",
+    "./rag_v1/db",
+    "./rag_v1/embed",
+    "./rag_v1/media",
+    "./rag_v1/retrieve",
+    "./rag_v1/runtime",
+    "./rag_v1/wiki",
+]
 omit = [
     "tests/*",
     "llama.cpp/*",
     "flash-attention/*",
     ".venv/*",
     "scripts/*",
+    # ── Deliberately unmeasured (2026-08-04) ──────────────────────────────
+    # Streamlit entry script.  ~800 of its 1534 lines are module-level
+    # straight-line code that, AT IMPORT, starts the llama-servers, spawns
+    # the voice-app subprocess, and starts the news scheduler.  st.testing's
+    # AppTest cannot drive a script with those import-time side effects, so
+    # measuring it would report a permanent ~0% and drag the real number
+    # below any honest floor.  Making it testable means first splitting it
+    # into importable helpers — a separate, larger change.
+    "ui_streamlit_server.py",
+    # One-off developer utility for pulling source archives; not part of the
+    # runtime path and not imported by anything.
+    "code_download.py",
 ]
 
 [tool.coverage.report]
+show_missing = true
+skip_covered = false
+# Enforce the 80% floor established 2026-08-04.  `pytest --cov` exits
+# non-zero below this, so a coverage regression fails the run rather than
+# going unnoticed.  Matches the sage_kaizen_ai_ingest project's policy.
+fail_under = 80
 exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
     "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
     "\\.\\.\\.",
 ]

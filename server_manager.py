@@ -20,6 +20,7 @@ import functools
 import os
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,11 +69,28 @@ _FATAL_MARKERS = (
 # so we skip it safely.
 
 _spawned_procs: list[subprocess.Popen] = []
+_spawned_procs_lock = threading.Lock()
+
+
+def _register_spawned(proc: subprocess.Popen) -> None:
+    """
+    Track a spawned server, dropping any that have already exited.
+
+    Without the prune this list only ever grew: every restart cycle appended a
+    new Popen and kept the dead one forever, holding its OS process handle
+    open. A long Streamlit session that restarts brains repeatedly accumulated
+    them for the life of the process.
+    """
+    with _spawned_procs_lock:
+        _spawned_procs[:] = [p for p in _spawned_procs if p.poll() is None]
+        _spawned_procs.append(proc)
 
 
 def _kill_spawned_servers() -> None:
     """atexit handler — terminate all llama-server processes started this session."""
-    for proc in _spawned_procs:
+    with _spawned_procs_lock:
+        procs = list(_spawned_procs)
+    for proc in procs:
         try:
             if proc.poll() is None:   # still running
                 proc.terminate()
@@ -456,7 +474,7 @@ def start_server_from_config(brain: BrainConfig) -> tuple[bool, str]:
         finally:
             log_fh.close()  # parent closes its copy; child keeps its own fd
 
-        _spawned_procs.append(proc)
+        _register_spawned(proc)
     except Exception as e:
         return False, f"Failed to spawn llama-server: {e}"
 

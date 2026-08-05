@@ -22,6 +22,8 @@ SAGE_SEARCH_NEWS_TIME_RANGE  time_range value for news queries, default week
 """
 from __future__ import annotations
 
+import threading
+
 from env_utils import env_bool, env_float, env_int, env_str
 from search.models import SearchEvidence, WebResult
 from search.searxng_client import SearXNGClient
@@ -146,11 +148,17 @@ class SearchOrchestrator:
 # ---------------------------------------------------------------------------
 
 _orchestrator: SearchOrchestrator | None = None
+# Double-checked locking: get_orchestrator() is called from the context
+# injector's worker threads, so the bare `if is None` it used to run could let
+# two turns each build an orchestrator (and its SearXNGClient) concurrently.
+_orchestrator_lock = threading.Lock()
 
 
 def get_orchestrator() -> SearchOrchestrator:
     """Return the process-wide SearchOrchestrator, creating it on first call."""
     global _orchestrator
     if _orchestrator is None:
-        _orchestrator = SearchOrchestrator()
+        with _orchestrator_lock:
+            if _orchestrator is None:
+                _orchestrator = SearchOrchestrator()
     return _orchestrator

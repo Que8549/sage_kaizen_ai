@@ -16,6 +16,7 @@ import atexit
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,41 @@ from rag_v1.wiki.wiki_embed_config import load_wiki_embed_config
 from sk_logging import get_logger
 
 _LOG = get_logger("sage_kaizen.wiki_retriever")
+
+# ──────────────────────────────────────────────────────────────────────────── #
+# Display-GPU guard                                                              #
+# ──────────────────────────────────────────────────────────────────────────── #
+# cuda:0 is the RTX 5090 at PCI 01:00.0 that drives the three monitors.  It is
+# display-only: cuda:1 (RTX 5090 OC) and cuda:2 (RTX 5080 eGPU) are the compute
+# GPUs.  Sustained CUDA work on the display card is the documented Windows TDR /
+# display-driver-reset trigger, and a PnP-level fault there blanks the desktop.
+#
+# sage_kaizen_ai_ingest closed the equivalent holes on its side (its CLAUDE.md
+# §19).  This module is the main app's own path onto a GPU — WikiRetriever
+# spawns mm_embed_service at *chat* time, never passing through wiki_ingest.py's
+# guards — so it needs its own.  Two ways it could previously have landed on
+# cuda:0, both closed below:
+#
+#   1. WikiEmbedServiceConfig.device defaulted to "cuda:0" (fixed 2026-08-04),
+#      and _start of the service falls back to it when brains.yaml is silent.
+#   2. _ensure_service() passed os.environ.copy() straight through, so a
+#      WIKI_EMBED_DEVICE=cuda:0 inherited from any parent shell won — the
+#      service reads `os.environ.get("WIKI_EMBED_DEVICE") or cfg.device`.
+#
+# Named constants rather than inline literals: several guards depend on these
+# and a wrong value silently disables all of them.
+_DISPLAY_GPU_DEVICE = "cuda:0"
+_DISPLAY_GPU_INDEX = 0
+
+
+class DisplayGpuRefused(RuntimeError):
+    """Raised when wiki retrieval would place inference on the display GPU."""
+
+
+def _is_display_gpu(device: str) -> bool:
+    """True when `device` names the display GPU (cuda:0), tolerating whitespace/case."""
+    return (device or "").strip().lower() == _DISPLAY_GPU_DEVICE
+
 
 # ──────────────────────────────────────────────────────────────────────────── #
 # Result dataclasses                                                             #
@@ -126,6 +162,7 @@ class WikiRetriever:
         cluster_min_size: int     = 3,
         cluster_max_spread: float = 0.030,
         cluster_top1_floor: float = 0.800,
+        allow_display_gpu: bool   = False,
     ) -> None:
         wiki_cfg = load_wiki_embed_config()
 
@@ -135,6 +172,7 @@ class WikiRetriever:
         self._embed_port          = wiki_cfg.port
         self._startup_timeout_s   = wiki_cfg.startup_timeout_s   # from brains.yaml (300 s)
         self._embed_log           = wiki_cfg.log                  # for subprocess stderr
+        self._config_device       = wiki_cfg.device               # brains.yaml fallback
         self._max_distance        = max_distance
         self._cluster_min         = cluster_min_size
         self._cluster_spread      = cluster_max_spread
@@ -143,6 +181,47 @@ class WikiRetriever:
         self._embed_proc: subprocess.Popen | None = None
         self._atexit_registered: bool = False
         self._warmed_up: bool = False
+        # Opt-in consent to run on the display GPU.  Nothing in the chat path
+        # passes this; it exists so a deliberate operator override is possible
+        # without widening the guard for everyone.
+        self._allow_display_gpu = allow_display_gpu
+        # Serialises _ensure_service().  Without it two threads from the
+        # context_injector pool could each miss the ping and each spawn an
+        # mm_embed_service, putting two cold torch/CUDA initialisations on the
+        # same physical GPU simultaneously — a failure mode the ingest project
+        # hit twice (its CLAUDE.md §15, 2026-05-28 and 2026-07-18) and had to
+        # serialise service startup to stop.
+        self._service_lock = threading.Lock()
+
+    # ------------------------------------------------------------------ #
+    # Display-GPU guard                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _effective_device(self) -> tuple[str, str]:
+        """
+        Resolve the device the service *will* load on, and where that came from.
+
+        Mirrors mm_embed_service/app.py's own precedence exactly:
+            os.environ["WIKI_EMBED_DEVICE"] or cfg.device
+        Checking the effective value (rather than just the config) is what makes
+        the guard hold even when a config default regresses or an env var leaks
+        in from a parent shell.
+        """
+        env_device = os.environ.get("WIKI_EMBED_DEVICE")
+        if env_device:
+            return env_device.strip(), "WIKI_EMBED_DEVICE env var"
+        return self._config_device, "brains.yaml wiki_embed.service.device"
+
+    def _assert_device_allowed(self, device: str, source: str) -> None:
+        """Raise DisplayGpuRefused if `device` is the display GPU without consent."""
+        if _is_display_gpu(device) and not self._allow_display_gpu:
+            raise DisplayGpuRefused(
+                f"Refusing to run wiki embed inference on {device} (the display GPU, "
+                f"index {_DISPLAY_GPU_INDEX}) — requested via {source}. "
+                f"cuda:0 drives the monitors; sustained CUDA work there resets the "
+                f"display driver. Set the device to cuda:1, or construct "
+                f"WikiRetriever(allow_display_gpu=True) if this is deliberate."
+            )
 
     # ------------------------------------------------------------------ #
     # Service lifecycle                                                    #
@@ -159,12 +238,68 @@ class WikiRetriever:
             _LOG.warning("Wiki embed warmup failed; first real query may be slower")
         self._warmed_up = True
 
+    def _check_running_service_device(self, health: dict) -> bool:
+        """
+        Validate the device reported by an already-running service.
+
+        Returns True if it is safe to use.  Raises DisplayGpuRefused when the
+        model is loaded on the display GPU without consent.
+
+        A bare ping only proves that *something* answered on the port — never
+        where the model actually is.  This is the main app's equivalent of the
+        ingest project's §19 gap 2: a service started by any other path (an
+        ingest session, a manual `python -m …`, a stale process from before a
+        config fix) could be sitting on cuda:0 with nothing in our logs.
+        """
+        device = str(health.get("device") or "").strip()
+        if not device:
+            # Older service build with no `device` key. Nothing to check
+            # against; don't fail the turn over a missing diagnostic field.
+            _LOG.debug("Wiki embed /health reported no device field — device check skipped.")
+            return True
+
+        if _is_display_gpu(device) and not self._allow_display_gpu:
+            raise DisplayGpuRefused(
+                f"The wiki embed service already listening on port {self._embed_port} "
+                f"has jina-clip-v2 loaded on {device} — the display GPU (index "
+                f"{_DISPLAY_GPU_INDEX}, drives the monitors). This process did not "
+                f"start it. Stop that service and restart it on cuda:1, or construct "
+                f"WikiRetriever(allow_display_gpu=True) if this is deliberate."
+            )
+
+        expected, _ = self._effective_device()
+        if device != expected:
+            # Not the display GPU, just not what we'd have chosen. A deliberate
+            # manual override elsewhere is unusual but legitimate, and this
+            # process didn't start the service — so it doesn't get a veto.
+            _LOG.warning(
+                "Wiki embed service on port %s is on %s, expected %s — "
+                "continuing (service was not started by this process).",
+                self._embed_port, device, expected,
+            )
+        return True
+
     def _ensure_service(self) -> bool:
         """
         Auto-start embed service if not running.
         Returns True if the service is up and ready.
+
+        Raises DisplayGpuRefused if the service is, or would be, running
+        inference on the display GPU. Callers in the chat path
+        (context_injector._fetch_wiki_result) already catch every exception and
+        degrade to no wiki context, so this fails loudly in the logs without
+        breaking the turn.
+
+        Serialised by _service_lock so concurrent chat turns cannot each decide
+        the service is missing and each spawn one.
         """
-        if self._client.ping(timeout_s=2.0):
+        with self._service_lock:
+            return self._ensure_service_locked()
+
+    def _ensure_service_locked(self) -> bool:
+        health = self._client.health(timeout_s=2.0)
+        if health is not None:
+            self._check_running_service_device(health)
             self._maybe_warmup()
             return True
 
@@ -174,9 +309,14 @@ class WikiRetriever:
                          self._embed_proc.returncode)
             self._embed_proc = None
 
+        # Guard BEFORE spawning: refuse to create the process at all rather
+        # than starting it and discovering the device afterwards.
+        device, source = self._effective_device()
+        self._assert_device_allowed(device, source)
+
         _LOG.info(
-            "Wiki embed service not detected — auto-starting on %s:%s …",
-            self._embed_host, self._embed_port,
+            "Wiki embed service not detected — auto-starting on %s:%s (device=%s, via %s) …",
+            self._embed_host, self._embed_port, device, source,
         )
         # Redirect stdout+stderr to the wiki embed log so startup errors
         # (model load failures, CUDA errors, import errors) are captured.
@@ -188,8 +328,15 @@ class WikiRetriever:
         env = os.environ.copy()
         if "WIKI_EMBED_VERBOSE" not in env:
             env["WIKI_EMBED_VERBOSE"] = "0"
+        # Pin the device explicitly rather than letting the child re-resolve it.
+        # The child reads `os.environ.get("WIKI_EMBED_DEVICE") or cfg.device`, so
+        # passing os.environ through unmodified meant an inherited
+        # WIKI_EMBED_DEVICE silently beat brains.yaml. We already validated
+        # `device` above; writing it back makes the value we checked the value
+        # the child uses, with no second resolution step to disagree with.
+        env["WIKI_EMBED_DEVICE"] = device
         try:
-            # The service reads host/port/device from brains.yaml at startup.
+            # The service reads host/port/batch sizes from brains.yaml at startup.
             # cwd=_PROJECT_ROOT ensures rag_v1 is importable as a package.
             self._embed_proc = subprocess.Popen(
                 [sys.executable, "-m", "rag_v1.wiki.mm_embed_service.app"],
@@ -209,8 +356,14 @@ class WikiRetriever:
         # model load + torch.compile warmup which can exceed 60 s on first run.
         deadline = time.monotonic() + self._startup_timeout_s
         while time.monotonic() < deadline:
-            if self._client.ping(timeout_s=2.0):
-                _LOG.info("Wiki embed service ready (port %s).", self._embed_port)
+            health = self._client.health(timeout_s=2.0)
+            if health is not None:
+                # Verify what we spawned actually landed where we told it to.
+                self._check_running_service_device(health)
+                _LOG.info(
+                    "Wiki embed service ready (port %s, device %s).",
+                    self._embed_port, health.get("device", "unknown"),
+                )
                 self._maybe_warmup()
                 return True
             time.sleep(1.0)

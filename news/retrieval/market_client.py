@@ -14,6 +14,7 @@ yfinance is local-first, no API key required, works on Windows.
 from __future__ import annotations
 
 import re
+import threading
 from datetime import date, datetime, timedelta, timezone
 
 from sk_logging import get_logger
@@ -194,10 +195,15 @@ class MarketClient:
 
 # Module-level lazy singleton.
 _client: MarketClient | None = None
+# Double-checked locking — reached from the context injector's news worker
+# thread via the market-query branch of resolve_news_context().
+_client_lock = threading.Lock()
 
 
 def get_market_client() -> MarketClient:
     global _client
     if _client is None:
-        _client = MarketClient()
+        with _client_lock:
+            if _client is None:
+                _client = MarketClient()
     return _client

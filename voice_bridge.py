@@ -169,6 +169,13 @@ def _code_announcement(lang: str) -> str:
 # _TtsFilter — token-by-token state machine
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Sentinels the state machine watches for.  Named rather than inlined because
+# the hold-back arithmetic in _keep_tail() depends on their lengths.
+_THINK_OPEN  = "<think>"
+_THINK_CLOSE = "</think>"
+_CODE_FENCE  = "```"
+
+
 class _TtsFilter:
     """
     Strips content inappropriate for TTS from a streaming LLM response.
@@ -180,7 +187,10 @@ class _TtsFilter:
       IN_CODE         — inside code fence body; suppress content, emit one announcement
 
     A hold-back buffer guards against tags split across token boundaries
-    (e.g. token N = "<thi", token N+1 = "nk>").
+    (e.g. token N = "<thi", token N+1 = "nk>").  llama-server streams roughly a
+    token at a time, so this is the normal case, not an edge case: "</think>"
+    almost never arrives whole.  The hold-back therefore applies in EVERY
+    state, not just NORMAL — see _keep_tail().
 
     Language-specific announcements
     --------------------------------
@@ -189,9 +199,30 @@ class _TtsFilter:
       "An HTML structure is shown in the UI."
       "Python code is shown in the UI."
     Unknown or untagged blocks fall back to "A code block is shown in the UI."
+
+    Fixed 2026-08-04
+    ----------------
+    Two defects made this drop everything after the first <think> or ``` block:
+
+      1. _drain() ran at most one state transition per feed() call, so a chunk
+         that entered a block never processed the rest of itself, and flush()
+         then discarded the remainder.
+      2. _drain_think()/_drain_code() cleared the whole buffer whenever the
+         terminator was not in the *current* chunk, so a split "</think>" could
+         never be reassembled and the filter stayed in IN_THINK for the rest of
+         the turn.
+
+    Since every ARCHITECT turn emits <think> tokens, TTS went silent at the
+    start of thinking and never recovered — invisible in the UI, which renders
+    the unfiltered text.  _drain() now loops until no further progress is
+    possible, and every state holds back a possible partial terminator.
     """
 
-    _HOLD_BACK = len("</think>")   # longest sentinel we must watch for at tail
+    # Longest sentinel we must watch for at the tail.  Openers are "<think>"
+    # (7) and "```" (3); terminators are "</think>" (8) and "```" (3).  A
+    # sentinel split across chunks leaves at most len(sentinel) - 1 of its
+    # characters at the end of the buffer, so holding back 7 covers all four.
+    _HOLD_BACK = len(_THINK_CLOSE) - 1
 
     def __init__(self) -> None:
         self._buf:              str  = ""
@@ -230,29 +261,50 @@ class _TtsFilter:
     # ── Internal drain loop ──────────────────────────────────────────────────
 
     def _drain(self) -> str:
+        """
+        Run the state machine until it can make no further progress.
+
+        Each _drain_* helper returns True when it completed a state transition
+        (so the loop should run again in the new state) and False when it needs
+        more input.  Looping — rather than breaking after the first transition —
+        is what lets a single chunk containing a whole "<think>…</think>After"
+        sequence emit the text that follows it.
+        """
         output: list[str] = []
-        while self._buf:
+        while True:
             if self._in_think:
-                if self._drain_think():
-                    continue              # exited think block — re-enter normal
-                break
+                if not self._drain_think():
+                    break
             elif self._in_code_header:
-                if self._drain_code_header():
-                    continue              # collected lang tag — enter code body
-                break
+                if not self._drain_code_header():
+                    break
             elif self._in_code:
-                if self._drain_code(output):
-                    continue              # exited code block — re-enter normal
-                break
+                if not self._drain_code(output):
+                    break
             else:
-                output.extend(self._drain_normal())
-                break                     # _drain_normal holds or consumes all
+                if not self._drain_normal(output):
+                    break
         return "".join(output)
 
-    def _drain_normal(self) -> list[str]:
-        """NORMAL state: look for <think> or ``` openers in buffer."""
-        t_pos = self._buf.find("<think>")
-        c_pos = self._buf.find("```")
+    def _keep_tail(self) -> None:
+        """
+        Discard the buffer except a tail that could be a partial sentinel.
+
+        Called from the suppressing states (IN_THINK / IN_CODE), where the
+        content itself is thrown away but a terminator straddling the chunk
+        boundary must still be reassembled on the next feed().
+        """
+        self._buf = self._buf[-self._HOLD_BACK:] if self._HOLD_BACK else ""
+
+    def _drain_normal(self, output: list[str]) -> bool:
+        """
+        NORMAL state: look for <think> or ``` openers in buffer.
+
+        Returns True when a block was entered (state changed), False when the
+        buffer held no opener and we are waiting for more input.
+        """
+        t_pos = self._buf.find(_THINK_OPEN)
+        c_pos = self._buf.find(_CODE_FENCE)
 
         first = min(
             t_pos if t_pos >= 0 else len(self._buf),
@@ -261,33 +313,37 @@ class _TtsFilter:
 
         if first == len(self._buf):
             # No opener found — emit all but the hold-back tail
-            safe   = max(0, len(self._buf) - self._HOLD_BACK)
-            result = [self._buf[:safe]]
+            safe = max(0, len(self._buf) - self._HOLD_BACK)
+            if safe:
+                output.append(self._buf[:safe])
             self._buf = self._buf[safe:]
-            return result
+            return False
 
         # Emit clean text before the opener
-        result = [self._buf[:first]] if first > 0 else []
+        if first > 0:
+            output.append(self._buf[:first])
 
         if t_pos >= 0 and t_pos == first:
             self._in_think = True
-            self._buf      = self._buf[t_pos + len("<think>"):]
+            self._buf      = self._buf[t_pos + len(_THINK_OPEN):]
         else:
             # Enter code-header state to collect the language tag
             self._in_code_header = True
             self._code_lang      = ""
-            self._buf            = self._buf[c_pos + 3:]   # skip opening ```
+            self._buf            = self._buf[c_pos + len(_CODE_FENCE):]
 
-        return result
+        return True
 
     def _drain_think(self) -> bool:
         """IN_THINK state: discard until </think>. Returns True when block ended."""
-        end = self._buf.find("</think>")
+        end = self._buf.find(_THINK_CLOSE)
         if end >= 0:
             self._in_think = False
-            self._buf      = self._buf[end + len("</think>"):]
+            self._buf      = self._buf[end + len(_THINK_CLOSE):]
             return True
-        self._buf = ""   # discard all — still inside think block
+        # Still inside the block: drop the content but keep a possible partial
+        # "</think>" so a terminator split across tokens can reassemble.
+        self._keep_tail()
         return False
 
     def _drain_code_header(self) -> bool:
@@ -318,14 +374,16 @@ class _TtsFilter:
         if not self._code_announced:
             output.append(_code_announcement(self._code_lang))
             self._code_announced = True
-        end = self._buf.find("```")
+        end = self._buf.find(_CODE_FENCE)
         if end >= 0:
             self._in_code        = False
             self._code_announced = False
             self._code_lang      = ""
-            self._buf            = self._buf[end + 3:]    # skip closing ```
+            self._buf            = self._buf[end + len(_CODE_FENCE):]  # skip closing ```
             return True
-        self._buf = ""   # discard all — still inside code block
+        # Still inside the block: drop the body but keep a possible partial
+        # closing fence so a "```" split across tokens can reassemble.
+        self._keep_tail()
         return False
 
 

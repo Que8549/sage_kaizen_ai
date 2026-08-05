@@ -26,6 +26,7 @@ matching the existing <search_context> pattern.
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -348,12 +349,17 @@ class NewsResolver:
 # Module-level lazy singleton
 # ---------------------------------------------------------------------------
 _resolver: NewsResolver | None = None
+# Double-checked locking — resolve_news_context() runs on the context
+# injector's news worker thread, concurrently with the other four fetches.
+_resolver_lock = threading.Lock()
 
 
 def get_news_resolver() -> NewsResolver:
     global _resolver
     if _resolver is None:
-        _resolver = NewsResolver()
+        with _resolver_lock:
+            if _resolver is None:
+                _resolver = NewsResolver()
     return _resolver
 
 

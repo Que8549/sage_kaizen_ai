@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import atexit
+import copy
 import logging
 import logging.handlers
 import os
@@ -131,11 +132,37 @@ class _BoundedQueueHandler(logging.handlers.QueueHandler):
     a stalled DB. The stock QueueHandler's default unbounded queue would
     otherwise be an unbounded memory leak in the producer process during a
     sustained outage.
+
+    prepare() is overridden — see below.
     """
 
     def __init__(self, q: "queue.Queue[logging.LogRecord | None]") -> None:
         super().__init__(q)
         self.dropped = 0
+
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        """
+        Hand the consumer a record that still has its exc_info.
+
+        The stock QueueHandler.prepare() formats the record and then sets
+        args/exc_info/exc_text/stack_info to None, because its design target is
+        a *cross-process* queue where those attributes may not be picklable —
+        the formatted traceback survives only as text folded into record.msg.
+
+        That is wrong for this handler. Our queue is in-process (one consumer
+        thread, no pickling), and PostgresLogHandler._row() reads
+        record.exc_info to populate the dedicated `exception` column. With the
+        stock prepare(), exc_info was always None by the time _row() saw it, so
+        that column was **always NULL** and every traceback ended up appended to
+        `description` instead — silently truncated at _DESCRIPTION_CAP, and
+        invisible to any query filtering on `exception`. (Verified 2026-08-04;
+        the behaviour is documented in the stdlib, not a bug in it.)
+
+        We shallow-copy so the record we enqueue is not the same object the
+        sibling RotatingFileHandler is formatting, then leave every attribute
+        intact. Formatting cost moves off the calling thread as a side benefit.
+        """
+        return copy.copy(record)
 
     def enqueue(self, record: logging.LogRecord) -> None:
         try:
