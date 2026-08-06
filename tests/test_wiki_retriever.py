@@ -26,6 +26,28 @@ from rag_v1.wiki.wiki_retriever import DisplayGpuRefused
 # Fixtures
 # ---------------------------------------------------------------------------
 
+def _mark_index_present(r, present: bool = True) -> None:
+    """Pin the vector-index guard's cached answer, skipping the catalog query."""
+    r._index_present = present
+    r._index_checked_at = time.monotonic()
+
+
+def _fake_conn(fetchone=None, fetchall=None):
+    """A conn_ctx double returning a fixed row / rowset."""
+    cursor = MagicMock()
+    cursor.execute.return_value = cursor
+    cursor.fetchone.return_value = fetchone
+    cursor.fetchall.return_value = fetchall or []
+    cursor.__enter__ = MagicMock(return_value=cursor)
+    cursor.__exit__ = MagicMock(return_value=False)
+
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    return conn, cursor
+
+
 # A healthy /health payload from a service correctly loaded on the compute GPU.
 HEALTHY = {"status": "ok", "device": "cuda:1", "model": "jina-clip-v2", "loaded": True}
 # The same, but loaded on the display GPU — must be refused.
@@ -248,6 +270,10 @@ class TestDisplayGpuGuard:
 
     def test_search_degrades_gracefully_on_refusal(self, retriever):
         """The guard is loud in logs but must never break a chat turn."""
+        # The vector-index guard runs first and would otherwise short-circuit
+        # before the display-GPU guard is ever reached; this test is about the
+        # latter, so declare the index present.
+        _mark_index_present(retriever)
         retriever._client.health.return_value = ON_DISPLAY_GPU
 
         # context_injector._fetch_wiki_result wraps search() in try/except;
@@ -382,3 +408,250 @@ class TestGetImages:
     def test_returns_empty_for_empty_bundle_ids(self, retriever):
         result = retriever._get_images(qvec=[0.0] * 1024, bundle_ids=[], top_images=3)
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Vector-index guard
+#
+# Without an ANN index, one search() is a full scan of a ~3.5 TB table that
+# outlives its caller by 20+ minutes (measured 2026-08-06). ingest drops the
+# index for the duration of every bulk run, so this is a routine state, not an
+# exotic one, and the guard has to be right.
+# ---------------------------------------------------------------------------
+
+class TestVectorIndexCaching:
+    def test_positive_result_is_cached(self, retriever):
+        conn, _ = _fake_conn(fetchall=_indexdef_rows(VECTOR_DEF))
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn) as ctx:
+            assert retriever._vector_index_ready() is True
+            assert retriever._vector_index_ready() is True
+        assert ctx.call_count == 1
+
+    def test_negative_result_is_not_cached_forever(self, retriever):
+        # A rebuild finishing must not require an app restart to be noticed.
+        conn, _ = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn) as ctx:
+            assert retriever._vector_index_ready() is False
+            retriever._index_checked_at -= 10_000  # simulate the interval passing
+            assert retriever._vector_index_ready() is False
+        assert ctx.call_count == 2
+
+    def test_negative_result_is_cached_within_the_interval(self, retriever):
+        # A rebuild takes days; polling pg_index on every turn is pointless.
+        conn, _ = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn) as ctx:
+            for _ in range(5):
+                assert retriever._vector_index_ready() is False
+        assert ctx.call_count == 1
+
+    def test_recovers_when_the_index_reappears(self, retriever):
+        conn_absent, _ = _fake_conn(fetchall=[])
+        conn_present, _ = _fake_conn(fetchall=_indexdef_rows(VECTOR_DEF))
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn_absent):
+            assert retriever._vector_index_ready() is False
+        retriever._index_checked_at -= 10_000
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn_present):
+            assert retriever._vector_index_ready() is True
+
+    def test_catalog_error_disables_without_caching(self, retriever):
+        # Fail closed: guessing "present" risks the very scan this prevents.
+        # Not cached, so a transient blip does not disable wiki for 5 minutes.
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", side_effect=OSError("down")):
+            assert retriever._vector_index_ready() is False
+        assert retriever._index_present is None
+
+    def test_warns_once_per_transition_not_once_per_turn(self, retriever):
+        conn, _ = _fake_conn(fetchall=[])
+        with (
+            patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn),
+            patch("rag_v1.wiki.wiki_retriever._LOG") as log,
+        ):
+            for _ in range(4):
+                retriever._vector_index_ready()
+                retriever._index_checked_at -= 10_000
+        assert log.warning.call_count == 1
+
+    def test_is_thread_safe(self, retriever):
+        # context_injector calls this from a worker pool.
+        import threading
+        conn, _ = _fake_conn(fetchall=_indexdef_rows(VECTOR_DEF))
+        results: list[bool] = []
+
+        def _run():
+            results.append(retriever._vector_index_ready())
+
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn) as ctx:
+            threads = [threading.Thread(target=_run) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        assert all(results) and len(results) == 8
+        assert ctx.call_count == 1
+
+
+class TestSearchShortCircuit:
+    def test_search_returns_empty_when_index_missing(self, retriever):
+        _mark_index_present(retriever, False)
+        result = retriever.search("what is a snail")
+        assert result.empty is True
+        assert result.chunks == []
+
+    def test_search_does_not_start_the_embed_service_when_index_missing(self, retriever):
+        # Starting jina-clip-v2 costs ~3.2 GB VRAM and up to 90 s of cold
+        # torch.compile warmup, on the GPU a concurrent ingest is using.
+        _mark_index_present(retriever, False)
+        with patch.object(retriever, "_ensure_service") as ensure:
+            retriever.search("what is a snail")
+        ensure.assert_not_called()
+
+    def test_search_does_not_embed_the_query_when_index_missing(self, retriever):
+        _mark_index_present(retriever, False)
+        retriever._client.embed_text.reset_mock()
+        retriever.search("what is a snail")
+        retriever._client.embed_text.assert_not_called()
+
+    def test_search_proceeds_when_index_present(self, retriever):
+        _mark_index_present(retriever, True)
+        with patch.object(retriever, "_ensure_service", return_value=False) as ensure:
+            retriever.search("what is a snail")
+        ensure.assert_called_once()
+
+
+class TestChunkQueryTimeout:
+    def test_statement_timeout_is_set_on_the_vector_query(self, retriever):
+        from rag_v1.wiki.wiki_retriever import _WIKI_QUERY_TIMEOUT_MS
+        conn, _ = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            retriever._get_chunks([0.0] * 1024, top_k=5)
+        executed = " | ".join(str(c[0][0]) for c in conn.execute.call_args_list)
+        assert f"SET statement_timeout = {_WIKI_QUERY_TIMEOUT_MS}" in executed
+
+    def test_timeout_is_below_the_context_injector_deadline(self):
+        # context_injector abandons the future at 30 s but Postgres keeps
+        # scanning; the backend must give up first or the orphan outlives it.
+        from rag_v1.wiki.wiki_retriever import _WIKI_QUERY_TIMEOUT_MS
+        assert _WIKI_QUERY_TIMEOUT_MS < 30_000
+
+    def test_ef_search_is_still_applied(self, retriever):
+        conn, _ = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            retriever._get_chunks([0.0] * 1024, top_k=5)
+        executed = " | ".join(str(c[0][0]) for c in conn.execute.call_args_list)
+        assert "hnsw.ef_search" in executed
+
+
+# ---------------------------------------------------------------------------
+# halfvec vs vector index detection
+#
+# pgvector only uses a halfvec index when the query casts exactly as the index
+# expression does. Detecting the wrong kind means the index is silently ignored
+# and the query falls back to a 3.5 TB sequential scan -- with the guard now
+# reporting "index present", which is worse than having no index at all.
+# ---------------------------------------------------------------------------
+
+def _indexdef_rows(*defs):
+    return [{"def": d} for d in defs]
+
+
+HALFVEC_DEF = (
+    "CREATE INDEX p000_hv_hnsw ON public.wiki_chunks_p000 "
+    "USING hnsw (((embedding)::halfvec(1024)) halfvec_cosine_ops)"
+)
+VECTOR_DEF = (
+    "CREATE INDEX hnsw_wiki_chunks_embedding_cos ON public.wiki_chunks "
+    "USING hnsw (embedding vector_cosine_ops)"
+)
+
+
+class TestIndexKindDetection:
+    def test_detects_halfvec_expression_index(self, retriever):
+        conn, _ = _fake_conn(fetchall=_indexdef_rows(HALFVEC_DEF))
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            assert retriever._query_index_kind() == "halfvec"
+
+    def test_detects_plain_vector_index(self, retriever):
+        conn, _ = _fake_conn(fetchall=_indexdef_rows(VECTOR_DEF))
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            assert retriever._query_index_kind() == "vector"
+
+    def test_returns_none_when_no_index(self, retriever):
+        conn, _ = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            assert retriever._query_index_kind() is None
+
+    def test_ignores_ann_index_on_a_different_column(self, retriever):
+        # An hnsw index exists, but not on embedding -- it cannot serve this query.
+        other = ("CREATE INDEX x ON public.wiki_chunks USING hnsw "
+                 "(title_vec vector_cosine_ops)")
+        conn, _ = _fake_conn(fetchall=_indexdef_rows(other))
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            assert retriever._query_index_kind() is None
+
+    def test_prefers_halfvec_when_both_exist(self, retriever):
+        # Mid-migration both can be present; halfvec is the cheaper probe and
+        # the intended destination.
+        conn, _ = _fake_conn(fetchall=_indexdef_rows(VECTOR_DEF, HALFVEC_DEF))
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            assert retriever._query_index_kind() == "halfvec"
+
+    def test_uses_indexdef_not_an_attribute_join(self, retriever):
+        # An expression index stores 0 in indkey, so joining pg_attribute would
+        # report the halfvec index -- the one the migration builds -- as absent.
+        conn, cursor = _fake_conn(fetchall=_indexdef_rows(HALFVEC_DEF))
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            retriever._query_index_kind()
+        sql = cursor.execute.call_args[0][0]
+        assert "pg_get_indexdef" in sql
+        assert "pg_attribute" not in sql
+
+    def test_ready_records_the_kind(self, retriever):
+        conn, _ = _fake_conn(fetchall=_indexdef_rows(HALFVEC_DEF))
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            assert retriever._vector_index_ready() is True
+        assert retriever._index_kind == "halfvec"
+
+    def test_ready_is_false_when_kind_is_none(self, retriever):
+        conn, _ = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            assert retriever._vector_index_ready() is False
+        assert retriever._index_kind is None
+
+
+class TestChunkSqlMatchesIndexKind:
+    def test_halfvec_index_emits_halfvec_casts(self, retriever):
+        from rag_v1.wiki.wiki_retriever import _WIKI_EMBED_DIMS
+        retriever._index_kind = "halfvec"
+        conn, cursor = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            retriever._get_chunks([0.0] * 1024, top_k=5)
+        sql = cursor.execute.call_args[0][0]
+        assert f"halfvec({_WIKI_EMBED_DIMS})" in sql
+        assert "::vector" not in sql
+
+    def test_vector_index_emits_plain_vector_casts(self, retriever):
+        retriever._index_kind = "vector"
+        conn, cursor = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            retriever._get_chunks([0.0] * 1024, top_k=5)
+        sql = cursor.execute.call_args[0][0]
+        assert "::vector" in sql
+        assert "halfvec" not in sql
+
+    def test_order_by_matches_the_select_expression(self, retriever):
+        # The ORDER BY is what the index has to match; a SELECT-only cast would
+        # compute the distance correctly and still scan sequentially.
+        retriever._index_kind = "halfvec"
+        conn, cursor = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            retriever._get_chunks([0.0] * 1024, top_k=5)
+        sql = cursor.execute.call_args[0][0]
+        order_by = sql.split("ORDER BY")[1]
+        assert "halfvec" in order_by
+
+    def test_defaults_to_plain_vector_when_kind_unknown(self, retriever):
+        retriever._index_kind = None
+        conn, cursor = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            retriever._get_chunks([0.0] * 1024, top_k=5)
+        assert "::vector" in cursor.execute.call_args[0][0]

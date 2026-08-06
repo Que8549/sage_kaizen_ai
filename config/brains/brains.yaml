@@ -197,15 +197,32 @@ architect:
 
     # KV prefix cache in host RAM — stores the most-recently computed KV prefix
     # so the next turn with the same system-prompt + RAG prefix skips re-prefilling.
-    # 256 MiB covers the full system prompt + typical RAG injection.
-    cache_ram: 256
+    #
+    # Was 256 MiB, which sized the cache for a pure-Transformer model whose
+    # prompt state grows with token count.  Qwen3.6-27B is not that: its 48
+    # DeltaNet layers carry a FIXED-SIZE recurrent state, so a snapshot costs
+    # ~320-470 MiB no matter how short the prompt.  Measured 2026-08-06 — the
+    # server rejected every single write with
+    #     "prompt state size 469.951 MiB exceeds cache size limit 256.000 MiB, skipping"
+    # on 40-token prompts.  The cache had never stored anything since the model
+    # swap, so the documented ~93% cache-hit TTFT reduction was not happening.
+    # 4096 MiB holds ~9-12 snapshots and costs host RAM only (192 GB installed);
+    # upstream's own default is now 8192.
+    cache_ram: 4096
 
     # Aggressive slot-reuse for the single ARCHITECT slot (parallel=1).
     # 0.10 is the llama.cpp default as of b9307; setting explicitly for clarity.
     slot_prompt_similarity: 0.10
 
     fit: true
-    fit_target: 2048  # 2 GB free-VRAM floor; ~5.15 GB actual headroom at q8_0 KV
+    # --fit-target is a "target margin per device": the free VRAM `fit` aims to
+    # LEAVE on each device, not a floor it enforces afterwards.  A single value
+    # is broadcast across all devices (upstream: "single value is broadcast").
+    # It is measured once, at this server's startup — anything that allocates on
+    # the same GPU afterwards eats straight into it, which is exactly what
+    # BGE-M3 used to do here (see the embed block).  ARCHITECT now has CUDA0 to
+    # itself, so 2048 MiB is actually delivered.
+    fit_target: 2048
     fit_ctx: 131072
 
     n_predict: -1             # unlimited — thinking mode can generate thousands of tokens;
@@ -277,6 +294,15 @@ architect:
     # Checkpoints work correctly with this architecture; see swa_full note above.
     checkpoint_min_step: 4096
 
+    # Prometheus metrics endpoint (GET /metrics) — disabled by default upstream.
+    # Enabled here for the speculative-decoding counters added in b10298
+    # (upstream #26389): spec_decode_num_draft_tokens_total /
+    # _num_accepted_tokens_total / _num_drafts_total.  These are the only way to
+    # measure MTP draft acceptance without scraping the server log, and
+    # scripts/run_mtp.py refuses to run without them.  Cost is a counter
+    # increment per decode step; it does not touch the hot path.
+    metrics: true
+
     log_colors: false
     log_timestamps: true
     log_prefix: true
@@ -285,8 +311,24 @@ architect:
 
 # -----------------------------------------------------------------------------
 # Embedding Server — BGE-M3 FP16 — port 8020
-# GPU: RTX 5090 (CUDA0, 32 GB VRAM)
-# Shares CUDA0 with ARCHITECT; starts first and stays resident
+# GPU: Gigabyte RTX 5090 OC (CUDA1, 32 GB VRAM)
+#
+# Moved off CUDA0 on 2026-08-06.  It had shared the display GPU with ARCHITECT,
+# and the two together left the card driving three monitors with **106 MiB
+# free** (measured, app idle).  Two problems, not one:
+#   1. ARCHITECT's `fit` samples free VRAM at ITS startup and reserves
+#      fit_target MiB.  Both servers start in the same second (measured:
+#      PIDs 2592 and 36100 at 16:50:14), so BGE-M3 then consumed the very
+#      reserve ARCHITECT had just set aside.  The documented 2 GB floor was
+#      never actually delivered.
+#   2. A display GPU at 99.7% is one browser video-decode spike away from an
+#      allocation failure or a driver eviction storm.
+# Measured footprint: 1152 MiB.  CUDA1 had 24 GB free.
+#
+# On CUDA1 the ordering problem disappears by construction: ensure_q5_running
+# already starts embed BEFORE the FAST brain, so FAST's own `fit` sees the
+# true free VRAM.  Wiki-embed A also lives here but only starts on the first
+# wiki-RAG query, and wiki ingest never runs concurrently with the app.
 # -----------------------------------------------------------------------------
 embed:
   exe: "F:/Projects/sage_kaizen_ai/llama.cpp/build/bin/Release/llama-server.exe"
@@ -304,12 +346,14 @@ embed:
     embeddings: true          # enable the /embeddings endpoint
     pooling: "mean"           # mean pooling over token embeddings (BGE-M3 standard)
 
-    device: "CUDA0"
+    device: "CUDA1"
     n_gpu_layers: "all"
 
     # Process scheduling priority (same flag as ARCHITECT).
-    # ARCHITECT uses prio: 2 (high); embed gets prio: 1 (medium) so that
-    # ARCHITECT generation is never preempted by embedding requests on CUDA0.
+    # FAST uses prio: 1 and now shares CUDA1 with this server; embed stays at
+    # prio: 1 so neither starves the other.  (Before the 2026-08-06 move this
+    # note was about not preempting ARCHITECT on CUDA0 — ARCHITECT no longer
+    # shares a GPU with any other llama-server.)
     prio: 1
 
     # BGE-M3 produces 1024-dimensional embeddings.

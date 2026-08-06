@@ -28,6 +28,9 @@ from typing import Any
 import yaml
 
 from openai_client import HttpTimeouts, health_check
+from sk_logging import get_logger
+
+_LOG = get_logger("sage_kaizen.server_manager")
 
 
 # ---------------------------
@@ -371,6 +374,74 @@ def _wait_for_ready(
 # Command building from YAML config                                             #
 # ──────────────────────────────────────────────────────────────────────────── #
 
+_CUDA_DEVICE_RE = re.compile(r"^CUDA(\d+)$", re.IGNORECASE)
+
+
+def _plan_cuda_isolation(device: Any) -> tuple[str, str] | None:
+    """
+    Translate a physical device spec into (CUDA_VISIBLE_DEVICES, renumbered spec).
+
+    `--device CUDA1` restricts where llama.cpp *places* tensors, but not which
+    devices it *initialises*: every llama-server still builds a CUDA context on
+    every visible GPU. Measured 2026-08-06 with three servers running — each
+    held a context on all three cards, ~231 MiB apiece, including 694 MiB on the
+    RTX 5080 that this app never uses at all.
+
+    `CUDA_VISIBLE_DEVICES` is the documented way to actually hide them
+    (upstream: "if you set it, llama.cpp only sees the specified GPUs"). The
+    catch is that hiding renumbers what is left: with CUDA_VISIBLE_DEVICES=1 the
+    surviving GPU is called CUDA0 inside the process, so a literal
+    `--device CUDA1` would fail. Translating here keeps brains.yaml written in
+    *physical* device numbers — which is what makes it readable, and what every
+    comment and invariant in it assumes — while the process still sees one GPU.
+
+    Returns None for anything not recognisably CUDA (a CPU-only brain like the
+    summarizer, or a non-CUDA backend), leaving those spawns untouched.
+
+    Note this is NOT the approach sage_kaizen_ai_ingest uses. It tried
+    CUDA_VISIBLE_DEVICES and reverted: it broke jina-clip-v2's
+    trust_remote_code paths, which passed /health and then returned 500 on real
+    inference (its wiki_ingest.py documents this). That is a PyTorch failure
+    mode; llama-server is C++ and was verified here before this was written —
+    a BGE-M3 server started under CUDA_VISIBLE_DEVICES=1 with --device CUDA0
+    served real embeddings and held a context on exactly one GPU.
+    """
+    if not isinstance(device, str):
+        return None
+    parts = [p.strip() for p in device.split(",") if p.strip()]
+    indices: list[str] = []
+    for part in parts:
+        match = _CUDA_DEVICE_RE.match(part)
+        if match is None:
+            return None
+        indices.append(match.group(1))
+    if not indices:
+        return None
+    # After hiding, the survivors are renumbered 0..n-1 in the order listed.
+    return ",".join(indices), ",".join(f"CUDA{i}" for i in range(len(indices)))
+
+
+def _child_env(brain: BrainConfig) -> dict[str, str]:
+    """
+    Environment for a spawned llama-server: the parent's, plus GPU isolation.
+
+    CUDA_DEVICE_ORDER is pinned to PCI_BUS_ID rather than inherited. The index
+    in CUDA_VISIBLE_DEVICES only means the card brains.yaml names if the CUDA
+    runtime enumerates in PCI order; the default is FASTEST_FIRST, under which
+    the mapping is a guess. It happens to be set as a user-level variable on
+    this machine, but relying on that would make a correct GPU assignment
+    depend on an environment variable nothing in this repo controls — and the
+    failure mode is ARCHITECT silently landing on the display GPU.
+    """
+    env = dict(os.environ)
+    plan = _plan_cuda_isolation(brain.server.get("device"))
+    if plan is not None:
+        visible, _ = plan
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        env["CUDA_VISIBLE_DEVICES"] = visible
+    return env
+
+
 def _build_argv(brain: BrainConfig) -> list:
     """
     Build the full subprocess argument list from a BrainConfig.
@@ -386,14 +457,23 @@ def _build_argv(brain: BrainConfig) -> list:
         false (or omit) to leave the positive default in effect.
       - All other keys         → --flag <value>
 
+    The `device` key is rewritten to its post-isolation name — see
+    _plan_cuda_isolation. brains.yaml keeps saying CUDA1; the process is handed
+    CUDA0 and shown only that card.
+
     --log-file is always appended last (project invariant: never rely on
     stdout/stderr redirection for long-running servers).
     """
     argv: list = [str(brain.exe), "--model", str(brain.model)]
+    isolation = _plan_cuda_isolation(brain.server.get("device"))
 
     for yaml_key, value in brain.server.items():
         cli_name = yaml_key.replace("_", "-")
         flag = f"--{cli_name}"
+
+        if yaml_key == "device" and isolation is not None:
+            argv.extend([flag, isolation[1]])
+            continue
 
         if isinstance(value, bool):
             if cli_name in _BOOL_ONOFF:
@@ -439,6 +519,28 @@ def start_server_from_config(brain: BrainConfig) -> tuple[bool, str]:
 
     brain.log.parent.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%a %m/%d/%Y %H:%M:%S", time.localtime())
+    isolation = _plan_cuda_isolation(brain.server.get("device"))
+
+    # Record the physical->visible GPU mapping through sk_logging, NOT into the
+    # header below. llama-server opens --log-file in truncating mode, so
+    # anything written to that path before the spawn is erased the moment the
+    # child starts — verified 2026-08-06: not one "START (yaml)" header has ever
+    # survived in logs/*.log. The header is still written because it is the only
+    # thing that captures early CUDA stderr on a spawn that dies before the
+    # child's logger exists; it just cannot be relied on afterwards.
+    #
+    # This matters more than it used to: after isolation the server's own log
+    # only ever says "CUDA0", so this record is the only thing tying a run to
+    # the physical card it used.
+    if isolation is not None:
+        _LOG.info(
+            "%s launch | device=%s | CUDA_VISIBLE_DEVICES=%s | --device %s",
+            brain.name, brain.server.get("device"), isolation[0], isolation[1],
+        )
+    else:
+        _LOG.info("%s launch | no CUDA isolation (device=%s)",
+                  brain.name, brain.server.get("device"))
+
     header = (
         f"\n==== {brain.name.upper()} START (yaml) {ts} ====\n"
         f"EXE={brain.exe}\n"
@@ -470,6 +572,7 @@ def start_server_from_config(brain: BrainConfig) -> tuple[bool, str]:
                 stdin=subprocess.DEVNULL,
                 creationflags=creationflags,
                 close_fds=False,
+                env=_child_env(brain),
             )
         finally:
             log_fh.close()  # parent closes its copy; child keeps its own fd

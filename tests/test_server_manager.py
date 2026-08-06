@@ -12,6 +12,7 @@ exactly the kind of thing a well-meaning refactor breaks:
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -24,6 +25,8 @@ from server_manager import (
     BrainConfig,
     ManagedServers,
     _build_argv,
+    _child_env,
+    _plan_cuda_isolation,
     _load_brain_config,
     _log_has_fatal_error,
     _tail,
@@ -75,6 +78,120 @@ def yaml_file(tmp_path) -> Path:
     p = tmp_path / "brains.yaml"
     p.write_text(yaml.safe_dump(data), encoding="utf-8")
     return p
+
+
+# ---------------------------------------------------------------------------
+# CUDA isolation — _plan_cuda_isolation / _child_env
+#
+# These decide which physical GPU a brain lands on. The failure mode if the
+# translation is wrong is ARCHITECT silently loading onto the display GPU, so
+# the mapping is asserted rather than assumed.
+# ---------------------------------------------------------------------------
+
+def _brain_on(tmp_path, device) -> BrainConfig:
+    return BrainConfig(
+        name="t", exe=tmp_path / "e", model=tmp_path / "m", log=tmp_path / "l",
+        startup_timeout_s=1.0,
+        server={"port": 8012, "device": device, "ctx_size": 4096},
+    )
+
+
+class TestPlanCudaIsolation:
+    def test_single_device_is_hidden_and_renumbered(self):
+        # CUDA1 physical -> the process sees one GPU, called CUDA0.
+        assert _plan_cuda_isolation("CUDA1") == ("1", "CUDA0")
+
+    def test_cuda0_maps_to_itself(self):
+        assert _plan_cuda_isolation("CUDA0") == ("0", "CUDA0")
+
+    def test_high_index_device(self):
+        assert _plan_cuda_isolation("CUDA2") == ("2", "CUDA0")
+
+    def test_multiple_devices_renumber_in_listed_order(self):
+        # Order matters: CUDA_VISIBLE_DEVICES=2,0 makes physical 2 become CUDA0.
+        assert _plan_cuda_isolation("CUDA2,CUDA0") == ("2,0", "CUDA0,CUDA1")
+
+    def test_whitespace_between_devices_is_tolerated(self):
+        assert _plan_cuda_isolation("CUDA0, CUDA1") == ("0,1", "CUDA0,CUDA1")
+
+    def test_case_insensitive(self):
+        assert _plan_cuda_isolation("cuda1") == ("1", "CUDA0")
+
+    def test_non_cuda_backend_is_left_alone(self):
+        # Hiding CUDA devices for a Vulkan/CPU spawn would be meaningless at
+        # best and wrong at worst.
+        assert _plan_cuda_isolation("Vulkan0") is None
+
+    def test_mixed_backends_are_left_alone(self):
+        assert _plan_cuda_isolation("CUDA0,Vulkan0") is None
+
+    def test_missing_device_is_left_alone(self):
+        # The CPU-only summarizer has no device key at all.
+        assert _plan_cuda_isolation(None) is None
+
+    def test_non_string_device_is_left_alone(self):
+        assert _plan_cuda_isolation(0) is None
+
+    def test_empty_string_is_left_alone(self):
+        assert _plan_cuda_isolation("") is None
+
+    def test_bare_cuda_without_index_is_left_alone(self):
+        assert _plan_cuda_isolation("CUDA") is None
+
+
+class TestChildEnv:
+    def test_sets_visible_devices_to_the_physical_index(self, tmp_path):
+        env = _child_env(_brain_on(tmp_path, "CUDA1"))
+        assert env["CUDA_VISIBLE_DEVICES"] == "1"
+
+    def test_pins_pci_bus_order(self, tmp_path):
+        # Without PCI_BUS_ID the runtime default is FASTEST_FIRST, under which
+        # "1" is not reliably the card brains.yaml means.
+        env = _child_env(_brain_on(tmp_path, "CUDA1"))
+        assert env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+
+    def test_overrides_an_inherited_device_order(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CUDA_DEVICE_ORDER", "FASTEST_FIRST")
+        env = _child_env(_brain_on(tmp_path, "CUDA1"))
+        assert env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+
+    def test_inherits_the_parent_environment(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SAGE_KAIZEN_TEST_MARKER", "kept")
+        env = _child_env(_brain_on(tmp_path, "CUDA1"))
+        assert env["SAGE_KAIZEN_TEST_MARKER"] == "kept"
+
+    def test_cpu_only_brain_gets_no_isolation(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        b = BrainConfig("s", tmp_path / "e", tmp_path / "m", tmp_path / "l",
+                        1.0, {"port": 8013, "n_gpu_layers": 0})
+        assert "CUDA_VISIBLE_DEVICES" not in _child_env(b)
+
+    def test_does_not_mutate_os_environ(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        _child_env(_brain_on(tmp_path, "CUDA1"))
+        assert "CUDA_VISIBLE_DEVICES" not in os.environ
+
+
+class TestBuildArgvDeviceTranslation:
+    def test_device_flag_is_renumbered(self, tmp_path):
+        # brains.yaml says CUDA1; the process is shown only that card, where it
+        # is called CUDA0. Passing CUDA1 through verbatim would fail to start.
+        argv = _build_argv(_brain_on(tmp_path, "CUDA1"))
+        assert argv[argv.index("--device") + 1] == "CUDA0"
+
+    def test_device_and_env_agree(self, tmp_path):
+        b = _brain_on(tmp_path, "CUDA2")
+        argv = _build_argv(b)
+        assert argv[argv.index("--device") + 1] == "CUDA0"
+        assert _child_env(b)["CUDA_VISIBLE_DEVICES"] == "2"
+
+    def test_untranslatable_device_passes_through_verbatim(self, tmp_path):
+        argv = _build_argv(_brain_on(tmp_path, "Vulkan0"))
+        assert argv[argv.index("--device") + 1] == "Vulkan0"
+
+    def test_other_flags_are_unaffected(self, tmp_path):
+        argv = _build_argv(_brain_on(tmp_path, "CUDA1"))
+        assert argv[argv.index("--ctx-size") + 1] == "4096"
 
 
 # ---------------------------------------------------------------------------

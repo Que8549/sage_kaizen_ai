@@ -1,0 +1,49 @@
+{
+  "label": "architect-baseline",
+  "model_filename": "E:/unsloth_Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q6_K.gguf",
+  "model_type": "qwen35 27B Q6_K",
+  "model_size_bytes": 22873411584,
+  "build_commit": "fdc3db9b6",
+  "build_number": 9598,
+  "gpu_info": "NVIDIA GeForce RTX 5090, NVIDIA GeForce RTX 5090, NVIDIA GeForce RTX 5080",
+  "flash_attn": 1,
+  "type_k": "q8_0",
+  "type_v": "q8_0",
+  "n_ubatch": 512,
+  "devices": "CUDA0",
+  "measured_at": "2026-08-06T15:49:10Z",
+  "rows": [
+    {
+      "test": "pp512",
+      "n_prompt": 512,
+      "n_gen": 0,
+      "n_depth": 0,
+      "avg_ts": 2846.266655,
+      "stddev_ts": 199.30524
+    },
+    {
+      "test": "tg128",
+      "n_prompt": 0,
+      "n_gen": 128,
+      "n_depth": 0,
+      "avg_ts": 53.961301,
+      "stddev_ts": 1.07014
+    },
+    {
+      "test": "pp512",
+      "n_prompt": 512,
+      "n_gen": 0,
+      "n_depth": 8192,
+      "avg_ts": 2661.591708,
+      "stddev_ts": 70.992313
+    },
+    {
+      "test": "tg128",
+      "n_prompt": 0,
+      "n_gen": 128,
+      "n_depth": 8192,
+      "avg_ts": 53.40782,
+      "stddev_ts": 0.694233
+    }
+  ]
+}
