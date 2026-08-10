@@ -2,6 +2,24 @@
 -- Sage Kaizen: Wikipedia RAG (multimodal) schema
 -- vector(1024), dedicated wiki_* tables
 -- =========================
+--
+-- NOTE (2026-08-10): this file describes wiki_chunks as originally created.
+-- scripts/migrate_wiki_chunks_partitioned.py converts it to a HASH-partitioned
+-- table (32 partitions on page_id), which changes three things here:
+--
+--   * PRIMARY KEY (chunk_id)  ->  (chunk_id, page_id)
+--     PostgreSQL requires a partitioned table's PK to include the partition key.
+--   * hnsw_wiki_chunks_embedding_cos (below)  ->  one halfvec HNSW index per
+--     partition, wiki_chunks_part_pNNN_hv_hnsw, using
+--     (embedding::halfvec(1024)) halfvec_cosine_ops. CREATE INDEX CONCURRENTLY
+--     is not supported on partitioned tables, so it is built per partition.
+--   * uq_wiki_chunks_page_hash, the NOT NULLs and both ON DELETE CASCADE
+--     foreign keys are recreated by that script's --constraints phase, NOT by
+--     this file.
+--
+-- Until --swap has run, this file still matches the live table. After it,
+-- treat the migration script as authoritative for wiki_chunks only; every other
+-- table here is unchanged. See CLAUDE.md §18 and ingest CLAUDE.md §21.
 
 BEGIN;
 

@@ -37,7 +37,7 @@ private eval.**
 | Qwen2.5-Omni-7B Q6_K | FAST brain | 8011 / CUDA1 | TTFT, English-only, audio+vision, router-label discipline |
 | Qwen3.6-27B-MTP Q6_K | ARCHITECT | 8012 / CUDA0 | sustained t/s, reasoning quality, `<think>` contract, 128K ctx |
 | Qwen3-4B Q8_0 | Summarizer | 8013 / CPU | faithfulness to snippets; latency off the critical path |
-| BGE-M3 FP16 | Text embed | 8020 / CUDA0 | recall@k — **re-ingest cost dominates** |
+| BGE-M3 FP16 | Text embed | 8020 / CUDA1 | recall@k — **re-ingest cost dominates** |
 | jina-clip-v2 | Wiki/image embed | 8031 / CUDA1 | recall@k + text↔image shared space |
 | CLAP htsat-unfused | Audio embed | 8040 / CUDA1 | audio recall@k |
 | distil-large-v3.5 | STT (voice) | CPU | WER, latency |
@@ -481,3 +481,128 @@ FAST was not started.
 carries on serving perfectly well, just slower. No test would have caught it;
 no benchmark number would have looked wrong. It was visible only in the log,
 and only because the log was read.
+
+---
+
+## 12. Model review — 2026-08-07
+
+Full review of every model in `brains.yaml` against what is currently available.
+**Nothing is being changed yet:** the wiki_chunks partition migration is running
+and this host's crash root cause is open, so evaluation waits for the migration
+to finish. This section is the queued plan.
+
+### Verdicts
+
+| Service | Model | Verdict |
+|---|---|---|
+| ARCHITECT 8012 | Qwen3.6-27B-MTP Q6_K | **keep** |
+| FAST 8011 | Qwen2.5-Omni-7B Q6_K | **upgrade candidate identified** |
+| Summarizer 8013 | Qwen3-4B Q8_0 (CPU) | keep — off the critical path |
+| Embed 8020 | BGE-M3 FP16 | **do not touch** |
+| Wiki/image 8031 | jina-clip-v2 | **do not touch** |
+| Audio 8040 | CLAP htsat-unfused | **do not touch** |
+| Voice TTS | Kokoro-82M ONNX | **evaluate Qwen3-TTS** |
+| Voice STT | distil-large-v3.5 | keep; minor options exist |
+
+### ARCHITECT: keep
+
+Still current-generation for this workload. Gemma 4 31B ranks higher on public
+leaderboards but has **no MTP head** and a different `<think>` contract —
+swapping trades a *measured* 1.41x speedup at 84.9% acceptance (§10.2) for an
+unmeasured model. The remaining upside is Eagle3 (§6), not a model change.
+
+### FAST: Qwen3-Omni-30B-A3B-Instruct — CLAUDE.md §11 trigger 1 fully confirmed
+
+The blocker is definitively cleared. **llama.cpp's own `docs/multimodal.md`
+lists Qwen3-Omni under "Mixed modalities — audio input, vision input."** That is
+upstream documentation, not a forum claim, and it supersedes the "verify before
+production" hedging in secondary sources.
+
+From `ggml-org/Qwen3-Omni-30B-A3B-Instruct-GGUF`:
+
+```
+Q4_K_M                18.56 GB
+Q8_0                  32.48 GB
+mmproj Q8_0            1.33 GB   <- ONE projector file
+mmproj bf16            2.21 GB
+```
+
+The mmproj is *smaller* than the incumbent's F16 projector (2.64 GB), and there
+is exactly one — consistent with a combined audio+vision encoder.
+
+**Why it is attractive:** 30B total / 3B active MoE, so decode should be faster
+than the current 7B dense despite 4x the parameters. More importantly it should
+fix the incumbent's documented weakness — the mid-response Chinese
+code-switching that currently forces `router.py` to divert *all* creative
+writing to ARCHITECT. Fixing that returns creative work to FAST and reduces
+ARCHITECT load.
+
+**Two risks, to be measured not assumed:**
+
+1. **VRAM, now that BGE-M3 shares CUDA1** (§16 moved it there):
+
+```
+Qwen3-Omni Q4_K_M        18.56 GB
+mmproj Q8_0               1.33 GB
+KV q8_0 @32K             ~1.57 GB   (estimated: 48 layers, 4 KV heads, d=128)
+compute buffer           ~1.00 GB
+FAST subtotal            ~22.5 GB
++ BGE-M3 (measured)       1.15 GB
++ wiki embed A (measured) 3.23 GB
++ CLAP                   ~1.50 GB
+total on CUDA1           ~28.4 GB of 32.6  ->  ~4 GB headroom
+```
+
+   The KV figure assumes Qwen3-30B-A3B geometry and is **not verified for the
+   Omni variant**. Resolve with `run_model_gate.py --brain fast
+   --plan-co-tenants` before committing.
+
+2. **Q4_K_M is the only quant that fits, and MoE is more quantisation-sensitive
+   than dense** — each expert carries fewer parameters, so 4-bit bites harder.
+   This is Q6_K-on-7B-dense versus Q4_K_M-on-3B-active-MoE. **More parameters is
+   not automatically better quality here.** The deterministic scorers (CJK
+   ratio above all) are what settle it.
+
+**Cheapest first step — do this before downloading 18.6 GB:** fetch only the
+**1.33 GB mmproj** and run the Layer-1 gate on it. `evals/gguf_meta.py` reads
+GGUF headers with a few KB of I/O, so it confirms both encoders are present in
+one file for ~1 GB of download instead of 20.
+
+Take **Instruct**, never Thinking: FAST must not think or the routing latency
+model collapses.
+
+### Voice TTS: evaluate Qwen3-TTS
+
+`llama-tts.exe` is present in the local build and
+`PROJECTOR_TYPE_QWEN3TTS_GEN` / `_SPKENC` are compiled in. Qwen3-TTS is 1.7B,
+does 3-second voice cloning across 10 languages, and uses a 12.5 Hz tokenizer
+built for immediate first-packet streaming.
+
+**This does not contradict the "Kokoro GPU was tried and failed" record.** That
+failure was Kokoro under PyTorch/ONNX. Qwen3-TTS runs through llama.cpp's C++
+runtime — a different path entirely, and the same distinction that made
+`CUDA_VISIBLE_DEVICES` safe for llama-server but not for jina-clip-v2 (§16).
+
+Decision metric is unchanged: **time to first audio < 800 ms**, plus subjective
+quality. Voice cloning and multi-language would be new capability, not just a
+swap.
+
+### Embedders: do not touch, and the reason is not quality
+
+Qwen3-Embedding now tops MTEB v2 (~75 vs BGE-M3's ~63). **Ignore that number
+for now.** Changing any embedder invalidates every stored vector, and there are
+**508M wiki chunks** whose migration is running as this is written. §4's rule
+stands: migration cost dominates, a candidate must win recall@5 by >10 points on
+*our own* queries, and it must be proven on a 1-2% sample corpus in a parallel
+table first. jina-clip-v2's shared text-image space is a feature no leaderboard
+score measures.
+
+Revisit only after the wiki corpus is finished, indexed, and stable.
+
+### Order of work, once the migration is done
+
+1. `run_model_gate.py --brain fast --plan-co-tenants` (no download needed)
+2. Fetch the 1.33 GB mmproj; gate it for audio+vision in one file
+3. Only then fetch Q4_K_M; Layer 2 bench + Layer 2b effective rate
+4. Layer 3 scorers, CJK ratio weighted heaviest
+5. Separately: Qwen3-TTS time-to-first-audio against Kokoro

@@ -159,9 +159,22 @@ These are **hard constraints**:
 
 7. **Seven shared modules resolve to THIS repo for both projects** — changing them is a cross-project change (see §13)
 
-8. **PostgreSQL schema migrations for cross-project concerns live in this (main) project**
-   - `log/db/log_schema.sql` (structured logging, §12) follows this rule — run `scripts/setup_log_schema.sql` once as superuser first, then `log/db/log_schema.sql` as `sage`
-   - **Known exception**: `news/db/news_schema.sql` and `news/db/migrations/` live in and are git-tracked by `sage_kaizen_ai_ingest`, not here — a pre-existing precedent from before this rule was made explicit. Don't treat it as license to add new schema files outside this project; it's flagged here rather than silently left inconsistent.
+8. **THE WRITER OWNS THE SCHEMA** (revised 2026-08-10 — this replaces the old
+   "all schema lives in main" rule, which reality had already outgrown)
+   - The app that **writes** a table owns its DDL, its migrations, and its indexes.
+   - **Ingest writes all ingested data** — `wiki_*`, `news_*`/`daily_news`,
+     `rag_chunks`, `image_embeddings`, `audio_embeddings`, `audio_clusters`,
+     `media_files`, `lyrics*`. Ingest owns that schema.
+   - **Main writes** `memory.*` and `public.ratings`. Main owns that schema.
+   - **`log.*` is the one shared-write exception** — both projects insert into it,
+     so main owns it (§12). Exceptions must be named here, never assumed.
+   - **The main app must be able to READ every ingest-owned table at all times.**
+     That is a hard contract, not a courtesy: see §19 for the expand/contract
+     discipline that keeps it true, and the checklist that must be run before
+     any PostgreSQL change.
+   - `news/db/news_schema.sql` living in ingest is no longer an "exception" —
+     it is the rule, correctly applied. Several files in **this** repo are now
+     the misfiled ones; §19 lists them.
 
 ---
 
@@ -348,11 +361,28 @@ Before proposing or applying a FAST brain model change, verify all of the follow
    mmproj is representable. Official GGUFs exist:
    `ggml-org/Qwen3-Omni-30B-A3B-Instruct-GGUF` (Q4_K_M ≈ 18.6 GB).
    **This is the primary upgrade path and it is now open.**
-   Caveats: 30B-A3B is MoE (3B active, so decode should stay fast), but 18.6 GB
-   on CUDA1 *alongside wiki embed A + B and CLAP* is a real VRAM question — run
-   `python scripts/run_model_gate.py --brain fast --plan-co-tenants` before
-   getting excited. Take the **Instruct** variant, not Thinking: FAST must not
-   think, or the routing latency model collapses.
+
+   **Re-confirmed 2026-08-07 from upstream documentation, not inference:**
+   llama.cpp's own `docs/multimodal.md` lists Qwen3-Omni under *"Mixed
+   modalities — audio input, vision input"*. The repo ships **one** mmproj
+   (Q8_0 1.33 GB / bf16 2.21 GB — smaller than the incumbent's 2.64 GB F16),
+   with Q4_K_M at 18.56 GB and Q8_0 at 32.48 GB.
+
+   Caveats, both now sharper than when first written:
+   - **VRAM.** CUDA1 also hosts BGE-M3 since §16 moved it there. Estimated
+     total with all co-tenants is **~28.4 GB of 32.6** — feasible, but the KV
+     figure assumes Qwen3-30B-A3B geometry and is unverified for Omni. Run
+     `python scripts/run_model_gate.py --brain fast --plan-co-tenants` first.
+   - **Q4_K_M is the only quant that fits, and MoE is more quantisation-
+     sensitive than dense** — fewer parameters per expert. This is
+     Q6_K-on-7B-dense vs Q4_K_M-on-3B-active-MoE; more parameters is *not*
+     automatically better quality. The CJK scorer decides it.
+   - Cheapest first step: download **only the 1.33 GB mmproj** and gate it for
+     audio+vision before committing to the 18.6 GB model.
+
+   Take the **Instruct** variant, not Thinking: FAST must not think, or the
+   routing latency model collapses. Full review: `Benchmarking_Kaizen_Models.md`
+   §12. **Deferred until the wiki_chunks migration finishes** — see §17.
 
 2. ✅ **FIRED — Voxtral is supported.** `PROJECTOR_TYPE_VOXTRAL` is present in
    this build. The original blocker was llama.cpp issue #21080 (crash on audio
@@ -921,3 +951,127 @@ The migration requires copying ~3.5 TB (hash partitioning cannot ATTACH an
 existing unpartitioned table). A **partial-index** alternative achieves the same
 per-unit crash tolerance with no rewrite, at the cost of a UNION-ALL query
 shape. See the open question at the end of ingest §21.
+
+### 18.1) `scripts/move_pg_wal_to_nvme.ps1` — REQUIRES ELEVATION
+
+Moves `pg_wal` from the HDD to `E:\pgwal` via a directory junction. Written
+because the copy phase measured **77% disk busy at only 33.7 MB/s with queue
+depth 0.6** on drive I: — seek contention, not bandwidth, with source reads,
+partition writes, TOAST and WAL all on one spindle.
+
+**Must run in an Administrator PowerShell.** Stopping the service and writing
+inside PGDATA both need elevation; an unelevated shell fails with "Cannot open
+'postgresql-x64-18' service". The migration itself does not need elevation —
+only this.
+
+Safety properties: verifies a **clean** shutdown via `pg_controldata` before
+touching anything (moving WAL after an unclean shutdown can destroy segments
+crash recovery needs — non-optional on this host); **copies** before renaming;
+never deletes, leaving `pg_wal_old` in place for manual removal after
+verification; and restores + restarts the service on any failure.
+
+---
+
+## 19) POSTGRESQL CHANGES — KEEPING THE TWO PROJECTS IN SYNC (2026-08-10)
+
+Both projects share **one** PostgreSQL database. That is a deliberate choice, not
+an accident, but it means a schema change in one repo can silently break the
+other — which is exactly what happened on 2026-08-10 (see the case study below).
+This section is the governing process. **The identical section is ingest
+CLAUDE.md §22; if you change one, change both.**
+
+### 19.1 The rule: the writer owns the schema
+
+The app that **writes** a table owns its DDL, migrations and indexes. The other
+app is a **reader** and must never issue DDL against it.
+
+| Owner | Tables | Schema files live in |
+|---|---|---|
+| **ingest** | `wiki_bundles`, `wiki_pages`, `wiki_chunks`, `wiki_images` | ingest |
+| **ingest** | `daily_news`, `news_runs`, `news_story_clusters`, `news_briefs`, `news_article_summaries`, `news_cluster_summaries`, `news_article_images`, `news_image_embeddings` | ingest |
+| **ingest** | `rag_chunks` | ingest |
+| **ingest** | `image_embeddings`, `audio_embeddings`, `audio_clusters`, `media_files`, `lyrics`, `lyrics_fetch_log` | ingest |
+| **main** | `memory.*` (episodes, profiles, rules, reflections, audit_log) | main |
+| **main** | `public.ratings` | main |
+| **main** | `langgraph.*` (LangGraph checkpoints) | main |
+| **main** | `log.*` — **shared write**, main owns by exception (§12) | main |
+
+Derived from what each project actually executes INSERT/UPDATE against, verified
+2026-08-10 — not from where files happen to sit today.
+
+### 19.2 Files currently misfiled (relocate; deliberately deferred)
+
+These live in **main** but describe **ingest-owned** tables. Left in place for
+now because the `wiki_chunks` partition migration is mid-copy and moving DDL
+during it adds risk for no benefit. Move them once it completes:
+
+```
+rag_v1/db/schema.sql                 -> rag_chunks
+rag_v1/db/wiki_schema.sql            -> wiki_*
+rag_v1/db/image_embeddings.sql       -> image_embeddings
+rag_v1/db/media_schema.sql           -> media_files
+rag_v1/db/lyrics_schema.sql          -> lyrics
+rag_v1/db/audio_clusters_schema.sql  -> audio_clusters
+```
+
+Correctly placed and staying: `log/db/log_schema.sql`, `scripts/memory_schema.sql`,
+`feedback/schema.sql`, `scripts/setup_*.sql`.
+
+`scripts/migrate_wiki_chunks_partitioned.py` is an ingest-owned-table migration
+living in main. It stays here: it is running, it is a one-off, and relocating a
+script mid-migration risks the resume path. Revisit after `--swap`.
+
+### 19.3 Expand / contract — never break the reader in the same step
+
+The standard pattern for schema change when writer and reader deploy
+independently ([expand and contract / parallel change](https://www.prisma.io/dataguide/types/relational/expand-and-contract-pattern)).
+Three phases, and **the reader must work after every one of them**:
+
+1. **Expand** — add the new thing alongside the old. New column nullable, new
+   table, new index. Never drop, never rename, never tighten in this step.
+2. **Migrate** — backfill data; update the reader to handle both shapes; update
+   the writer to produce the new shape.
+3. **Contract** — only once the reader provably no longer needs the old shape,
+   remove it.
+
+A rename is never one step: it is add-new, dual-write, migrate-readers,
+drop-old. The same applies to changing a column's type, tightening NOT NULL, or
+changing an index's opclass.
+
+### 19.4 Checklist — run before ANY PostgreSQL change
+
+1. **Who writes this table?** That project owns the change. If it is the other
+   project's table, stop and go do it there.
+2. **Who reads it?** `grep` the *other* project for the table name. Every reader
+   must survive each phase independently.
+3. **Does it change a PK, unique constraint, or partition key?** Then check the
+   other project's `ON CONFLICT`, `DELETE ... WHERE`, and any explicit column
+   lists — those bind to constraint shape.
+4. **Does it change an index?** Check the other project's index management. A
+   `DROP INDEX IF EXISTS <name>` that no longer matches is a **silent no-op**,
+   not an error.
+5. **Does it change an opclass or add a cast?** (e.g. `vector` →
+   `halfvec`.) The reader's query must cast identically or the index is ignored
+   and the planner silently reverts to a sequential scan.
+6. **Are constraints preserved?** Recreating a table drops NOT NULLs and foreign
+   keys unless you restate them. Nothing fails; the constraint is just gone.
+7. **Update BOTH CLAUDE.md files** — this section and ingest §22 are one
+   document in two places.
+8. **Run both test suites.** Main and ingest.
+
+### 19.5 Case study: what this process would have caught
+
+The `wiki_chunks` partition migration (§18) changed a table **ingest writes and
+main reads**, and broke ingest three ways that no test would have caught:
+
+- `DROP INDEX IF EXISTS hnsw_wiki_chunks_embedding_cos` stopped matching
+  anything once the per-partition indexes were named
+  `wiki_chunks_part_pNNN_hv_hnsw`. It logged success and left 32 HNSW indexes
+  in place for a bulk ingest to fight — **checklist item 4**.
+- `CREATE INDEX CONCURRENTLY` is rejected on partitioned tables, so the rebuild
+  would hard-error — **item 4**.
+- The new table's `CREATE TABLE` silently omitted 7 NOT NULLs and both
+  `ON DELETE CASCADE` foreign keys — **item 6**.
+
+All three were found by reading the other project, not by running tests. That is
+why items 2-6 are manual greps rather than assertions.

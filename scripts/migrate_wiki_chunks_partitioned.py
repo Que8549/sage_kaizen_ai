@@ -74,13 +74,30 @@ if str(_ROOT) not in sys.path:
 import urllib.parse  # noqa: E402
 
 import psycopg  # noqa: E402
-from psycopg.rows import dict_row  # noqa: E402
+from psycopg import sql  # noqa: E402
+from psycopg.rows import DictRow, dict_row  # noqa: E402
 
 from pg_settings import PgSettings  # noqa: E402
+
+
+def _one(cur: psycopg.Cursor[DictRow]) -> DictRow:
+    """
+    fetchone() that fails loudly instead of returning Optional.
+
+    Every call site here runs an aggregate or a to_regclass lookup, which always
+    yields exactly one row. None would mean the server returned no result set at
+    all — a bug worth surfacing here rather than as a NoneType subscript error
+    three frames away.
+    """
+    row = cur.fetchone()
+    if row is None:
+        raise RuntimeError("expected exactly one row, got none")
+    return row
 
 SOURCE = "wiki_chunks"
 TARGET = "wiki_chunks_part"
 STATE_TABLE = "wiki_chunks_migration"
+CORRUPT_TABLE = "wiki_chunks_corrupt"
 
 DEFAULT_PARTITIONS = 32
 DEFAULT_BATCH_ROWS = 200_000
@@ -149,10 +166,14 @@ def _owner_dsn() -> str | None:
     if not cfg.pg_owner_password:
         return None
     parsed = urllib.parse.urlparse(cfg.pg_dsn)
+    # safe="" matters: quote() defaults to safe="/", so a password containing a
+    # slash is left unencoded and silently corrupts the netloc — urlparse then
+    # reads the rest as a path and the password comes back as None, producing a
+    # DSN that fails to authenticate for no visible reason.
     return urllib.parse.urlunparse(
         parsed._replace(
-            netloc=f"{urllib.parse.quote(cfg.pg_owner)}:"
-                   f"{urllib.parse.quote(cfg.pg_owner_password)}"
+            netloc=f"{urllib.parse.quote(cfg.pg_owner, safe='')}:"
+                   f"{urllib.parse.quote(cfg.pg_owner_password, safe='')}"
                    f"@{parsed.hostname}:{parsed.port or 5432}"
         )
     )
@@ -225,25 +246,38 @@ def phase_create(conn: psycopg.Connection, partitions: int) -> int:
         return existing.partitions or partitions
 
     print(f"  create: {TARGET} PARTITION BY HASH (page_id), {partitions} partitions")
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {TARGET} (
-            chunk_id     bigint GENERATED ALWAYS AS IDENTITY,
-            page_id      uuid   NOT NULL,
-            bundle_id    uuid,
-            title        text,
-            first_letter character(1),
-            section_path text[],
-            chunk_index  integer,
-            text         text,
-            chunk_hash   text,
-            embedding    vector({EMBED_DIMS})
-        ) PARTITION BY HASH (page_id)
-    """)
+    # Composed via psycopg.sql rather than f-strings. psycopg accepts a bare
+    # str query only when it is a LiteralString; anything interpolated becomes
+    # plain str and is refused, which is the type system enforcing the
+    # injection guard rather than being pedantic. Identifier() also quotes the
+    # names correctly instead of trusting that they need no quoting.
+    conn.execute(
+        sql.SQL("""
+            CREATE TABLE IF NOT EXISTS {target} (
+                chunk_id     bigint GENERATED ALWAYS AS IDENTITY,
+                page_id      uuid   NOT NULL,
+                bundle_id    uuid,
+                title        text,
+                first_letter character(1),
+                section_path text[],
+                chunk_index  integer,
+                text         text,
+                chunk_hash   text,
+                embedding    vector({dims})
+            ) PARTITION BY HASH (page_id)
+        """).format(target=sql.Identifier(TARGET), dims=sql.Literal(EMBED_DIMS))
+    )
     for i in range(partitions):
         conn.execute(
-            f"CREATE TABLE IF NOT EXISTS {_partition_name(i)} "
-            f"PARTITION OF {TARGET} "
-            f"FOR VALUES WITH (MODULUS {partitions}, REMAINDER {i})"
+            sql.SQL(
+                "CREATE TABLE IF NOT EXISTS {part} PARTITION OF {target} "
+                "FOR VALUES WITH (MODULUS {mod}, REMAINDER {rem})"
+            ).format(
+                part=sql.Identifier(_partition_name(i)),
+                target=sql.Identifier(TARGET),
+                mod=sql.Literal(partitions),
+                rem=sql.Literal(i),
+            )
         )
     _mark(conn, "create", partitions=partitions, finished=True)
     print(f"  create: done")
@@ -253,6 +287,109 @@ def phase_create(conn: psycopg.Connection, partitions: int) -> int:
 # --------------------------------------------------------------------------- #
 # Phase 2 — copy, in committed batches                                         #
 # --------------------------------------------------------------------------- #
+
+# page_id/title are what make a quarantined row ACTIONABLE. chunk_id alone is
+# not: the new table generates fresh identity values, so after --swap the
+# recorded chunk_id refers to nothing that still exists. Re-ingesting a lost
+# chunk needs to know which page it came from.
+#
+# These columns are readable even for corrupt rows: the damage is in the TOAST
+# relation (the 4104-byte embedding), while page_id and title live in the heap.
+_DDL_CORRUPT = f"""
+CREATE TABLE IF NOT EXISTS {CORRUPT_TABLE} (
+    chunk_id    bigint PRIMARY KEY,
+    page_id     uuid,
+    title       text,
+    detected_at timestamptz NOT NULL DEFAULT now(),
+    error       text
+);
+ALTER TABLE {CORRUPT_TABLE} ADD COLUMN IF NOT EXISTS page_id uuid;
+ALTER TABLE {CORRUPT_TABLE} ADD COLUMN IF NOT EXISTS title   text;
+"""
+
+_INSERT_RANGE = f"""
+INSERT INTO {TARGET}
+    (page_id, bundle_id, title, first_letter, section_path,
+     chunk_index, text, chunk_hash, embedding)
+SELECT page_id, bundle_id, title, first_letter, section_path,
+       chunk_index, text, chunk_hash, embedding
+FROM {SOURCE}
+WHERE chunk_id > %s AND chunk_id <= %s
+"""
+
+
+def _corrupt_count(conn: psycopg.Connection) -> int:
+    with conn.cursor(row_factory=dict_row) as cur:
+        return _one(cur.execute(f"SELECT count(*) AS n FROM {CORRUPT_TABLE}"))["n"]
+
+
+def _quarantine(conn: psycopg.Connection, chunk_id: int, error: str) -> None:
+    """Record an unreadable row, with the heap columns needed to re-ingest it."""
+    conn.execute(
+        f"""
+        INSERT INTO {CORRUPT_TABLE} (chunk_id, page_id, title, error)
+        SELECT %s, page_id, title, %s FROM {SOURCE} WHERE chunk_id = %s
+        ON CONFLICT (chunk_id) DO NOTHING
+        """,
+        (chunk_id, error[:500], chunk_id),
+    )
+
+
+def backfill_corrupt_metadata(conn: psycopg.Connection) -> int:
+    """
+    Fill page_id/title for quarantined rows recorded before those columns existed.
+
+    Safe to re-run: it only touches rows still missing page_id, and reads only
+    heap columns, which are intact even for rows whose TOAST is damaged. Called
+    from --status so the record self-heals rather than needing a separate step.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""
+            UPDATE {CORRUPT_TABLE} q
+            SET page_id = s.page_id, title = s.title
+            FROM {SOURCE} s
+            WHERE s.chunk_id = q.chunk_id AND q.page_id IS NULL
+            """
+        )
+        return cur.rowcount
+
+
+def _copy_range(conn: psycopg.Connection, lo: int, hi: int,
+                skipped: list[int]) -> int:
+    """
+    Copy source rows in (lo, hi], isolating and skipping unreadable ones.
+
+    The source table has at least one damaged TOAST page — confirmed
+    2026-08-10, chunk_ids 173,810,706 and 173,810,708, detected only because
+    `data_checksums = on`. Postgres raises DataCorrupted for the whole
+    statement, so a single bad 8 KB page would otherwise block a 100,000-row
+    batch and stall the migration permanently.
+
+    On failure the range is bisected down to individual rows; the ones that
+    genuinely cannot be read are recorded in wiki_chunks_corrupt and skipped.
+    A single INSERT is atomic, so a failed attempt copies nothing and
+    subdividing cannot double-insert.
+
+    Rows quarantined here are lost from the new table but NOT from the source,
+    which is left untouched — no zero_damaged_pages, no destructive repair.
+    They can be re-ingested from the ZIM dump later; wiki_ingest is resume-safe
+    by content_hash.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_INSERT_RANGE, (lo, hi))
+            return cur.rowcount
+    except psycopg.errors.DataCorrupted as exc:
+        if hi - lo <= 1:
+            _quarantine(conn, hi, str(exc))
+            skipped.append(hi)
+            print(f"      quarantined corrupt chunk_id {hi:,}", flush=True)
+            return 0
+        mid = (lo + hi) // 2
+        return (_copy_range(conn, lo, mid, skipped)
+                + _copy_range(conn, mid, hi, skipped))
+
 
 def phase_copy(conn: psycopg.Connection, batch_rows: int) -> None:
     """
@@ -272,44 +409,35 @@ def phase_copy(conn: psycopg.Connection, batch_rows: int) -> None:
     rows_done = state.rows_done if state else 0
 
     with conn.cursor(row_factory=dict_row) as cur:
-        max_id = cur.execute(
+        max_id = _one(cur.execute(
             f"SELECT COALESCE(max(chunk_id), 0) AS m FROM {SOURCE}"
-        ).fetchone()["m"]
+        ))["m"]
 
     if cursor_id:
         print(f"  copy: resuming after chunk_id {cursor_id:,} ({rows_done:,} rows done)")
     print(f"  copy: target max chunk_id {max_id:,}, batch {batch_rows:,}")
 
     started = time.monotonic()
+    rows_at_start = rows_done          # so the rate reflects THIS run, not resumed totals
+    skipped_total = _corrupt_count(conn)
+    if skipped_total:
+        print(f"  copy: {skipped_total} previously-quarantined corrupt row(s)")
+
     while cursor_id < max_id:
         upper = cursor_id + batch_rows
-        with conn.cursor() as cur:
-            # Column list is explicit and omits chunk_id: the target's identity
-            # column generates its own. Nothing downstream depends on source
-            # chunk_id values surviving (the retriever selects it, never joins
-            # on it across the migration).
-            cur.execute(
-                f"""
-                INSERT INTO {TARGET}
-                    (page_id, bundle_id, title, first_letter, section_path,
-                     chunk_index, text, chunk_hash, embedding)
-                SELECT page_id, bundle_id, title, first_letter, section_path,
-                       chunk_index, text, chunk_hash, embedding
-                FROM {SOURCE}
-                WHERE chunk_id > %s AND chunk_id <= %s
-                """,
-                (cursor_id, upper),
-            )
-            copied = cur.rowcount
+        skipped: list[int] = []
+        copied = _copy_range(conn, cursor_id, upper, skipped)
+        skipped_total += len(skipped)
 
         cursor_id = upper
         rows_done += copied
         _mark(conn, "copy", last_chunk_id=cursor_id, rows_done=rows_done)
 
         pct = 100.0 * cursor_id / max_id if max_id else 100.0
-        rate = rows_done / max(time.monotonic() - started, 1e-6)
+        rate = (rows_done - rows_at_start) / max(time.monotonic() - started, 1e-6)
+        note = f"  SKIPPED {len(skipped)} corrupt" if skipped else ""
         print(f"    {pct:5.1f}%  chunk_id<={cursor_id:>13,}  rows={rows_done:>13,}  "
-              f"{rate:,.0f} rows/s", flush=True)
+              f"{rate:,.0f} rows/s{note}", flush=True)
 
     _mark(conn, "copy", last_chunk_id=cursor_id, rows_done=rows_done, finished=True)
     print(f"  copy: done — {rows_done:,} rows")
@@ -357,8 +485,39 @@ def _drop_invalid_indexes(conn: psycopg.Connection, part: str) -> int:
         ).fetchall()
     for r in rows:
         print(f"    dropping invalid index left by an interrupted build: {r['name']}")
-        conn.execute(f'DROP INDEX IF EXISTS "{r["name"]}"')
+        # Identifier() rather than hand-rolled double quotes: the name comes
+        # back from the catalog, so it is not necessarily quote-free.
+        conn.execute(
+            sql.SQL("DROP INDEX IF EXISTS {idx}").format(idx=sql.Identifier(r["name"]))
+        )
     return len(rows)
+
+
+def _index_stmt(part: str, tablespace: str | None) -> sql.Composed:
+    """
+    The per-partition halfvec HNSW index statement.
+
+    Extracted so the generated DDL can be asserted without a database. It is
+    the one statement in this script that has never been executed against real
+    data — the index phase runs after a multi-day copy — and a mistake in it
+    (wrong opclass, missing cast, wrong tablespace) would not surface until
+    then. The halfvec cast in particular must match what WikiRetriever queries
+    with, or the index is built correctly and then never used.
+    """
+    stmt = sql.SQL(
+        "CREATE INDEX {idx} ON {part} "
+        "USING hnsw ((embedding::halfvec({dims})) halfvec_cosine_ops) "
+        "WITH (m = {m}, ef_construction = {efc})"
+    ).format(
+        idx=sql.Identifier(f"{part}_hv_hnsw"),
+        part=sql.Identifier(part),
+        dims=sql.Literal(EMBED_DIMS),
+        m=sql.Literal(HNSW_M),
+        efc=sql.Literal(HNSW_EF_CONSTRUCTION),
+    )
+    if tablespace:
+        stmt += sql.SQL(" TABLESPACE {ts}").format(ts=sql.Identifier(tablespace))
+    return stmt
 
 
 def phase_index(conn: psycopg.Connection, partitions: int, mwm: str,
@@ -374,7 +533,6 @@ def phase_index(conn: psycopg.Connection, partitions: int, mwm: str,
     print(f"  index: {partitions} partitions, maintenance_work_mem={mwm}, "
           f"tablespace={tablespace or 'default'}")
 
-    ts_clause = f" TABLESPACE {tablespace}" if tablespace else ""
     built = skipped = 0
 
     for i in range(partitions):
@@ -387,19 +545,18 @@ def phase_index(conn: psycopg.Connection, partitions: int, mwm: str,
 
         # Session-scoped: deliberately not a global postgresql.conf value, so
         # three autovacuum workers can never each claim 48 GB.
-        conn.execute(f"SET maintenance_work_mem = '{mwm}'")
-        conn.execute(f"SET max_parallel_maintenance_workers = {parallel_workers}")
+        conn.execute(
+            sql.SQL("SET maintenance_work_mem = {mwm}").format(mwm=sql.Literal(mwm))
+        )
+        conn.execute(
+            sql.SQL("SET max_parallel_maintenance_workers = {n}").format(
+                n=sql.Literal(parallel_workers)
+            )
+        )
 
         started = time.monotonic()
         print(f"    [{i + 1}/{partitions}] building {part} ...", flush=True)
-        conn.execute(
-            f"""
-            CREATE INDEX {part}_hv_hnsw ON {part}
-            USING hnsw ((embedding::halfvec({EMBED_DIMS})) halfvec_cosine_ops)
-            WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION})
-            {ts_clause}
-            """
-        )
+        conn.execute(_index_stmt(part, tablespace))
         built += 1
         print(f"    [{i + 1}/{partitions}] {part} done in "
               f"{time.monotonic() - started:,.0f}s", flush=True)
@@ -408,12 +565,34 @@ def phase_index(conn: psycopg.Connection, partitions: int, mwm: str,
     print(f"  index: {built} built, {skipped} already present")
 
 
+def _constraint_exists(conn: psycopg.Connection, name: str) -> bool:
+    with conn.cursor(row_factory=dict_row) as cur:
+        return bool(_one(cur.execute(
+            "SELECT count(*) AS n FROM pg_constraint WHERE conname = %s", (name,)
+        ))["n"])
+
+
 def phase_constraints(conn: psycopg.Connection) -> None:
     """
-    Add the btree constraints after the copy.
+    Restore every constraint the source table had, plus the supporting indexes.
 
-    uq_wiki_chunks_page_hash is what ingest's ON CONFLICT (page_id, chunk_hash)
-    depends on, so it must exist before the swap or every ingest insert fails.
+    The partitioned table is created bare so the copy pays no per-row constraint
+    or index maintenance. That is deliberate, but it means this phase is the
+    ONLY thing standing between the migration and silent schema drift:
+    rag_v1/db/wiki_schema.sql declares 7 NOT NULLs and 2 ON DELETE CASCADE
+    foreign keys that the bare CREATE TABLE does not have. Losing them would not
+    fail any test — it would just quietly stop cascading deletes and stop
+    rejecting bad rows.
+
+    NOT NULL is applied as ONE combined ALTER TABLE so PostgreSQL makes a single
+    heap pass instead of seven. Checking NOT NULL reads only the null bitmap, so
+    it does not detoast the 2.6 TB of embeddings.
+
+    Foreign keys are added NOT VALID (instant, enforced for new rows) and then
+    VALIDATEd separately. The data already satisfied these constraints in the
+    source, so validation is a formality — but an unvalidated constraint is a
+    lie in the catalog, and VALIDATE takes ShareUpdateExclusiveLock rather than
+    blocking writes.
     """
     print("  constraints: unique (page_id, chunk_hash) + supporting indexes")
     conn.execute(
@@ -431,6 +610,49 @@ def phase_constraints(conn: psycopg.Connection) -> None:
     conn.execute(
         f"CREATE INDEX IF NOT EXISTS idx_{TARGET}_page_id ON {TARGET} (page_id)"
     )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{TARGET}_first_letter ON {TARGET} (first_letter)"
+    )
+
+    # --- NOT NULL: one statement, one heap pass -----------------------------
+    print("  constraints: restoring NOT NULL on 7 columns (single table scan)")
+    cols = ("bundle_id", "title", "first_letter", "chunk_index",
+            "text", "chunk_hash", "embedding")
+    conn.execute(
+        sql.SQL("ALTER TABLE {t} {clauses}").format(
+            t=sql.Identifier(TARGET),
+            clauses=sql.SQL(", ").join(
+                sql.SQL("ALTER COLUMN {c} SET NOT NULL").format(c=sql.Identifier(c))
+                for c in cols
+            ),
+        )
+    )
+
+    # --- Foreign keys: match wiki_schema.sql, including ON DELETE CASCADE ---
+    for name, col, ref, refcol in (
+        (f"fk_{TARGET}_page",   "page_id",   "wiki_pages",   "page_id"),
+        (f"fk_{TARGET}_bundle", "bundle_id", "wiki_bundles", "bundle_id"),
+    ):
+        if _constraint_exists(conn, name):
+            print(f"  constraints: {name} already present")
+            continue
+        print(f"  constraints: adding {name} (NOT VALID, then validating)")
+        conn.execute(
+            sql.SQL(
+                "ALTER TABLE {t} ADD CONSTRAINT {n} FOREIGN KEY ({c}) "
+                "REFERENCES {r} ({rc}) ON DELETE CASCADE NOT VALID"
+            ).format(
+                t=sql.Identifier(TARGET), n=sql.Identifier(name),
+                c=sql.Identifier(col), r=sql.Identifier(ref),
+                rc=sql.Identifier(refcol),
+            )
+        )
+        conn.execute(
+            sql.SQL("ALTER TABLE {t} VALIDATE CONSTRAINT {n}").format(
+                t=sql.Identifier(TARGET), n=sql.Identifier(name)
+            )
+        )
+
     _mark(conn, "constraints", finished=True)
     print("  constraints: done")
 
@@ -444,13 +666,24 @@ def phase_verify(conn: psycopg.Connection) -> bool:
     print("  verify: counting both tables (this scans; expect it to be slow)")
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SET statement_timeout = 0")
-        src = cur.execute(f"SELECT count(*) AS n FROM {SOURCE}").fetchone()["n"]
-        dst = cur.execute(f"SELECT count(*) AS n FROM {TARGET}").fetchone()["n"]
-    print(f"  verify: source={src:,}  target={dst:,}  delta={dst - src:+,}")
-    if src != dst:
-        print("  verify: MISMATCH — refusing to swap. Re-run --copy to catch up.")
+        src = _one(cur.execute(f"SELECT count(*) AS n FROM {SOURCE}"))["n"]
+        dst = _one(cur.execute(f"SELECT count(*) AS n FROM {TARGET}"))["n"]
+    quarantined = _corrupt_count(conn)
+    expected = src - quarantined
+    print(f"  verify: source={src:,}  target={dst:,}  "
+          f"quarantined={quarantined:,}  expected={expected:,}")
+    if dst != expected:
+        print(f"  verify: MISMATCH ({dst - expected:+,}) — refusing to swap. "
+              f"Re-run --copy to catch up.")
         return False
-    print("  verify: row counts match")
+    if quarantined:
+        # Not a silent pass: the new table is knowingly short by these rows,
+        # and that fact should be visible at the moment of the swap.
+        print(f"  verify: counts reconcile, but {quarantined:,} row(s) were "
+              f"unreadable in the source and are ABSENT from the new table.")
+        print(f"          SELECT chunk_id FROM {CORRUPT_TABLE};")
+    else:
+        print("  verify: row counts match")
     return True
 
 
@@ -478,6 +711,21 @@ def phase_swap(conn: psycopg.Connection) -> None:
 # --------------------------------------------------------------------------- #
 
 def phase_status(conn: psycopg.Connection, partitions: int) -> None:
+    filled = backfill_corrupt_metadata(conn)
+    if filled:
+        print(f"  backfilled page_id/title for {filled} quarantined row(s)")
+
+    quarantined = _corrupt_count(conn)
+    if quarantined:
+        print(f"  quarantined (unreadable in source): {quarantined}")
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"SELECT chunk_id, page_id, left(title, 44) AS title "
+                f"FROM {CORRUPT_TABLE} ORDER BY chunk_id LIMIT 10"
+            )
+            for r in cur.fetchall():
+                print(f"    {r['chunk_id']:>13,}  {r['page_id']}  {r['title']}")
+
     print("  phase state:")
     for name in ("create", "copy", "constraints", "index", "swap"):
         st = _read_phase(conn, name)
@@ -490,9 +738,9 @@ def phase_status(conn: psycopg.Connection, partitions: int) -> None:
             print(f"    {name:<12} {flag}{extra}{cursor}")
 
     with conn.cursor(row_factory=dict_row) as cur:
-        exists = cur.execute(
+        exists = _one(cur.execute(
             "SELECT to_regclass(%s) IS NOT NULL AS e", (TARGET,)
-        ).fetchone()["e"]
+        ))["e"]
     if not exists:
         return
 
@@ -551,6 +799,7 @@ def main(argv: list[str] | None = None) -> int:
 
     conn = _connect(dsn)
     conn.execute(_DDL_STATE)
+    conn.execute(_DDL_CORRUPT)
 
     partitions = args.partitions
     created = _read_phase(conn, "create")
