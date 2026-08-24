@@ -4,10 +4,16 @@ tests/test_retriever.py
 Unit tests for rag_v1/retrieve/retriever.py — PgvectorRetriever.
 
 Key behaviors under test:
-1. retrieve() uses conn_ctx (not get_conn); stale connections are evicted.
+1. retrieve() delegates to rag_v1.db.vector_index.vector_search, which owns
+   connection handling and ANN tuning for every pgvector caller.
 2. Distance threshold filtering is applied in Python after the DB query.
 3. Returned RetrievedChunk fields are populated correctly.
-4. retrieve() returns [] gracefully when the DB raises an OperationalError.
+4. retrieve() propagates OperationalError rather than masking it.
+
+These used to patch `retriever.conn_ctx` and assert the connection was never
+closed by hand.  That contract still holds, but it moved: pooling and the
+`with` that returns the connection now live in vector_search, and pg.py's own
+tests cover them.  Asserting it here would only re-test a mock.
 """
 from __future__ import annotations
 
@@ -55,47 +61,40 @@ def mock_embed():
 
 
 @pytest.fixture
-def mock_conn_ctx():
-    conn = MagicMock()
-    conn.closed = False
-    conn.execute.return_value = conn
-
-    ctx = MagicMock()
-    ctx.__enter__ = MagicMock(return_value=conn)
-    ctx.__exit__ = MagicMock(return_value=False)
-
-    with patch("rag_v1.retrieve.retriever.conn_ctx", return_value=ctx) as patched:
-        yield patched, conn
+def mock_search():
+    """Patch vector_search; `.rows` is what the fake query returns."""
+    with patch("rag_v1.retrieve.retriever.vector_search") as patched:
+        patched.return_value = []
+        yield patched
 
 
 # ---------------------------------------------------------------------------
 # conn_ctx usage (not get_conn)
 # ---------------------------------------------------------------------------
 
-class TestConnCtxUsage:
-    def test_uses_conn_ctx_not_get_conn(self, mock_embed, mock_conn_ctx):
-        """conn_ctx must be called; get_conn must never be called."""
-        patched_ctx, conn = mock_conn_ctx
-        conn.execute.return_value = MagicMock(fetchall=MagicMock(return_value=[]))
-
-        with patch("rag_v1.retrieve.retriever.get_conn", create=True) as mock_get_conn:
-            from rag_v1.retrieve.retriever import PgvectorRetriever
-            r = PgvectorRetriever(_make_cfg())
-            r.retrieve("test query")
-
-        mock_get_conn.assert_not_called()
-        patched_ctx.assert_called_once_with(DSN)
-
-    def test_conn_close_not_called(self, mock_embed, mock_conn_ctx):
-        """conn_ctx manages lifecycle; explicit close must not be called."""
-        _, conn = mock_conn_ctx
-        conn.execute.return_value = MagicMock(fetchall=MagicMock(return_value=[]))
-
+class TestVectorSearchDelegation:
+    def test_delegates_to_vector_search_with_dsn(self, mock_embed, mock_search):
+        """The DSN and the bound parameters must reach vector_search intact."""
         from rag_v1.retrieve.retriever import PgvectorRetriever
-        r = PgvectorRetriever(_make_cfg())
+        r = PgvectorRetriever(_make_cfg(top_k=7))
         r.retrieve("test query")
 
-        conn.close.assert_not_called()
+        mock_search.assert_called_once()
+        dsn, sql_text, params = mock_search.call_args.args
+        assert dsn == DSN
+        assert "rag_chunks" in sql_text
+        # (query_vector, query_vector, k) — the vector is bound twice because
+        # it appears in both the SELECT distance and the ORDER BY.
+        assert params[2] == 7
+        assert params[0] == params[1]
+
+    def test_top_k_argument_overrides_config(self, mock_embed, mock_search):
+        from rag_v1.retrieve.retriever import PgvectorRetriever
+        r = PgvectorRetriever(_make_cfg(top_k=5))
+        r.retrieve("test query", top_k=2)
+
+        _, _, params = mock_search.call_args.args
+        assert params[2] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -103,15 +102,14 @@ class TestConnCtxUsage:
 # ---------------------------------------------------------------------------
 
 class TestDistanceFiltering:
-    def test_filters_rows_above_max_distance(self, mock_embed, mock_conn_ctx):
-        _, conn = mock_conn_ctx
+    def test_filters_rows_above_max_distance(self, mock_embed, mock_search):
         rows = [
             _make_row(distance=0.1),   # passes (< 0.5)
             _make_row(distance=0.49),  # passes
             _make_row(distance=0.50),  # filtered out (== max_distance, not <)
             _make_row(distance=0.9),   # filtered out
         ]
-        conn.execute.return_value = MagicMock(fetchall=MagicMock(return_value=rows))
+        mock_search.return_value = rows
 
         from rag_v1.retrieve.retriever import PgvectorRetriever
         r = PgvectorRetriever(_make_cfg(max_distance=0.5))
@@ -119,20 +117,18 @@ class TestDistanceFiltering:
 
         assert len(results) == 2
 
-    def test_all_rows_pass_when_below_threshold(self, mock_embed, mock_conn_ctx):
-        _, conn = mock_conn_ctx
+    def test_all_rows_pass_when_below_threshold(self, mock_embed, mock_search):
         rows = [_make_row(distance=0.1), _make_row(distance=0.3)]
-        conn.execute.return_value = MagicMock(fetchall=MagicMock(return_value=rows))
+        mock_search.return_value = rows
 
         from rag_v1.retrieve.retriever import PgvectorRetriever
         r = PgvectorRetriever(_make_cfg())
         results = r.retrieve("test")
         assert len(results) == 2
 
-    def test_empty_result_when_all_rows_exceed_threshold(self, mock_embed, mock_conn_ctx):
-        _, conn = mock_conn_ctx
+    def test_empty_result_when_all_rows_exceed_threshold(self, mock_embed, mock_search):
         rows = [_make_row(distance=0.8), _make_row(distance=0.95)]
-        conn.execute.return_value = MagicMock(fetchall=MagicMock(return_value=rows))
+        mock_search.return_value = rows
 
         from rag_v1.retrieve.retriever import PgvectorRetriever
         r = PgvectorRetriever(_make_cfg())
@@ -145,10 +141,9 @@ class TestDistanceFiltering:
 # ---------------------------------------------------------------------------
 
 class TestRetrievedChunkFields:
-    def test_chunk_fields_populated(self, mock_embed, mock_conn_ctx):
-        _, conn = mock_conn_ctx
+    def test_chunk_fields_populated(self, mock_embed, mock_search):
         row = _make_row(distance=0.25, content="Important paragraph.")
-        conn.execute.return_value = MagicMock(fetchall=MagicMock(return_value=[row]))
+        mock_search.return_value = [row]
 
         from rag_v1.retrieve.retriever import PgvectorRetriever
         r = PgvectorRetriever(_make_cfg())
@@ -161,10 +156,9 @@ class TestRetrievedChunkFields:
         assert chunk.content == "Important paragraph."
         assert chunk.metadata == {"title": "Test Doc"}
 
-    def test_score_derived_from_distance(self, mock_embed, mock_conn_ctx):
-        _, conn = mock_conn_ctx
+    def test_score_derived_from_distance(self, mock_embed, mock_search):
         row = _make_row(distance=0.25)
-        conn.execute.return_value = MagicMock(fetchall=MagicMock(return_value=[row]))
+        mock_search.return_value = [row]
 
         from rag_v1.retrieve.retriever import PgvectorRetriever
         r = PgvectorRetriever(_make_cfg())
@@ -173,18 +167,14 @@ class TestRetrievedChunkFields:
         # score = 1.0 / (1.0 + distance) = 1.0 / 1.25 = 0.8
         assert results[0].score == pytest.approx(1.0 / 1.25)
 
-    def test_top_k_respected(self, mock_embed, mock_conn_ctx):
-        _, conn = mock_conn_ctx
-        # Return more rows than top_k; SQL limits should handle it, but
-        # verify the query is called with the correct k parameter.
-        conn.execute.return_value = MagicMock(fetchall=MagicMock(return_value=[]))
+    def test_top_k_respected(self, mock_embed, mock_search):
+        # SQL LIMIT does the truncation; assert k reaches the query.
 
         from rag_v1.retrieve.retriever import PgvectorRetriever
         r = PgvectorRetriever(_make_cfg(top_k=3))
         r.retrieve("query", top_k=3)
 
-        # The SQL was called — just verify no exception and conn used
-        conn.execute.assert_called()
+        assert mock_search.call_args.args[2][2] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -192,21 +182,17 @@ class TestRetrievedChunkFields:
 # ---------------------------------------------------------------------------
 
 class TestStaleConnectionEviction:
-    def test_db_error_propagates_through_conn_ctx(self, mock_embed):
-        """conn_ctx evicts on OperationalError; the retriever re-raises it."""
+    def test_db_error_propagates(self, mock_embed):
+        """
+        The pool evicts a dead connection; the retriever must not swallow the
+        error, because doc-RAG returning [] silently is the failure mode that
+        makes a dead database look like an empty corpus.
+        """
         import psycopg
         from rag_v1.retrieve.retriever import PgvectorRetriever
 
-        conn = MagicMock()
-        conn.closed = False
-        conn.execute.side_effect = psycopg.OperationalError("connection lost")
-
-        ctx = MagicMock()
-        ctx.__enter__ = MagicMock(return_value=conn)
-        # Return False so the exception propagates (not suppressed)
-        ctx.__exit__ = MagicMock(return_value=False)
-
-        with patch("rag_v1.retrieve.retriever.conn_ctx", return_value=ctx):
+        with patch("rag_v1.retrieve.retriever.vector_search",
+                   side_effect=psycopg.OperationalError("connection lost")):
             r = PgvectorRetriever(_make_cfg())
             with pytest.raises(psycopg.OperationalError):
                 r.retrieve("test")

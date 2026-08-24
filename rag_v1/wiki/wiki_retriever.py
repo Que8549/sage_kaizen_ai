@@ -23,9 +23,17 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
+from psycopg import sql
 from psycopg.rows import dict_row
 
 from rag_v1.db.pg import conn_ctx
+from rag_v1.db.vector_index import (
+    DEFAULT_HNSW_EF_SEARCH,
+    VECTOR_INDEX_AMS,
+    WIKI_EMBED_DIMS,
+    WIKI_IVFFLAT_PROBES,
+    apply_vector_tuning,
+)
 from rag_v1.wiki.mm_embed_client import MmEmbedClient
 from rag_v1.wiki.wiki_embed_config import load_wiki_embed_config
 from sk_logging import get_logger
@@ -81,11 +89,18 @@ _DISPLAY_GPU_INDEX = 0
 # So the failure mode was: wiki-RAG contributes nothing (looks exactly like "no
 # hits"), while quietly saturating the disk the whole app and the concurrent
 # ingest share. Fail fast and say so instead.
-_WIKI_VECTOR_INDEX_AM = ("hnsw", "ivfflat")
+# Defined once in rag_v1/db/vector_index.py — see that module for why these
+# values are what they are. Local aliases keep this file readable.
+_WIKI_VECTOR_INDEX_AM = VECTOR_INDEX_AMS
 
 # jina-clip-v2 output dimensionality. Needed literally in the halfvec cast,
 # because the cast in the query must match the index expression exactly.
-_WIKI_EMBED_DIMS = 1024
+_WIKI_EMBED_DIMS = WIKI_EMBED_DIMS
+
+# NOT sqrt(lists) — wiki_chunks is 32 partitions and a nearest-neighbour query
+# cannot prune them, so the cost multiplies by 32. The cold-page measurements
+# that produced 5 are recorded in rag_v1/db/vector_index.py.
+_IVFFLAT_PROBES = WIKI_IVFFLAT_PROBES
 
 # How long to wait before re-checking after finding no index. A rebuild takes
 # days, so polling the catalog often is pointless — but a fixed negative cache
@@ -167,7 +182,11 @@ ORDER BY wc.embedding <=> %s::vector
 LIMIT %s;
 """
 
-_SQL_TOP_CHUNKS_HALFVEC = f"""
+# The dimension is written out rather than interpolated so this stays a
+# LiteralString — psycopg only accepts those as a bare query, which is the type
+# system enforcing its injection guard. test_wiki_retriever asserts it matches
+# _WIKI_EMBED_DIMS, so the two cannot drift apart silently.
+_SQL_TOP_CHUNKS_HALFVEC = """
 SELECT
     wc.chunk_id,
     wc.bundle_id::text,
@@ -175,9 +194,9 @@ SELECT
     wc.section_path,
     wc.chunk_index,
     wc.text,
-    (wc.embedding::halfvec({_WIKI_EMBED_DIMS}) <=> %s::halfvec({_WIKI_EMBED_DIMS})) AS distance
+    (wc.embedding::halfvec(1024) <=> %s::halfvec(1024)) AS distance
 FROM wiki_chunks wc
-ORDER BY wc.embedding::halfvec({_WIKI_EMBED_DIMS}) <=> %s::halfvec({_WIKI_EMBED_DIMS})
+ORDER BY wc.embedding::halfvec(1024) <=> %s::halfvec(1024)
 LIMIT %s;
 """
 
@@ -259,6 +278,8 @@ class WikiRetriever:
         self._index_present: bool | None = None
         # "halfvec" | "vector" | None — decides which SQL variant search() emits.
         self._index_kind: str | None = None
+        # "ivfflat" | "hnsw" — decides which query-time tuning GUC to set.
+        self._index_am: str = "hnsw"
         self._index_checked_at: float = 0.0
         self._index_lock = threading.Lock()
 
@@ -282,16 +303,28 @@ class WikiRetriever:
         `(embedding::halfvec(1024))` is — stores 0 in indkey for the expression
         column, so an attribute join finds nothing and would report the halfvec
         index as missing. That is the index the migration builds.
+
+        The pg_inherits join matters just as much. wiki_chunks is now HASH
+        partitioned, and the ivfflat indexes were built on each PARTITION
+        individually — there is no parent-level ivfflat index to find, because
+        CREATE INDEX CONCURRENTLY is unsupported on partitioned tables and the
+        migration therefore builds per partition. Matching only
+        `tbl.relname = 'wiki_chunks'` found nothing and reported wiki-RAG
+        disabled with every index in place; caught by the post-swap end-to-end
+        check on 2026-08-24. Both shapes are matched so this works before and
+        after the swap.
         """
         with conn_ctx(self._pg_dsn) as conn, conn.cursor(row_factory=dict_row) as cur:
             rows = cur.execute(
                 """
                 SELECT pg_get_indexdef(i.indexrelid) AS def
                 FROM pg_index i
-                JOIN pg_class idx ON idx.oid = i.indexrelid
-                JOIN pg_class tbl ON tbl.oid = i.indrelid
-                JOIN pg_am    am  ON am.oid  = idx.relam
-                WHERE tbl.relname = 'wiki_chunks'
+                JOIN pg_class idx    ON idx.oid = i.indexrelid
+                JOIN pg_class tbl    ON tbl.oid = i.indrelid
+                JOIN pg_am    am     ON am.oid  = idx.relam
+                LEFT JOIN pg_inherits inh   ON inh.inhrelid = tbl.oid
+                LEFT JOIN pg_class    parent ON parent.oid  = inh.inhparent
+                WHERE (tbl.relname = 'wiki_chunks' OR parent.relname = 'wiki_chunks')
                   AND am.amname   = ANY(%s)
                   AND i.indisvalid
                 """,
@@ -301,6 +334,13 @@ class WikiRetriever:
         defs = [r["def"] for r in rows if r["def"] and "embedding" in r["def"]]
         if not defs:
             return None
+
+        # Record the access method too: ivfflat and hnsw need DIFFERENT
+        # query-time tuning GUCs, and setting the wrong one is silent. An
+        # ivfflat scan left at its default probes = 1 examines a single list
+        # and returns almost nothing — it looks like "no matches", not an error.
+        self._index_am = "ivfflat" if any("ivfflat" in d for d in defs) else "hnsw"
+
         # Prefer halfvec when both exist: it is the cheaper probe, and a
         # migration that has built halfvec is the intended path.
         if any("halfvec" in d for d in defs):
@@ -630,19 +670,22 @@ class WikiRetriever:
 
     def _get_chunks(self, qvec: list[float], top_k: int) -> list[WikiChunk]:
         with conn_ctx(self._pg_dsn) as conn:
-            conn.execute("SET hnsw.ef_search = 100")
-            # Backstop, not the primary guard — see _WIKI_QUERY_TIMEOUT_MS.
-            # An indexed query returns in milliseconds; anything approaching
-            # this bound is a plan regression, and the caller's deadline has
-            # already passed by then. Postgres must abandon it, because the
-            # caller cannot: context_injector drops the future and moves on
-            # while the backend keeps scanning.
-            conn.execute(f"SET statement_timeout = {_WIKI_QUERY_TIMEOUT_MS}")
-            sql = (_SQL_TOP_CHUNKS_HALFVEC if self._index_kind == "halfvec"
-                   else _SQL_TOP_CHUNKS)
+            # One definition of the recall knob and the timeout, shared with
+            # every other pgvector caller. Picking the wrong knob is silent:
+            # an ivfflat scan left at the default probes = 1 examines a single
+            # list out of 4000 and looks exactly like "no matches".
+            apply_vector_tuning(
+                conn,
+                index_am=self._index_am,
+                probes=_IVFFLAT_PROBES,
+                ef_search=DEFAULT_HNSW_EF_SEARCH,
+                timeout_ms=_WIKI_QUERY_TIMEOUT_MS,
+            )
+            chunk_sql = (_SQL_TOP_CHUNKS_HALFVEC if self._index_kind == "halfvec"
+                         else _SQL_TOP_CHUNKS)
             with conn.cursor(row_factory=dict_row) as cur:
                 rows = cur.execute(
-                    sql,
+                    chunk_sql,
                     (qvec, qvec, top_k),
                 ).fetchall()
         # Filter by distance threshold in Python; keeps the HNSW index path clean

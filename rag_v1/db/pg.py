@@ -66,6 +66,37 @@ _POOL_MAX_SIZE = 12
 _POOL_TIMEOUT_S = 8.0
 
 
+def _reset_session(conn: psycopg.Connection[Any]) -> None:
+    """
+    Clear per-session state before a connection goes back to the pool.
+
+    Without this, ANN tuning leaks between unrelated callers.  Every retriever
+    shares one pool per DSN, and several of them issue session-level ``SET``
+    before querying:
+
+        wiki_retriever  SET ivfflat.probes / SET statement_timeout
+        retriever       SET hnsw.ef_search
+
+    A ``SET`` outside a transaction lasts for the life of the *connection*, not
+    the query, so whichever retriever ran last silently dictated the recall and
+    timeout of whoever checked that connection out next.  The media, music and
+    lyrics retrievers set nothing at all, which made them the worst affected:
+    their effective ``hnsw.ef_search`` depended on connection reuse order, and
+    after a wiki query they inherited a 25 s ``statement_timeout`` they were
+    never designed around.
+
+    ``RESET ALL`` restores every GUC to its configured default.  It does not
+    touch ``row_factory`` or ``autocommit`` — those are client-side psycopg
+    settings applied at connect time, not server GUCs.
+
+    psycopg calls this on every return to the pool and guarantees the
+    connection is idle (no open transaction) when it does.  If it raises, the
+    pool discards the connection rather than handing on a dirty one, which is
+    the correct failure mode.
+    """
+    conn.execute("RESET ALL")
+
+
 def _get_pool(dsn: str) -> ConnectionPool[Any]:
     """Return (creating on first use) the shared pool for this DSN."""
     pool = _pools.get(dsn)
@@ -84,6 +115,9 @@ def _get_pool(dsn: str) -> ConnectionPool[Any]:
                 # Validate on checkout so a server-side disconnect costs a
                 # transparent reconnect instead of failing the caller's query.
                 check=ConnectionPool.check_connection,
+                # Scrub session GUCs on return so ANN tuning set by one
+                # retriever cannot silently govern the next one's query.
+                reset=_reset_session,
                 open=True,
             )
             _pools[dsn] = pool

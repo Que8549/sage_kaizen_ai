@@ -39,6 +39,7 @@ import psycopg
 from psycopg.rows import dict_row, DictRow
 
 from rag_v1.db.pg import conn_ctx
+from rag_v1.db.vector_index import apply_vector_tuning
 from rag_v1.embed.embed_client import EmbedClient
 from rag_v1.media.media_embed_client import AudioEmbedClient
 from rag_v1.media.lyrics_retriever import LyricsResult, LyricsRetriever
@@ -370,6 +371,7 @@ class MusicRetriever:
 
         try:
             with conn_ctx(self._pg_dsn) as conn:
+                apply_vector_tuning(conn)
                 with conn.cursor(row_factory=dict_row) as cur:
                     rows = cur.execute(_SQL_MOOD_SEARCH, (
                         qvec, qvec, self._max_dist,
@@ -420,6 +422,9 @@ class MusicRetriever:
         """
         try:
             with conn_ctx(self._pg_dsn) as conn:
+                # The similarity query below is a vector ORDER BY; the path
+                # lookup that precedes it is not, but they share a connection.
+                apply_vector_tuning(conn)
                 # 1. Try exact file path match
                 source_vec = None
                 source_id  = None

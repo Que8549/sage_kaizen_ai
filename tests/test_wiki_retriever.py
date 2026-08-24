@@ -525,7 +525,9 @@ class TestChunkQueryTimeout:
         with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
             retriever._get_chunks([0.0] * 1024, top_k=5)
         executed = " | ".join(str(c[0][0]) for c in conn.execute.call_args_list)
-        assert f"SET statement_timeout = {_WIKI_QUERY_TIMEOUT_MS}" in executed
+        # Composed via psycopg.sql now, so match on content not exact text.
+        assert "statement_timeout" in executed
+        assert str(_WIKI_QUERY_TIMEOUT_MS) in executed
 
     def test_timeout_is_below_the_context_injector_deadline(self):
         # context_injector abandons the future at 30 s but Postgres keeps
@@ -655,3 +657,66 @@ class TestChunkSqlMatchesIndexKind:
         with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
             retriever._get_chunks([0.0] * 1024, top_k=5)
         assert "::vector" in cursor.execute.call_args[0][0]
+
+
+class TestIvfflatQueryTuning:
+    """ivfflat and hnsw need DIFFERENT recall knobs, and the wrong one is silent.
+
+    ivfflat defaults to probes = 1: it scans one list out of 4000 and returns
+    almost nothing, which is indistinguishable from "no matches" at the call
+    site. The migration builds lists = 4000 per partition, so probes must be
+    ~sqrt(lists).
+    """
+
+    def test_ivfflat_index_sets_probes(self, retriever):
+        retriever._index_am = "ivfflat"
+        conn, _ = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            retriever._get_chunks([0.0] * 1024, top_k=5)
+        executed = " | ".join(str(c[0][0]) for c in conn.execute.call_args_list)
+        assert "ivfflat.probes" in executed
+        assert "hnsw.ef_search" not in executed
+
+    def test_hnsw_index_sets_ef_search(self, retriever):
+        retriever._index_am = "hnsw"
+        conn, _ = _fake_conn(fetchall=[])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            retriever._get_chunks([0.0] * 1024, top_k=5)
+        executed = " | ".join(str(c[0][0]) for c in conn.execute.call_args_list)
+        assert "hnsw.ef_search" in executed
+        assert "ivfflat.probes" not in executed
+
+    def test_probes_is_tuned_for_32_partitions_not_one_index(self):
+        """probes is deliberately far below sqrt(lists).
+
+        sqrt(4000) = 63 is pgvector's guidance for a SINGLE index. A vector
+        query cannot prune partitions, so all 32 are probed: 63 would mean
+        2016 lists and ~8M vectors per query. Measured 2026-08-24: 66 s at
+        probes=63 against a 25 s statement_timeout, so every wiki-RAG query
+        would have timed out and returned nothing. probes=10 gives p90 10.0 s
+        with identical recall@10.
+        """
+        from rag_v1.wiki.wiki_retriever import _IVFFLAT_PROBES
+        assert _IVFFLAT_PROBES == 5
+        assert _IVFFLAT_PROBES < 4000 ** 0.5
+
+    def test_detects_ivfflat_access_method(self, retriever):
+        ivf = ("CREATE INDEX p000_hv_ivf ON public.wiki_chunks_part_p000 "
+               "USING ivfflat (((embedding)::halfvec(1024)) halfvec_cosine_ops)")
+        conn, _ = _fake_conn(fetchall=[{"def": ivf}])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            assert retriever._query_index_kind() == "halfvec"
+        assert retriever._index_am == "ivfflat"
+
+    def test_detects_hnsw_access_method(self, retriever):
+        conn, _ = _fake_conn(fetchall=[{"def": HALFVEC_DEF}])
+        with patch("rag_v1.wiki.wiki_retriever.conn_ctx", return_value=conn):
+            retriever._query_index_kind()
+        assert retriever._index_am == "hnsw"
+
+    def test_halfvec_sql_dimension_matches_the_constant(self):
+        # The dimension is hardcoded to keep the query a LiteralString; this is
+        # what stops it drifting from _WIKI_EMBED_DIMS.
+        from rag_v1.wiki.wiki_retriever import (
+            _SQL_TOP_CHUNKS_HALFVEC, _WIKI_EMBED_DIMS)
+        assert f"halfvec({_WIKI_EMBED_DIMS})" in _SQL_TOP_CHUNKS_HALFVEC

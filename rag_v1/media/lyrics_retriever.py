@@ -21,9 +21,8 @@ import logging
 from dataclasses import dataclass, field
 
 import psycopg
-from psycopg.rows import dict_row, DictRow
 
-from rag_v1.db.pg import get_conn
+from rag_v1.db.vector_index import vector_search
 from rag_v1.embed.embed_client import EmbedClient
 
 _LOG = logging.getLogger("sage_kaizen.lyrics_retriever")
@@ -124,15 +123,10 @@ class LyricsRetriever:
         return out
 
     def _query(self, qvec: list[float], top_k: int) -> list[LyricsResult]:
-        # `with` is load-bearing: it returns the connection to the pool.
-        # This used to call conn.close() on the thread-local cached connection,
-        # which defeated that cache entirely.
-        with get_conn(self._pg_dsn) as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                rows = cur.execute(
-                    _SQL_SEARCH,
-                    (qvec, qvec, self._max_distance, qvec, top_k),
-                ).fetchall()
+        rows = vector_search(
+            self._pg_dsn, _SQL_SEARCH,
+            (qvec, qvec, self._max_distance, qvec, top_k),
+        )
 
         return [
             LyricsResult(

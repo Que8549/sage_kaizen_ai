@@ -467,5 +467,5 @@ class TestLyricsRetriever:
         assert lyrics.search("a song about rain") == []
 
     def test_db_failure_degrades_to_empty(self, lyrics):
-        with patch.object(lr, "get_conn", side_effect=RuntimeError("db down")):
+        with patch.object(lr, "vector_search", side_effect=RuntimeError("db down")):
             assert lyrics.search("a song about rain") == []
