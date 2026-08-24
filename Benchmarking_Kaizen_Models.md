@@ -34,12 +34,12 @@ private eval.**
 
 | Model | Role | Port / GPU | What "better" means |
 |---|---|---|---|
-| Qwen2.5-Omni-7B Q6_K | FAST brain | 8011 / CUDA1 | TTFT, English-only, audio+vision, router-label discipline |
-| Qwen3.6-27B-MTP Q6_K | ARCHITECT | 8012 / CUDA0 | sustained t/s, reasoning quality, `<think>` contract, 128K ctx |
-| Qwen3-4B Q8_0 | Summarizer | 8013 / CPU | faithfulness to snippets; latency off the critical path |
+| Qwen2.5-Omni-7B Q6_K | FAST brain | 8011 / CUDA0 | TTFT, English-only, audio+vision, router-label discipline |
+| Qwen3.6-27B-MTP Q6_K | ARCHITECT | 8012 / CUDA1 | sustained t/s, reasoning quality, `<think>` contract, 128K ctx |
+| Qwen3-4B Q8_0 | Summarizer | 8013 / CUDA2 | faithfulness to snippets; latency off the critical path |
 | BGE-M3 FP16 | Text embed | 8020 / CUDA1 | recall@k — **re-ingest cost dominates** |
-| jina-clip-v2 | Wiki/image embed | 8031 / CUDA1 | recall@k + text↔image shared space |
-| CLAP htsat-unfused | Audio embed | 8040 / CUDA1 | audio recall@k |
+| jina-clip-v2 | Wiki/image embed | 8031 / CUDA2 | recall@k + text↔image shared space |
+| CLAP htsat-unfused | Audio embed | 8040 / CUDA2 | audio recall@k |
 | distil-large-v3.5 | STT (voice) | CPU | WER, latency |
 | Kokoro-82M ONNX | TTS (voice) | CPU | subjective; **GPU migration already tried and rejected** |
 
@@ -55,7 +55,7 @@ Binary. Any failure ends the evaluation. Implemented in `evals/gates.py`.
 
 | Gate | FAST | ARCH | How |
 |---|:--:|:--:|---|
-| VRAM fits **with co-tenants** | ✓ | ✓ | CUDA1 also hosts wiki-embed A + B and CLAP |
+| VRAM fits **with co-tenants** | ✓ | ✓ | Remapped 2026-08-24: CUDA0 hosts FAST alone; CUDA1 = ARCHITECT + BGE-M3; CUDA2 = summarizer + jina-clip-v2 + CLAP |
 | Audio encoder present | ✓ | — | `clip_has_audio_encoder` / mmproj metadata |
 | Vision encoder present | ✓ | — | `clip_has_vision_encoder` |
 | Both in ONE mmproj | ✓ | — | combined omni encoder |
@@ -69,7 +69,8 @@ Binary. Any failure ends the evaluation. Implemented in `evals/gates.py`.
 ### Layer 2 — Performance (~30 min, fully objective)
 
 ```powershell
-llama-bench -m <model> -dev CUDA0 -ngl 999 -sm none -fa on `
+# ARCHITECT moved to CUDA1 on 2026-08-24; FAST is on CUDA0.
+llama-bench -m <model> -dev CUDA1 -ngl 999 -sm none -fa on `
             -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 -t 16 `
             -p 512 -n 128 -d 0,8192 -r 3 -o json
 ```
@@ -216,7 +217,7 @@ New in b10298 and relevant to this stack:
   time a TTS path has existed inside the brain stack at all. It does **not** make
   Kokoro-on-GPU any less rejected (that failed for its own reasons), but it is a
   genuinely new option that did not exist when the voice pipeline was designed:
-  TTS on CUDA1 through llama-server rather than ONNX on CPU. Unevaluated — no gate
+  TTS on CUDA2 through llama-server rather than ONNX on CPU. Unevaluated — no gate
   has been run against it, and voice TTFT (< 800 ms to first *audio*) is the metric
   that would decide it.
 - `spec: support eagle3 for qwen3.5 & 3.6` (#24593) — an **alternative speculative

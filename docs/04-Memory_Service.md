@@ -199,7 +199,7 @@ Memory bundles must be sized for the receiving brain's context window.
 | Brain | Max bundle tokens | Reason |
 |-------|-------------------|--------|
 | FAST (Qwen2.5-Omni-7B) | 600 | 16K total; 1 image ≈ 1,280 tokens; need headroom |
-| ARCHITECT (Qwen3.5-27B) | 1,500 | 64K total; deep context is fine |
+| ARCHITECT (Qwen3.6-27B-MTP) | 1,500 | 128K total; deep context is fine |
 
 The bundle builder must enforce these caps by priority: profiles → rules → episodes (drop lowest-scored episodes first).
 

@@ -32,9 +32,9 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 
 ### Core modules (v1)
 - **Dual brains** (two llama-server instances):
-  - FAST brain (default): `Qwen2.5-Omni-7B-Q6_K` (port 8011, RTX 5090 OC/CUDA1) — multimodal: text + image + audio input via mmproj encoder
-  - ARCHITECT brain (on demand): `Qwen3.6-27B-MTP-Q6_K` (port 8012, RTX 5090/CUDA0) — **128K context**, reasoning mode (`<think>` tokens), MTP speculative decoding: draft-mtp, hybrid DeltaNet+attention
-  - Summarizer (lightweight): `Qwen3-4B-Q8_0` (port 8013, CPU-only) — search evidence summarization before context injection
+  - FAST brain (default): `Qwen2.5-Omni-7B-Q6_K` (port 8011, **CUDA0** — RTX 5090, display GPU) — multimodal: text + image + audio input via mmproj encoder
+  - ARCHITECT brain (on demand): `Qwen3.6-27B-MTP-Q6_K` (port 8012, **CUDA1** — RTX 5090 OC) — **128K context**, reasoning mode (`<think>` tokens), MTP speculative decoding: draft-mtp, hybrid DeltaNet+attention. Measured 64.25 t/s effective, 1.41x over base decode (§15)
+  - Summarizer (lightweight): `Qwen3-4B-Q8_0` (port 8013, **CUDA2** — RTX 5080 eGPU) — search evidence summarization before context injection. Moved off CPU 2026-08-24 (§16.1)
 - **Router**: selects brain, applies templates, escalates to ARCHITECT when needed (`router.py`)
 - **Streamlit UI**: chat interface, status, templates visible, debugging-friendly (`ui_streamlit_server.py`)
 - **Chat Service**: full turn lifecycle — route → memory → prompt → parallel RAG → stream (`chat_service.py`)
@@ -70,13 +70,13 @@ Sage Kaizen is a **local cognitive engine** made of replaceable modules:
 ### Service / Port Inventory
 | Service | Model | Port | GPU | Purpose |
 |---------|-------|------|-----|---------|
-| FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (5090 OC) | Multimodal chat (text + image + audio via mmproj) |
-| ARCHITECT brain | Qwen3.6-27B-MTP-Q6_K | 8012 | CUDA0 (5090) | Deep reasoning; 128K ctx; `<think>` tokens |
-| Summarizer | Qwen3-4B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
+| FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | **CUDA0 (5090, display)** | Multimodal chat. Sole service on the display GPU (§16.1) |
+| ARCHITECT brain | Qwen3.6-27B-MTP-Q6_K | 8012 | **CUDA1 (5090 OC)** | Deep reasoning; 128K ctx; `<think>` tokens |
+| Summarizer | Qwen3-4B-Q8_0 | 8013 | **CUDA2 (5080 eGPU)** | Search evidence summarization. Moved off CPU 2026-08-24 |
 | BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA1 (5090 OC) | RAG text embeddings (1024-dim). Moved off CUDA0 2026-08-06 — see §16 |
-| Wiki embed A | jina-clip-v2 | 8031 | CUDA1 (5090 OC) | Wikipedia multimodal embeddings (workers A1/A2); also serves media image embeds |
-| Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (5090 OC) | Wikipedia ingest only (workers B1/B2; stop FAST brain first) |
-| CLAP embed | clap-htsat-unfused | 8040 | CUDA1 (5090 OC) | Audio embeddings (512-dim) |
+| Wiki embed A | jina-clip-v2 | 8031 | **CUDA2 (5080 eGPU)** | Wikipedia multimodal embeddings; also serves media image embeds |
+| Wiki embed B | jina-clip-v2 | 8032 | CUDA2 (5080 eGPU) | Wikipedia ingest only. FAST no longer shares this GPU |
+| CLAP embed | clap-htsat-unfused | 8040 | **CUDA2 (5080 eGPU)** | Audio embeddings (512-dim) |
 | SearXNG | (metasearch) | 8080 | Docker Desktop | Live web search JSON API |
 | Voice STT/TTS | Whisper distil-large-v3.5 + Kokoro-82M | ZMQ 5790/5791/5792 | CPU (ONNX) | Voice: transcript in, token stream out, barge-in |
 
@@ -152,7 +152,9 @@ These are **hard constraints**:
    - Tables live in the `langgraph` schema (not `public`) — run `scripts/setup_langgraph_schema.sql` once as superuser before first review run
    - Do not introduce a separate database connection for the review service
 
-6. **`cuda:0` is display-only** — it drives three monitors. `cuda:1` (RTX 5090 OC) and `cuda:2` (RTX 5080 eGPU) are the compute GPUs.
+6. **No PyTorch compute on `cuda:0`** (was worded "cuda:0 is display-only", which reality never matched)
+   - cuda:0 drives three monitors. `torch.compile` autotune there is the documented Windows TDR trigger, so every PyTorch service (jina-clip-v2, CLAP) is barred from it.
+   - llama-server is C++ and IS permitted: since 2026-08-24 the FAST brain runs on cuda:0 as its sole tenant, leaving ~20.8 GB free (§16.1).
    - Enforced by `WikiRetriever`'s `DisplayGpuRefused` guard, which checks the *effective* device, not just config
    - The only sanctioned cuda:0 compute is `wiki_ingest.py --gpu0-workers 1` in the ingest project
    - See §10 and sage_kaizen_ai_ingest CLAUDE.md §19
@@ -183,9 +185,9 @@ User rig also known as "my rig":
 - Motherboard: Gigabyte X870E AORUS XTREME AI TOP AMD AM5 eATX Motherboard
 - CPU: AMD Ryzen 9 9950X3D
 - RAM: 192 GB DDR5 Speed: 6400 MT/s
-- GPU0: CUDA 0 - NVIDIA GeForce RTX 5090 (32GB VRAM) — primary display GPU (3 monitors); **ARCHITECT Brain only** (BGE-M3 moved off 2026-08-06, §16)
-- GPU1: CUDA 1 - Gigabyte GeForce RTX 5090 OC (32GB VRAM) — no display; FAST Brain + **BGE-M3 embed** + Wiki embed A **and** B + CLAP embed
-- GPU2: CUDA 2 - Gigabyte GeForce RTX 5080 (16GB VRAM) — no display; 
+- GPU0: CUDA 0 - NVIDIA GeForce RTX 5090 (32GB VRAM) — primary display GPU (3 monitors); **FAST Brain only**, ~20.8 GB left free (§16.1)
+- GPU1: CUDA 1 - Gigabyte GeForce RTX 5090 OC (32GB VRAM) — no display; **ARCHITECT Brain + BGE-M3 embed**
+- GPU2: CUDA 2 - Gigabyte GeForce RTX 5080 (16GB VRAM) — no display; **summarizer + jina-clip-v2 + CLAP** (§16.1). 
   - Connected by MinisForum DEG2 OCuLink eGPU Dock via USB-C (https://www.minisforum.com/products/deg2). 
   - The MinisForum DEG2 OCuLink eGPU Dock has a 2TB SSD drive.
 - CUDA: 13.3
@@ -264,18 +266,21 @@ If a commit message says "reverted", "removed", "uninstalled", or describes a fa
 
 ### Wiki Ingest — GPU Layout and Thermal Management
 
-**cuda:0 is display-only.** The RTX 5090 at CUDA0 drives three monitors and must
-not run sustained compute — Windows TDR (2 s) resets the display driver if a CUDA
-kernel runs too long, causing a black screen requiring reboot. cuda:1 (RTX 5090 OC)
-and cuda:2 (RTX 5080 eGPU) are the compute GPUs.
+**No PyTorch compute on cuda:0.** The RTX 5090 at CUDA0 drives three monitors, and
+Windows TDR (2 s) resets the display driver if a CUDA kernel runs too long —
+`torch.compile` autotune can freeze a GPU for 10–60 s, which means a black screen
+and a reboot. llama-server is C++, does no such autotune, and **is** permitted
+there: since 2026-08-24 the FAST brain is cuda:0's sole tenant (§16.1). The bar is
+on PyTorch services — jina-clip-v2 and CLAP.
 
-Wiki embed services A (port 8031) and B (port 8032) both run on **CUDA1
-(RTX 5090 OC)**. Service A was documented as CUDA0 until 2026-08-05; that was
-never true of the ingest path (`wiki_ingest.py` passes an explicit `device=`
-per service) but it *was* the value in `brains.yaml`, which is what any other
-consumer falls back to — including this app's chat-time `WikiRetriever`.
-Corrected in `brains.yaml` (commit a1ac499), in
-`WikiEmbedServiceConfig.device`, and enforced by a hard guard:
+Wiki embed services A (port 8031) and B (port 8032) both run on **CUDA2
+(RTX 5080 eGPU)** as of 2026-08-24; they were on CUDA1 before that, and service A
+was documented as CUDA0 until 2026-08-05. That last error was never true of the
+ingest path (`wiki_ingest.py` passes an explicit `device=` per service) but it
+*was* the value in `brains.yaml`, which is what any other consumer falls back to
+— including this app's chat-time `WikiRetriever`. Corrected in `brains.yaml`
+(commit a1ac499), in `WikiEmbedServiceConfig.device`, and enforced by a hard
+guard:
 
 - `rag_v1/wiki/wiki_retriever.py` raises `DisplayGpuRefused` rather than
   starting `mm_embed_service` on cuda:0, checking the **effective** device
@@ -286,8 +291,10 @@ Corrected in `brains.yaml` (commit a1ac499), in
 - It reads `/health`'s `device` field rather than trusting a bare ping, so a
   service this process did not start is also checked.
 
-The only sanctioned use of cuda:0 is `wiki_ingest.py`'s optional C worker under
-an explicit `--gpu0-workers 1`. See sage_kaizen_ai_ingest's CLAUDE.md §19 for
+The only sanctioned PyTorch use of cuda:0 is `wiki_ingest.py`'s optional C worker
+under an explicit `--gpu0-workers 1` — a deliberate, per-run override, not a
+default. Note that it now collides with the FAST brain, which lives on cuda:0;
+stop FAST before passing that flag. See sage_kaizen_ai_ingest's CLAUDE.md §19 for
 the audit this mirrors.
 
 Before running a long wiki ingest session, set GPU power limits once as Administrator:
@@ -298,7 +305,11 @@ Limits: GPU0 RTX 5090 → 420 W (stock 575 W; display GPU), GPU1 RTX 5090 OC →
 Then run ingest with `--no-power-limits` (limits persist until reboot).  
 If power limits cannot be applied, `wiki_ingest.py` auto-falls back to 2 workers + 75 ms throttle.  
 Default throttle is 25 ms per worker even with power limits applied (protective baseline).  
-Stop the FAST brain (port 8011) before starting wiki ingest — conservative: wiki-embed-B + FAST brain both run on CUDA1; stopping FAST avoids GPU compute contention during long ingest sessions.
+**No longer required (2026-08-24):** stopping the FAST brain before a wiki ingest
+was needed only while wiki-embed-B and FAST shared CUDA1. After the remap (§16.1)
+both wiki embed services are alone on CUDA2 and FAST is alone on CUDA0, so chat
+and ingest no longer contend for the same GPU. The power-limit script still
+applies — it caps the two 5090s, not the 5080.
 
 ---
 
@@ -342,10 +353,10 @@ Before proposing or applying a FAST brain model change, verify all of the follow
 | Audio file uploads (`.wav`, `.mp3`) | mmproj audio encoder; `kind="audio"` routes to FAST | `chat_service.py:194` |
 | Image input | mmproj vision encoder; `kind="image"/"video_frame"` → ARCHITECT or FAST | `chat_service.py:183` |
 | Video input | Client-side frame extraction → image attachments → ARCHITECT | `chat_service.py:183` |
-| Flash attention | `flash_attn: true` in brains.yaml; C++ runtime only (not Python) | `brains.yaml:67` |
-| KV prefix cache | `cache_ram: 512`, `slot_prompt_similarity: 0.10` | `brains.yaml:79,84` |
-| 32K context | `ctx_size: 32768` — 1 image ≈ 1280 tokens, ~30K for conversation | `brains.yaml:55` |
-| Port 8011, CUDA1 | Hard-coded in routing and inference session | `brains.yaml:39,43` |
+| Flash attention | `flash_attn: true` in brains.yaml; C++ runtime only (not Python) | `brains.yaml:78` |
+| KV prefix cache | `cache_ram: 512` — **unverified for FAST**; ARCHITECT's was dead at 256 (§15) | `brains.yaml:90` |
+| 32K context | `ctx_size: 32768` — 1 image ≈ 1280 tokens, ~30K for conversation | `brains.yaml:61` |
+| Port 8011, CUDA0 | `brains.yaml` is authoritative; do not hard-code | `brains.yaml:39,49` |
 | TTS voice pipeline | Audio output is text-only; Kokoro handles TTS separately | `voice_bridge.py` |
 
 ### Watch List — When to Revisit the FAST Brain Upgrade
@@ -514,41 +525,62 @@ warrants it.
 
 ---
 
-## 13) CROSS-PROJECT MODULE OWNERSHIP — this repo wins (measured 2026-08-04/05)
+## 13) CROSS-PROJECT MODULE OWNERSHIP — this repo owns them outright (2026-08-24)
 
-**Six modules are physically duplicated between this project and
-`sage_kaizen_ai_ingest`, and in every case the copy in THIS repo is the one
-Python actually imports — in both projects.** Editing the ingest copy has no
-runtime effect.
+**RESOLVED.** The duplicate copies in `sage_kaizen_ai_ingest` have been
+DELETED. These modules now exist once, here, and both projects import them
+from this repo:
 
-Measured from the *ingest* venv (`python -c "import _bootstrap, X; print(X.__file__)"`):
-
-| Module | Resolves to |
+| Module | Note |
 |---|---|
-| `sk_logging` | **this repo** |
-| `pg_settings` | **this repo** |
-| `openai_client` | **this repo** |
-| `rag_v1.db.pg` | **this repo** |
-| `rag_v1.wiki.wiki_embed_config` | **this repo** |
-| `rag_v1.wiki.mm_embed_client` | **this repo** |
-| `rag_v1.media.media_embed_client` | **this repo** |
-| `rag_v1.wiki.wiki_ingest` | ingest (exists only there) |
-| `rag_v1.ingest.*`, `rag_v1.media.media_ingest` | ingest (exist only there) |
+| `sk_logging` | |
+| `pg_settings` | |
+| `openai_client` | never duplicated; listed for completeness |
+| `rag_v1.db.pg` | |
+| `rag_v1.wiki.wiki_embed_config` | |
+| `rag_v1.wiki.mm_embed_client` | |
+| `rag_v1.media.media_embed_client` | driven at volume by ingest, not by this app |
+| `news.news_settings` | **was missing from the old list** |
+| `news.scheduler.news_scheduler` | **was missing from the old list** |
 
-**Cause.** `sage_kaizen_ai_ingest/_bootstrap.py` inserts each project root only
-`if _s not in sys.path`. With both projects `pip install -e`'d into a venv both
-roots are already present, so both inserts are skipped and the `.pth` ordering
-decides — which puts `F:\Projects\sage_kaizen_ai` at `sys.path[0]`. The ingest
-project's own docs described the opposite intent; see its CLAUDE.md §20.
+Still ingest-only, unchanged: `rag_v1.wiki.wiki_ingest`, `rag_v1.ingest.*`,
+`rag_v1.media.media_ingest`, `news.enrichment.*`, `news.images.*`,
+`news.summaries.*`, `news.base_job`.
 
-**What this means when working here.** Any change to one of those seven modules
-is a **cross-project change**. `rag_v1/media/media_embed_client.py` in
-particular is driven at volume by the ingest media pipeline, not by anything in
-this app — which is how it went years with an unpooled HTTP client nobody
-noticed (§14 below). Before changing one, check the ingest project's call sites.
+### What the old arrangement actually cost
 
-The last two rows of that table were discovered on 2026-08-05 and are **not** in
-ingest §20's version of it.
+From 2026-08-04 until now this section said six (later seven) modules were
+duplicated and that this repo's copy won. Both halves were understated.
+
+- There were **nine**, not seven. `news_settings` and `news_scheduler` were
+  never listed, and `openai_client` was listed despite not being duplicated.
+- **Every single duplicated pair had diverged**, and the divergence ran in
+  both directions — the dead copies were not stale, they were *different*.
+  Three real fixes were sitting in unreachable code:
+
+  | Dead copy held | Live copy had |
+  |---|---|
+  | `pg_settings`: `.env` resolved relative to the FILE | `env_file=".env"`, CWD-relative — every ingest script, launched from the ingest root, silently got the placeholder defaults |
+  | `news_scheduler`: `COALESCE((metadata->>'fetch_retry_count')::int, 0)` | no COALESCE — `NULL < 3` is NULL, so an article that failed its FIRST fetch was **never** retried |
+  | `news_scheduler`: singleton `_lock` + context-managed jobs | unsynchronised `start()`, leaked httpx clients |
+
+  All three are now ported into the live copies. This is the real argument
+  against "harmless" duplication: the tested, better-maintained copy was the
+  one that never ran.
+- **ingest's test suite was testing the dead copies.** Its `news_scheduler`
+  reported 100% coverage while the live module in this repo reported **0%**.
+  That test file now lives at `tests/test_news_scheduler.py` here.
+
+**Cause of the shadowing.** `sage_kaizen_ai_ingest/_bootstrap.py` inserts each
+project root only `if _s not in sys.path`. With both projects `pip install -e`'d
+both roots are already present, so both inserts are skipped and `.pth` ordering
+decides — putting `F:\Projects\sage_kaizen_ai` at `sys.path[0]`. Verified from
+ingest's OWN venv, not the shared one; the result is the same either way.
+`_bootstrap.py`'s docstring asserted the opposite and has been corrected.
+
+**Working rule now.** These modules have one home. Changing one is still a
+cross-project change — check ingest's call sites before you do — but there is
+no longer a second copy to keep in sync or to mistake for the live one.
 
 ---
 
@@ -801,12 +833,21 @@ matters because after isolation each server's own log only ever says "CUDA0".
 
 ---
 
-## 17) WIKI-RAG IS SILENTLY DEAD WHILE INGEST RUNS (measured 2026-08-06)
+## 17) WIKI-RAG WAS SILENTLY DEAD — RESOLVED 2026-08-24
 
-**`wiki_chunks` has no HNSW index right now.** `sage_kaizen_ai_ingest`'s
-`--manage-indexes` drops it before a bulk run and rebuilds it after, and ingest
-is mid-run. That is correct behaviour for ingest. The problem is what it does to
-*this* app, which nobody had looked at.
+> **STATUS: FIXED.** `wiki_chunks` is now a 32-way HASH-partitioned table with
+> 32 halfvec **ivfflat** indexes (1,304 GB on the NVMe tablespace), and wiki-RAG
+> returns relevant results in 4-8.7 s. See §18 for the migration and §18.2 for
+> the measured outcome. The section below is kept because the failure mode it
+> describes is permanent: **it recurs for the duration of every bulk ingest**,
+> since `--manage-indexes` still drops the vector indexes for the whole run.
+> The `WikiRetriever` guard added here is what makes that degradation loud
+> instead of silent.
+
+**The original problem (2026-08-06):** `wiki_chunks` had no ANN index.
+`sage_kaizen_ai_ingest`'s `--manage-indexes` drops it before a bulk run and
+rebuilds it after, and ingest was mid-run. That is correct behaviour for ingest.
+The problem is what it did to *this* app, which nobody had looked at.
 
 ### Symptom
 
@@ -830,32 +871,40 @@ one shared 30 s deadline, so the wiki worker **always** misses it. Net effect:
 `daily_news` and `news_image_embeddings` all have HNSW indexes. `wiki_chunks`
 and `wiki_images` are the only two without.
 
-### Recommended fix in THIS repo (not yet implemented)
+### The fix (IMPLEMENTED 2026-08-06, still active)
 
-`WikiRetriever` should check for the index once and short-circuit when it is
+`WikiRetriever` checks for the index once and short-circuits when it is
 absent — a single `pg_indexes` lookup, cached — logging a clear "wiki-RAG
 disabled: no vector index" rather than firing a 3.5 TB scan per turn. That
 converts a silent 30 s timeout plus minutes of stray I/O into an immediate,
 visible no-op. It also makes the degradation honest: the retriever already has a
 `DisplayGpuRefused`-style guard pattern to follow.
 
-### Cost of the rebuild (so nobody assumes it is quick)
+### Cost of the rebuild — SUPERSEDED by measurement, see §18.2
 
-508,359,968 rows × 1024-dim float32. Estimated HNSW at m=16/ef_construction=100:
-**~2.2 TB and days to ~2 weeks** — the graph needs ~2.2 TB of
+The estimate below was made before the work was done. What actually happened:
+HNSW was abandoned after a ~44-day projection, and 32 **ivfflat** indexes were
+built in **4.27 days** totalling **1,304 GB**. Keep the reasoning, ignore the
+numbers.
+
+Original estimate: 508,359,968 rows × 1024-dim float32, HNSW at
+m=16/ef_construction=100: **~2.2 TB and days to ~2 weeks** — the graph needs ~2.2 TB of
 `maintenance_work_mem` and the machine has 192 GB, so the build is almost
 entirely on-disk. Full measurements, the growth trend (chunks per page rise
 27 → 154 → 400 across the corpus, so the finished index may exceed 5 TB), and
 the `halfvec` / Matryoshka / partitioning alternatives are documented in
 **sage_kaizen_ai_ingest CLAUDE.md §21**. Do not rebuild mid-run.
 
-### Also found: PostgreSQL is on stock defaults
+### Also found: PostgreSQL was on stock defaults — TUNED 2026-08-06/24
 
-`shared_buffers = 128MB`, `work_mem = 4MB`, `maintenance_work_mem = 64MB`,
-`effective_cache_size = 4GB` — on a 192 GB machine with a 3.5 TB database. This
-throttles every query this app makes, not just wiki-RAG. See ingest CLAUDE.md
-§22. Untouched: `postgresql.conf` is machine-level config outside both repos and
-needs a restart.
+Was `shared_buffers = 128MB`, `work_mem = 4MB`, `maintenance_work_mem = 64MB`,
+`effective_cache_size = 4GB` on a 192 GB host. Now applied via `ALTER SYSTEM`
+(most settings are sighup, so no restart was needed): `max_wal_size` 16GB,
+`wal_compression` lz4, `effective_cache_size` 128GB, `work_mem` 64MB,
+`checkpoint_timeout` 15min, plus `shared_buffers` 512MB and `wal_buffers` 64MB
+on the 2026-08-11 restart. `pg_wal` also moved to NVMe (E:), which measured a
+**+70% copy throughput** gain. Rationale for every value:
+`config/postgres/sage_kaizen_tuning.conf`.
 
 ### Notes for anyone measuring this table
 
@@ -1075,3 +1124,114 @@ main reads**, and broke ingest three ways that no test would have caught:
 
 All three were found by reading the other project, not by running tests. That is
 why items 2-6 are manual greps rather than assertions.
+
+### 18.2) OUTCOME — the migration as actually built (2026-08-24)
+
+Every phase except `--swap` is complete. What follows is measured, not planned.
+
+| Phase | Result |
+|---|---|
+| copy | 512,483,256 rows |
+| dedupe | 999,970 duplicate rows removed |
+| constraints | 5 btree indexes, 7 NOT NULLs, 2 FKs validated, ANALYZE (27,662 s) |
+| index | **32/32 ivfflat, all valid, 1,304 GB** on `sage_nvme` (D:) |
+| verify | **source 512,483,260 = target 512,483,256 + 4 quarantined** |
+| swap | NOT RUN — destructive, gated |
+
+### HNSW was abandoned on measurement
+
+Partition 1 of 32 ran **8.24 h** and had written 8.6 GB of ~35 GB (~25%), which
+projects to ~33 h/partition and **~44 days**. CPU was at 7% while the source HDD
+sat at 0% idle delivering 23.4 MB/s: the bottleneck was never graph construction
+or the NVMe, it was reading ~89 GB of heap + TOASTed vectors per partition off a
+7200 RPM disk. ivfflat pays that read once instead of repeatedly.
+
+ivfflat actual: first two partitions 7.8 h each (competing with leftover
+autovacuum/ANALYZE), remaining 30 averaged **2.90 h**. Total **102.5 h = 4.27
+days**. A 9.7-day projection made from the first two samples was 2.3x pessimistic.
+
+### probes is NOT sqrt(lists) — the most important number here
+
+pgvector's `probes ~= sqrt(lists)` assumes ONE index. A nearest-neighbour query
+has no `page_id` predicate, so it **cannot prune partitions** — all 32 are
+probed and the cost multiplies by 32. Measured 2026-08-24, 12 random queries per
+setting on an identical sample:
+
+```
+probes=63 (sqrt)   66.3 s single query      -> past the 25 s statement_timeout
+probes=20          p90 24.98 s  max 29.51 s -> at/over the timeout
+probes=10          p90 10.03 s  max 10.19 s  recall@10 75%   <- chosen
+probes=5           p90 36.45 s (cold cache)  recall@10 75%
+```
+
+**Recall was identical at 5/10/20**, so probing more buys latency and nothing.
+At 63 every wiki-RAG query would have hit the timeout and returned nothing —
+indistinguishable from "no matches", the exact failure §17 exists to prevent.
+Two tests asserted the sqrt rule and therefore enforced the bug; both now assert
+the partition-aware constraint instead.
+
+The 75% figure is **self-recall** (does a vector retrieve itself), a floor not a
+full measure. It did not improve at 20 probes, so it is not probe starvation —
+most likely halfvec quantisation plus near-duplicate wiki boilerplate filling
+the top-10. Real semantic recall needs the golden set (§15) and is unmeasured.
+
+### A copy-phase bug worth remembering
+
+`phase_copy` committed the batch INSERT and the resume marker as **two separate
+autocommit transactions**. A process killed in that gap left the rows committed
+with the marker unmoved, so the next run re-copied that batch. Seven-ish
+interruptions produced 999,970 duplicates — 9.9997 batches of 100,000, which is
+what identified the cause. The unique index caught it; `--dedupe` repaired it;
+both statements now commit together, with bisection using SAVEPOINTs.
+
+### Four source rows are permanently unreadable
+
+`wiki_chunks` TOAST has one damaged 8 KB page per incident, found by
+`data_checksums = on`: chunk_ids 173,810,706 / 173,810,708
+(`Bavarian_Lower_Inn_Valley`) and 260,664,119 / 260,664,120
+(`Catherine_(Black_Clover)`). Recorded in `wiki_chunks_corrupt` with page_id and
+title, absent from the new table, **source never modified**. Re-ingest those two
+pages to restore them.
+
+### 16.1) GPU REMAP APPLIED — 2026-08-24 (Option 2)
+
+The display GPU no longer carries the heavy model. Applied in brains.yaml:
+
+| GPU | Before | After |
+|---|---|---|
+| CUDA0 (5090, 3 monitors) | ARCHITECT + BGE-M3, **106 MiB free** | **FAST only** (~10.3 GB), ~20.8 GB free |
+| CUDA1 (5090 OC, headless) | FAST + embeds | ARCHITECT + BGE-M3 |
+| CUDA2 (5080 eGPU) | **idle** | summarizer + jina-clip-v2 + CLAP |
+
+**The summarizer moved off the CPU.** It sat on the search critical path doing
+CPU inference while a 16 GB GPU idled. OCuLink Gen4 x4 costs 2-3% for a
+fully-resident model, and it is the lowest-risk eGPU tenant: a tunnel hiccup
+delays search summarisation, it does not break a chat turn. BGE-M3 stays on a
+5090 precisely because it *is* on the critical path.
+
+**`_auto_start_servers` now starts embed synchronously BEFORE the brains.**
+BGE-M3 and ARCHITECT now share CUDA1, and `--fit` samples free VRAM at its own
+startup — launched in parallel that is a race, and it is exactly how CUDA0 ended
+up with 106 MiB free. `ensure_embed_running` is idempotent, so the later
+`ensure_q5_running` call costs nothing.
+
+`evals/gates.py: DEVICE_CO_TENANTS` and `scripts/run_model_gate.py: _DEVICE_INDEX`
+were both stale after the remap and are corrected — the gate was still assuming
+FAST lived on CUDA1 with all four embed services beside it.
+
+### 16.2) ivfflat probes: FINAL value is 5, not 10 and definitely not 63
+
+Cold-page measurement is the only one that matters — a warm repeat is ~1 s at
+any setting. 10 random vectors scattered across the 1.3 TB index:
+
+```
+probes=10   median 15.36 s   p90 74.17 s   1/10 OVER the 25 s timeout
+probes=5    median  4.10 s   p90  8.76 s   0/10 over      <- chosen
+probes=3    median  1.49 s   p90  2.96 s   0/10 over
+```
+
+probes=3 is faster still but its recall is unmeasured (a single probe vector
+found itself at 3; at 1 it did not), so 5 buys margin for ~2.6 s.
+
+Post-swap end-to-end at probes=5: 4/5 real queries return relevant results in
+4.0-8.7 s warm. The empty one was the distance/noise gate, not a timeout.

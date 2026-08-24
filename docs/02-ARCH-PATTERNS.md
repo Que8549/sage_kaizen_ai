@@ -12,8 +12,8 @@ Two independent llama-server instances with distinct roles:
 
 | Brain | Model | Port | GPU | Role |
 |-------|-------|------|-----|------|
-| FAST | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (RTX 5090 OC) | Default; multimodal (text + image + audio); low-latency |
-| ARCHITECT | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (RTX 5090) | Deep reasoning; 128K context; `<think>` tokens; speculative decoding |
+| FAST | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA0 (RTX 5090, display) | Default; multimodal (text + image + audio); low-latency |
+| ARCHITECT | Qwen3.6-27B-MTP-Q6_K | 8012 | CUDA1 (RTX 5090 OC) | Deep reasoning; 128K context; `<think>` tokens; MTP speculative decoding |
 
 ### Why
 - Performance isolation — FAST handles 80–90 % of requests without occupying the 5090
@@ -53,7 +53,7 @@ All ingest pipelines use stable source IDs + content hashing to allow safe re-ru
 
 ### Why
 - Prevents duplicate vector entries when ingest is re-run after a crash
-- Enables partial-failure recovery without corrupting the HNSW index
+- Enables partial-failure recovery without corrupting the vector index
 
 ### Rules
 - Source ID format: `localfile:<path>`, `rss_item:<url>`, `web:<url>`, `wiki:<title>`
@@ -232,7 +232,7 @@ Each subsystem exposes a narrow interface; the implementation behind it can be s
 |-----------|---------|-----------------|
 | STT | faster-whisper distil-large-v3.5 (ONNX, CPU) | any model implementing `transcribe(audio) -> str` |
 | TTS | Kokoro-82M ONNX (CPU) | any model implementing `synthesize(text) -> audio_bytes` |
-| Vector DB | pgvector HNSW | any service returning `(source_id, chunk_id, score, content)` tuples |
+| Vector DB | pgvector (HNSW for rag_chunks/media; ivfflat for partitioned wiki_chunks) | any service returning `(source_id, chunk_id, score, content)` tuples |
 | LLM backend | llama-server (GGUF) | any OpenAI-compatible `/v1/chat/completions` endpoint |
 | Text embeddings | BGE-M3 FP16 via llama-server | any service returning float vectors via `/v1/embeddings` |
 | Image embeddings | jina-clip-v2 (FastAPI) | any 1024-dim CLIP-style model |
@@ -288,13 +288,13 @@ Review runs are dominated by ARCHITECT inference (minutes per node). Overhead is
 Long-running background tasks (Wiki ingest, model consolidation) coordinate with active chat sessions to avoid GPU contention.
 
 ### Why
-- Wiki ingest on CUDA1 (RTX 5090 OC) shares GPU compute with FAST brain (also CUDA1)
+- Wiki ingest moved to CUDA2 (RTX 5080 eGPU) on 2026-08-24; it no longer shares a GPU with FAST (now CUDA0)
 - Running ingest during a live chat session causes inference timeouts
 
 ### Implementation
 - `chat_service.record_chat_activity()` — updates a shared timestamp on every turn
 - `chat_service.last_chat_activity_ts()` — read by background tasks to check idle time
-- Wiki ingest: stops service B (port 8032 / CUDA1) when chat is active; restarts during idle windows
+- Wiki ingest: services A/B (ports 8031/8032) run on CUDA2, so chat and ingest no longer contend for the same GPU
 - Background memory consolidation: runs only when no turn has fired in the last N seconds
 
 ---
