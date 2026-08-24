@@ -78,13 +78,18 @@ source = [
     "./rag_v1/retrieve",
     "./rag_v1/runtime",
     "./rag_v1/wiki",
+    # scripts/ was omitted wholesale until 2026-08-24, which hid the 993-line
+    # wiki_chunks partition migration — a script that issues destructive DDL
+    # against a 1.3 TB table and already HAD 28 tests.  Excluding a directory
+    # does not merely leave it unmeasured, it removes it from the denominator,
+    # so the tested-ness of the riskiest code in the repo was invisible.
+    "./scripts",
 ]
 omit = [
     "tests/*",
     "llama.cpp/*",
     "flash-attention/*",
     ".venv/*",
-    "scripts/*",
     # ── Deliberately unmeasured (2026-08-04) ──────────────────────────────
     # Streamlit entry script.  ~800 of its 1534 lines are module-level
     # straight-line code that, AT IMPORT, starts the llama-servers, spawns
