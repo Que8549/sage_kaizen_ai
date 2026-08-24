@@ -26,20 +26,18 @@ Partitioning makes the unit of work smaller than the mean time between crashes.
 Each partition's index is an independent, restartable build, and a crash costs
 one partition instead of the entire run.
 
-THE TWO NUMBERS THAT SET THE PARTITION COUNT
---------------------------------------------
-An HNSW build is fast while the graph fits in maintenance_work_mem and
-collapses to random disk I/O when it does not ("Indexes build significantly
-faster when the graph fits into maintenance_work_mem" — pgvector README). So
-partitions are sized so ONE partition's graph fits in RAM:
+WHY 32 PARTITIONS
+-----------------
+Originally chosen so one partition's HNSW graph (~36 GB at halfvec) fit in a
+48 GB maintenance_work_mem. That reasoning was sound but incomplete, and HNSW
+has since been abandoned — see the ivfflat block further down for the measured
+reason. The partition count still stands on its own merits: it bounds each unit
+of work below this host's mean time between crashes, which is the whole design
+constraint.
 
-    halfvec(1024) element  ~= 2056 B vector + ~200 B neighbour lists  ~= 2.3 KB
-    508M rows / 32 partitions                                          ~= 15.9M rows
-    15.9M x 2.3 KB                                                     ~= 36 GB
-
-which fits in a 48 GB maintenance_work_mem on a 190 GB host, with one build
-running at a time. Full-precision vector(1024) would be ~4.3 KB/element (~68 GB
-per partition) and would not fit — which is the other reason for halfvec.
+halfvec remains, for two independent reasons: it halves the vector bytes read
+per build (the actual bottleneck), and full-precision vector(1024) would put the
+finished index past the capacity of the NVMe it lives on.
 
 HASH, not the existing first_letter column: letter distribution is heavily
 skewed (S/C/M vs X/Z), and vector search probes every partition anyway, so even
@@ -78,6 +76,12 @@ from psycopg import sql  # noqa: E402
 from psycopg.rows import DictRow, dict_row  # noqa: E402
 
 from pg_settings import PgSettings  # noqa: E402
+from rag_v1.db.vector_index import (  # noqa: E402
+    VECTOR_INDEX_AMS,
+    WIKI_EMBED_DIMS,
+    WIKI_IVFFLAT_LISTS,
+    WIKI_IVFFLAT_PROBES,
+)
 
 
 def _one(cur: psycopg.Cursor[DictRow]) -> DictRow:
@@ -103,12 +107,42 @@ DEFAULT_PARTITIONS = 32
 DEFAULT_BATCH_ROWS = 200_000
 DEFAULT_MWM = "48GB"
 DEFAULT_INDEX_TABLESPACE = "sage_nvme"
-EMBED_DIMS = 1024
+EMBED_DIMS = WIKI_EMBED_DIMS
 
-# HNSW parameters copied from the index ingest already knows how to drop and
-# rebuild, so the two projects stay describing the same thing.
-HNSW_M = 16
-HNSW_EF_CONSTRUCTION = 100
+# ---------------------------------------------------------------------------
+# ANN index: ivfflat, not HNSW  (decision 2026-08-17)
+# ---------------------------------------------------------------------------
+# HNSW was tried first and abandoned on measurement, not theory. Partition 1 of
+# 32 ran for 8.24 hours and had written 8.6 GB of an expected ~35 GB — about
+# 25% — which projects to ~33 h per partition and ~44 DAYS for the table.
+#
+# The bottleneck was never the graph or the NVMe (which was writing 94.5 MB/s
+# with 4 parallel workers). It was reading each partition's source off the HDD:
+# ~24 GB of heap plus ~65 GB of TOASTed vectors, randomly accessed, delivering
+# only 23.4 MB/s. The 36 GB-per-partition sizing that made the graph fit in
+# maintenance_work_mem was sound; it just did not address read cost.
+#
+# ivfflat builds in essentially one pass (k-means on a sample, then assign each
+# row to a list) instead of incremental graph construction, so it pays that read
+# cost once rather than repeatedly. Lower recall than HNSW, but tunable via
+# probes — and wiki-RAG returning good-enough results in hours beats perfect
+# results in six weeks, given the whole point is that it currently returns
+# nothing at all (CLAUDE.md §17).
+#
+# lists: pgvector recommends sqrt(rows) above 1M rows. Per PARTITION that is
+# sqrt(512M / 32) = sqrt(16.0M) ~= 4000 — not sqrt of the whole table, because
+# each partition carries its own independent index.
+# probes at query time is NOT sqrt(lists): a vector query cannot prune
+# partitions, so all 32 are probed and the cost multiplies by 32. The full
+# cold-page measurement table lives in rag_v1/db/vector_index.py, which is the
+# one place these values are defined — this script and WikiRetriever both read
+# them from there, because three local copies had already drifted apart once.
+IVFFLAT_LISTS = WIKI_IVFFLAT_LISTS
+IVFFLAT_PROBES = WIKI_IVFFLAT_PROBES
+
+# VECTOR_INDEX_AMS is imported: it also lets _drop_invalid_indexes and
+# _partition_has_valid_index recognise (and clean up) leftovers from the
+# abandoned HNSW attempt.
 
 
 # --------------------------------------------------------------------------- #
@@ -318,6 +352,34 @@ WHERE chunk_id > %s AND chunk_id <= %s
 """
 
 
+def _set_partition_autovacuum(conn: psycopg.Connection, partitions: int,
+                              enabled: bool) -> None:
+    """
+    Turn autovacuum off on the target partitions for the duration of the copy.
+
+    Measured 2026-08-10: with autovacuum on, three workers ran VACUUM ANALYZE
+    against the partitions being written while the copy's INSERT sat in
+    DataFileRead for 114 s, and throughput collapsed from ~1,806 to **340
+    rows/s**. The workers and the copy were contending for the same HDD.
+
+    This is self-inflicted — config/postgres/sage_kaizen_tuning.conf raises
+    autovacuum_vacuum_cost_limit to 2000 and drops naptime to 30 s, which is
+    right for steady state and wrong during a bulk load.
+
+    During the copy the target is INSERT-only: no dead tuples to reclaim, so the
+    work is near-pure waste. Anti-wraparound vacuum still runs regardless of this
+    setting, so freezing is not at risk. It MUST be re-enabled afterwards —
+    phase_constraints does that, along with the ANALYZE the planner needs.
+    """
+    for i in range(partitions):
+        conn.execute(
+            sql.SQL("ALTER TABLE {} SET (autovacuum_enabled = {})").format(
+                sql.Identifier(_partition_name(i)),
+                sql.SQL("true" if enabled else "false"),
+            )
+        )
+
+
 def _corrupt_count(conn: psycopg.Connection) -> int:
     with conn.cursor(row_factory=dict_row) as cur:
         return _one(cur.execute(f"SELECT count(*) AS n FROM {CORRUPT_TABLE}"))["n"]
@@ -377,7 +439,10 @@ def _copy_range(conn: psycopg.Connection, lo: int, hi: int,
     by content_hash.
     """
     try:
-        with conn.cursor() as cur:
+        # Nested inside phase_copy's transaction this becomes a SAVEPOINT, so a
+        # DataCorrupted failure rolls back only this sub-range instead of
+        # poisoning the whole batch transaction and aborting the run.
+        with conn.transaction(), conn.cursor() as cur:
             cur.execute(_INSERT_RANGE, (lo, hi))
             return cur.rowcount
     except psycopg.errors.DataCorrupted as exc:
@@ -417,6 +482,13 @@ def phase_copy(conn: psycopg.Connection, batch_rows: int) -> None:
         print(f"  copy: resuming after chunk_id {cursor_id:,} ({rows_done:,} rows done)")
     print(f"  copy: target max chunk_id {max_id:,}, batch {batch_rows:,}")
 
+    part_count = (state.partitions if state and state.partitions
+                  else (_read_phase(conn, "create") or Phase("", None, 0, None, False)).partitions
+                  or DEFAULT_PARTITIONS)
+    _set_partition_autovacuum(conn, part_count, enabled=False)
+    print(f"  copy: autovacuum disabled on {part_count} target partitions "
+          f"(re-enabled by --constraints)")
+
     started = time.monotonic()
     rows_at_start = rows_done          # so the rate reflects THIS run, not resumed totals
     skipped_total = _corrupt_count(conn)
@@ -426,12 +498,21 @@ def phase_copy(conn: psycopg.Connection, batch_rows: int) -> None:
     while cursor_id < max_id:
         upper = cursor_id + batch_rows
         skipped: list[int] = []
-        copied = _copy_range(conn, cursor_id, upper, skipped)
-        skipped_total += len(skipped)
 
+        # The INSERT and the resume marker MUST commit together. They used to be
+        # two autocommit statements, and killing the process in the gap left the
+        # rows committed with the marker unmoved — so the next run re-copied that
+        # batch. Measured 2026-08-12 after ~7 interruptions: 0.157% of rows
+        # duplicated (~808k of 512M), every pair exactly one batch apart in
+        # insertion order, which is that gap's precise signature. The unique
+        # index in --constraints is what caught it; --dedupe repairs it.
+        with conn.transaction():
+            copied = _copy_range(conn, cursor_id, upper, skipped)
+            _mark(conn, "copy", last_chunk_id=upper, rows_done=rows_done + copied)
+
+        skipped_total += len(skipped)
         cursor_id = upper
         rows_done += copied
-        _mark(conn, "copy", last_chunk_id=cursor_id, rows_done=rows_done)
 
         pct = 100.0 * cursor_id / max_id if max_id else 100.0
         rate = (rows_done - rows_at_start) / max(time.monotonic() - started, 1e-6)
@@ -456,9 +537,9 @@ def _partition_has_valid_index(conn: psycopg.Connection, part: str) -> bool:
             JOIN pg_class idx ON idx.oid = i.indexrelid
             JOIN pg_class tbl ON tbl.oid = i.indrelid
             JOIN pg_am    am  ON am.oid  = idx.relam
-            WHERE tbl.relname = %s AND am.amname = 'hnsw' AND i.indisvalid
+            WHERE tbl.relname = %s AND am.amname = ANY(%s) AND i.indisvalid
             """,
-            (part,),
+            (part, list(VECTOR_INDEX_AMS)),
         ).fetchone()
     return bool(row and row["n"])
 
@@ -479,9 +560,9 @@ def _drop_invalid_indexes(conn: psycopg.Connection, part: str) -> int:
             JOIN pg_class idx ON idx.oid = i.indexrelid
             JOIN pg_class tbl ON tbl.oid = i.indrelid
             JOIN pg_am    am  ON am.oid  = idx.relam
-            WHERE tbl.relname = %s AND am.amname = 'hnsw' AND NOT i.indisvalid
+            WHERE tbl.relname = %s AND am.amname = ANY(%s) AND NOT i.indisvalid
             """,
-            (part,),
+            (part, list(VECTOR_INDEX_AMS)),
         ).fetchall()
     for r in rows:
         print(f"    dropping invalid index left by an interrupted build: {r['name']}")
@@ -495,25 +576,22 @@ def _drop_invalid_indexes(conn: psycopg.Connection, part: str) -> int:
 
 def _index_stmt(part: str, tablespace: str | None) -> sql.Composed:
     """
-    The per-partition halfvec HNSW index statement.
+    The per-partition halfvec ivfflat index statement.
 
-    Extracted so the generated DDL can be asserted without a database. It is
-    the one statement in this script that has never been executed against real
-    data — the index phase runs after a multi-day copy — and a mistake in it
-    (wrong opclass, missing cast, wrong tablespace) would not surface until
-    then. The halfvec cast in particular must match what WikiRetriever queries
-    with, or the index is built correctly and then never used.
+    Extracted so the generated DDL can be asserted without a database. The
+    halfvec cast in particular must match what WikiRetriever queries with, or
+    the index is built correctly and then never used — pgvector only uses an
+    expression index when the query casts identically.
     """
     stmt = sql.SQL(
         "CREATE INDEX {idx} ON {part} "
-        "USING hnsw ((embedding::halfvec({dims})) halfvec_cosine_ops) "
-        "WITH (m = {m}, ef_construction = {efc})"
+        "USING ivfflat ((embedding::halfvec({dims})) halfvec_cosine_ops) "
+        "WITH (lists = {lists})"
     ).format(
-        idx=sql.Identifier(f"{part}_hv_hnsw"),
+        idx=sql.Identifier(f"{part}_hv_ivf"),
         part=sql.Identifier(part),
         dims=sql.Literal(EMBED_DIMS),
-        m=sql.Literal(HNSW_M),
-        efc=sql.Literal(HNSW_EF_CONSTRUCTION),
+        lists=sql.Literal(IVFFLAT_LISTS),
     )
     if tablespace:
         stmt += sql.SQL(" TABLESPACE {ts}").format(ts=sql.Identifier(tablespace))
@@ -523,14 +601,14 @@ def _index_stmt(part: str, tablespace: str | None) -> sql.Composed:
 def phase_index(conn: psycopg.Connection, partitions: int, mwm: str,
                 tablespace: str | None, parallel_workers: int) -> None:
     """
-    Build one halfvec HNSW index per partition, skipping partitions already done.
+    Build one halfvec ivfflat index per partition, skipping partitions already done.
 
     Built per-partition and NON-concurrently on purpose. CREATE INDEX
     CONCURRENTLY is single-threaded and scans twice; it exists so writers are
     not blocked, and nothing is reading or writing this table until the swap.
     A plain CREATE INDEX can use max_parallel_maintenance_workers.
     """
-    print(f"  index: {partitions} partitions, maintenance_work_mem={mwm}, "
+    print(f"  index: {partitions} ivfflat partitions, maintenance_work_mem={mwm}, "
           f"tablespace={tablespace or 'default'}")
 
     built = skipped = 0
@@ -563,6 +641,64 @@ def phase_index(conn: psycopg.Connection, partitions: int, mwm: str,
 
     _mark(conn, "index", partitions=partitions, finished=True)
     print(f"  index: {built} built, {skipped} already present")
+
+
+def phase_dedupe(conn: psycopg.Connection, partitions: int) -> int:
+    """
+    Remove rows the copy inserted twice, keeping the earliest of each pair.
+
+    Needed because of the atomicity bug described in phase_copy: a batch could
+    commit without its resume marker, and the next run would re-copy it. The
+    source table has UNIQUE (page_id, chunk_hash), so two target rows sharing
+    that key can only be the same source row copied twice — verified 2026-08-12
+    by comparing payloads across 300 sampled pairs: all identical, never more
+    than 2 copies. Deleting the later of each pair is therefore lossless.
+
+    Runs per partition so one unit of work is bounded and interruptible, and it
+    is naturally idempotent: a second run finds nothing to delete. Do this
+    BEFORE --constraints, which cannot build the unique index while duplicates
+    exist.
+    """
+    print(f"  dedupe: scanning {partitions} partitions for duplicate "
+          f"(page_id, chunk_hash)")
+    total = 0
+    for i in range(partitions):
+        part = _partition_name(i)
+        started = time.monotonic()
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("""
+                    DELETE FROM {p}
+                    WHERE chunk_id IN (
+                        SELECT chunk_id FROM (
+                            SELECT chunk_id,
+                                   row_number() OVER (PARTITION BY page_id, chunk_hash
+                                                      ORDER BY chunk_id) AS rn
+                            FROM {p}
+                        ) t WHERE t.rn > 1)
+                """).format(p=sql.Identifier(part))
+            )
+            removed = cur.rowcount
+        total += removed
+        print(f"    [{i + 1}/{partitions}] {part}: removed {removed:,} "
+              f"({time.monotonic() - started:,.0f}s)", flush=True)
+    _mark(conn, "dedupe", rows_done=total, finished=True)
+    print(f"  dedupe: removed {total:,} duplicate row(s)")
+    return total
+
+
+def _has_duplicates(conn: psycopg.Connection, partitions: int) -> bool:
+    """Cheap existence probe — stops at the first duplicate rather than counting."""
+    for i in range(partitions):
+        with conn.cursor(row_factory=dict_row) as cur:
+            row = cur.execute(
+                sql.SQL("SELECT 1 AS x FROM {p} GROUP BY page_id, chunk_hash "
+                        "HAVING count(*) > 1 LIMIT 1").format(
+                    p=sql.Identifier(_partition_name(i)))
+            ).fetchone()
+        if row:
+            return True
+    return False
 
 
 def _constraint_exists(conn: psycopg.Connection, name: str) -> bool:
@@ -653,6 +789,21 @@ def phase_constraints(conn: psycopg.Connection) -> None:
             )
         )
 
+    # Undo the copy-phase autovacuum suppression and give the planner statistics.
+    # Without the ANALYZE the new table ships with none at all — the same state
+    # that made wiki_chunks read n_live_tup = 0 (CLAUDE.md §17) — and the main
+    # app would plan every query against it blind.
+    created = _read_phase(conn, "create")
+    part_count = (created.partitions if created and created.partitions
+                  else DEFAULT_PARTITIONS)
+    print(f"  constraints: re-enabling autovacuum on {part_count} partitions")
+    _set_partition_autovacuum(conn, part_count, enabled=True)
+
+    print("  constraints: ANALYZE (sampled, not a full scan)")
+    started = time.monotonic()
+    conn.execute(sql.SQL("ANALYZE {}").format(sql.Identifier(TARGET)))
+    print(f"  constraints: ANALYZE done in {time.monotonic() - started:,.0f}s")
+
     _mark(conn, "constraints", finished=True)
     print("  constraints: done")
 
@@ -687,14 +838,88 @@ def phase_verify(conn: psycopg.Connection) -> bool:
     return True
 
 
-def phase_swap(conn: psycopg.Connection) -> None:
+def _replicate_grants(conn: psycopg.Connection, src: str, dst: str,
+                      partitions: int) -> None:
+    """
+    Copy `src`'s owner and privileges onto `dst` and all of its partitions.
+
+    A rename moves the NAME, not the access control attached to it. The new
+    table was created by this script under the owner DSN, so it carried that
+    role's default ACL — which is NULL, meaning owner-only. The instant the
+    swap completed, both applications lost the table:
+
+        permission denied for table wiki_chunks
+
+    That is not a small outage. Main READING every ingest-owned table at all
+    times is a hard contract (CLAUDE.md §19.1), and this broke it for both
+    projects simultaneously, immediately after a four-day index build. It was
+    repaired by hand in the database on 2026-08-24 and the fix lived nowhere
+    else until now, so re-running this — or applying the same migration to
+    wiki_images, which is the obvious next candidate — would have reproduced
+    it exactly.
+
+    Partitions need it too: privileges are not inherited from the parent at
+    query time, so a SELECT that touches a partition checks that partition's
+    own ACL.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        row = _one(cur.execute(
+            """
+            SELECT pg_get_userbyid(c.relowner) AS owner,
+                   c.relacl::text[]            AS acl
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relname = %s AND n.nspname = 'public'
+            """,
+            (src,),
+        ))
+
+    owner = row["owner"]
+    targets = [dst] + [_partition_name(i) for i in range(partitions)]
+
+    for name in targets:
+        conn.execute(
+            sql.SQL("ALTER TABLE {t} OWNER TO {o}").format(
+                t=sql.Identifier(name), o=sql.Identifier(owner))
+        )
+
+    # relacl is NULL when the table has never been GRANTed on — the owner
+    # simply has everything. Nothing to replicate in that case, and the
+    # ALTER ... OWNER above has already done the meaningful part.
+    for entry in row["acl"] or []:
+        # Entries look like 'grantee=privs/grantor'; an empty grantee means
+        # PUBLIC. Re-granting the full set is deliberate: this runs once, at
+        # swap time, and under-granting is what caused the outage.
+        grantee = entry.split("=", 1)[0]
+        if not grantee:
+            grantee = "PUBLIC"
+        for name in targets:
+            conn.execute(
+                sql.SQL("GRANT ALL ON TABLE {t} TO {g}").format(
+                    t=sql.Identifier(name),
+                    g=sql.SQL("PUBLIC") if grantee == "PUBLIC"
+                      else sql.Identifier(grantee),
+                )
+            )
+    print(f"  swap: owner={owner}, grants replicated to "
+          f"{len(targets)} relation(s)")
+
+
+def phase_swap(conn: psycopg.Connection, partitions: int) -> None:
     """
     Rename the tables. The only destructive, hard-to-reverse step.
 
     The old table is RENAMED, never dropped: 3.5 TB of re-ingest is not
     something to gamble on a rename going as expected. Drop it by hand once
     wiki-RAG has been confirmed working against the new table.
+
+    Ownership and grants are copied BEFORE the rename, while the source table
+    still exists under its original name — see _replicate_grants for why that
+    step is not optional.
     """
+    print("  swap: replicating owner and grants from the source table")
+    _replicate_grants(conn, SOURCE, TARGET, partitions)
+
     print("  swap: renaming (old table is kept as wiki_chunks_old)")
     with conn.transaction():
         conn.execute(f"ALTER TABLE {SOURCE} RENAME TO wiki_chunks_old")
@@ -761,6 +986,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--status", action="store_true", help="report progress and exit")
     p.add_argument("--create", action="store_true", help="phase 1: partitioned table")
     p.add_argument("--copy", action="store_true", help="phase 2: batched copy")
+    p.add_argument("--dedupe", action="store_true",
+                   help="phase 2b: remove rows copied twice (run before --constraints)")
     p.add_argument("--constraints", action="store_true", help="phase 3a: btree indexes")
     p.add_argument("--index", action="store_true", help="phase 3b: per-partition ANN")
     p.add_argument("--verify", action="store_true", help="phase 4: compare row counts")
@@ -775,7 +1002,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--parallel-workers", type=int, default=4)
     args = p.parse_args(argv)
 
-    if not any((args.status, args.create, args.copy, args.constraints,
+    if not any((args.status, args.create, args.copy, args.dedupe, args.constraints,
                 args.index, args.verify, args.swap)):
         p.error("pick at least one phase (try --status)")
 
@@ -817,7 +1044,17 @@ def main(argv: list[str] | None = None) -> int:
             partitions = phase_create(conn, partitions)
         if args.copy:
             phase_copy(conn, args.batch_rows)
+        if args.dedupe:
+            phase_dedupe(conn, partitions)
         if args.constraints:
+            # Fail early and actionably rather than partway through a long
+            # unique-index build with a bare UniqueViolation.
+            if _has_duplicates(conn, partitions):
+                print("error: duplicate (page_id, chunk_hash) rows exist — the "
+                      "unique index cannot be built.\n"
+                      "  Run --dedupe first (safe and idempotent).",
+                      file=sys.stderr)
+                return 1
             phase_constraints(conn)
         if args.index:
             phase_index(conn, partitions, args.maintenance_work_mem,
@@ -827,7 +1064,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.swap:
             if not phase_verify(conn):
                 return 1
-            phase_swap(conn)
+            phase_swap(conn, partitions)
     finally:
         conn.close()
     return 0

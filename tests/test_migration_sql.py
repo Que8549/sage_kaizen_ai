@@ -45,8 +45,11 @@ def _rendered(part: str = "wiki_chunks_part_p007", tablespace: str | None = None
 
 
 class TestIndexStatement:
-    def test_uses_hnsw(self):
-        assert "USING hnsw" in _rendered()
+    def test_uses_ivfflat(self):
+        # Switched from hnsw 2026-08-17: HNSW projected ~44 days, bottlenecked
+        # on reading source vectors off the HDD, not on graph construction.
+        assert "USING ivfflat" in _rendered()
+        assert "USING hnsw" not in _rendered()
 
     def test_casts_to_halfvec_at_the_model_dimensionality(self):
         # Must match _WIKI_EMBED_DIMS / the cast in wiki_retriever's halfvec SQL.
@@ -63,13 +66,33 @@ class TestIndexStatement:
         assert "halfvec(1024)" in _rendered()
         assert "halfvec('1024')" not in _rendered()
 
-    def test_carries_the_tuning_parameters(self):
-        rendered = _rendered()
-        assert f"m = {mig.HNSW_M}" in rendered
-        assert f"ef_construction = {mig.HNSW_EF_CONSTRUCTION}" in rendered
+    def test_carries_the_lists_parameter(self):
+        # lists ~= sqrt(rows per partition) = sqrt(16.0M) ~= 4000.
+        assert f"lists = {mig.IVFFLAT_LISTS}" in _rendered()
+
+    def test_probes_is_deliberately_below_sqrt_of_lists(self):
+        """probes is NOT sqrt(lists) here, and that is the whole point.
+
+        sqrt(lists) = 63 assumes ONE index. wiki_chunks is 32 partitions and a
+        nearest-neighbour query cannot prune them, so 63 means 2016 lists and
+        ~8M vectors per query. Measured 2026-08-24: 66 s/query at 63 versus a
+        25 s statement_timeout -- every wiki-RAG query would have returned
+        nothing. probes=10 gives p90 10.0 s at identical recall.
+
+        This test previously asserted the sqrt rule and therefore enforced the
+        bug. If someone "restores" it, this is why they should not.
+        """
+        assert mig.IVFFLAT_PROBES < mig.IVFFLAT_LISTS ** 0.5
+        assert mig.IVFFLAT_PROBES == 5
+
+    def test_retriever_probes_matches_the_migration(self):
+        # Two constants in two files describing one setting; drift means the
+        # query silently stops matching what the index was tuned for.
+        from rag_v1.wiki.wiki_retriever import _IVFFLAT_PROBES
+        assert _IVFFLAT_PROBES == mig.IVFFLAT_PROBES
 
     def test_index_name_is_derived_from_the_partition(self):
-        assert '"wiki_chunks_part_p007_hv_hnsw"' in _rendered()
+        assert '"wiki_chunks_part_p007_hv_ivf"' in _rendered()
 
     def test_targets_the_named_partition(self):
         assert 'ON "wiki_chunks_part_p007"' in _rendered()
@@ -149,3 +172,95 @@ class TestMigrationConstants:
 
     def test_source_and_target_are_distinct(self):
         assert mig.SOURCE != mig.TARGET
+
+
+class TestGrantReplication:
+    """
+    The swap renames a table; it does not carry access control across.
+
+    The new table was built under the owner DSN and inherited that role's
+    default ACL (owner-only), so the moment the rename completed both
+    applications got `permission denied for table wiki_chunks` — right after
+    a four-day index build, and in direct violation of the contract that main
+    can read every ingest-owned table at all times.  It was fixed by hand in
+    the database; these tests exist so the fix cannot be lost from the code
+    again, and so applying the same migration to wiki_images does not repeat
+    it.
+    """
+
+    class _FakeCur:
+        def __init__(self, row):
+            self._row = row
+            self.executed = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, q, params=None):
+            self.executed.append((q, params))
+            return self
+
+        def fetchone(self):
+            return self._row
+
+    class _FakeConn:
+        def __init__(self, row):
+            self.row = row
+            self.statements = []
+
+        def cursor(self, **kw):
+            return TestGrantReplication._FakeCur(self.row)
+
+        def execute(self, q, params=None):
+            self.statements.append(
+                q if isinstance(q, str) else q.as_string(None)
+            )
+            return self
+
+    def _run(self, acl, partitions=2):
+        conn = self._FakeConn({"owner": "postgres", "acl": acl})
+        mig._replicate_grants(conn, "wiki_chunks", "wiki_chunks_part", partitions)
+        return conn.statements
+
+    def test_owner_applied_to_parent_and_every_partition(self):
+        stmts = self._run(None, partitions=3)
+        owners = [s for s in stmts if "OWNER TO" in s]
+        # parent + 3 partitions
+        assert len(owners) == 4
+        assert all('"postgres"' in s for s in owners)
+        assert any('"wiki_chunks_part"' in s for s in owners)
+        assert any('"wiki_chunks_part_p002"' in s for s in owners)
+
+    def test_null_acl_still_sets_owner_but_grants_nothing(self):
+        # relacl is NULL when nobody has been GRANTed on the table.  There is
+        # nothing to replicate, and inventing a grant would be wrong.
+        stmts = self._run(None, partitions=1)
+        assert any("OWNER TO" in s for s in stmts)
+        assert not any("GRANT" in s for s in stmts)
+
+    def test_grants_replicated_to_partitions_not_just_parent(self):
+        # Privileges are not inherited at query time: a SELECT that touches a
+        # partition is checked against that partition's own ACL.
+        stmts = self._run(["sage=arwdDxt/postgres"], partitions=2)
+        grants = [s for s in stmts if "GRANT ALL" in s]
+        assert len(grants) == 3            # parent + 2 partitions
+        assert all('"sage"' in s for s in grants)
+
+    def test_public_grantee_rendered_as_keyword_not_identifier(self):
+        # An empty grantee in relacl means PUBLIC.  Quoting it as an
+        # identifier would create a role literally named "PUBLIC".
+        stmts = self._run(["=r/postgres"], partitions=1)
+        grants = [s for s in stmts if "GRANT ALL" in s]
+        assert grants and all("TO PUBLIC" in s for s in grants)
+        assert not any('"PUBLIC"' in s for s in grants)
+
+    def test_multiple_grantees_each_replicated(self):
+        stmts = self._run(["sage=arwdDxt/postgres", "alquin=r/postgres"],
+                          partitions=1)
+        grants = [s for s in stmts if "GRANT ALL" in s]
+        assert len(grants) == 4           # 2 grantees x (parent + 1 partition)
+        assert any('"sage"' in s for s in grants)
+        assert any('"alquin"' in s for s in grants)
