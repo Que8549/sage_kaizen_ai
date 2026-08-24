@@ -1,6 +1,20 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Resolve .env relative to THIS FILE, not the process CWD.
+#
+# `env_file=".env"` is CWD-relative, so any process started from a directory
+# other than the project root silently found no .env and fell back to the
+# placeholder defaults below — connecting as my_user/my_pwd to my_db, which
+# fails with an authentication error that names none of that.  Every ingest
+# script is launched from the ingest project root, so this affected them all.
+#
+# pg_settings.py sits at the project root, so parent-of-this-file is always
+# <project_root>.  The fix came from the sage_kaizen_ai_ingest copy of this
+# module, which had it and was dead code (CLAUDE.md §13).
 
 
 class PgSettings(BaseSettings):
@@ -10,7 +24,7 @@ class PgSettings(BaseSettings):
     without repeating the field definitions.
 
     Values are populated in this order:
-        1. .env file (project root)
+        1. .env file (project root — resolved relative to this file)
         2. OS environment variables
         3. Default values defined below
 
@@ -22,7 +36,7 @@ class PgSettings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(Path(__file__).resolve().parent / ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",

@@ -33,6 +33,7 @@ Usage (in ui_streamlit_server.py):
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar
 
@@ -54,6 +55,10 @@ class NewsScheduler:
     """
 
     _instance: ClassVar["NewsScheduler | None"] = None
+    # start() is reachable from the Streamlit script thread and from a voice
+    # turn at the same time; an unsynchronised check-then-create can build two
+    # schedulers, each registering the full job set against one database.
+    _lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(self) -> None:
         cfg = get_news_settings()
@@ -81,11 +86,13 @@ class NewsScheduler:
     def start(cls) -> "NewsScheduler":
         """Start the scheduler singleton. Safe to call multiple times."""
         if cls._instance is None:
-            cls._instance = cls()
-            cls._instance._register_jobs()
-            cls._instance._scheduler.start()
-            cls._instance._running = True
-            _LOG.info("news_scheduler | started")
+            with cls._lock:
+                if cls._instance is None:      # double-checked inside the lock
+                    cls._instance = cls()
+                    cls._instance._register_jobs()
+                    cls._instance._scheduler.start()
+                    cls._instance._running = True
+                    _LOG.info("news_scheduler | started")
         return cls._instance
 
     @classmethod
@@ -194,7 +201,10 @@ def _job_collect() -> None:
 def _job_enrich() -> None:
     try:
         from news.enrichment.article_enricher import ArticleEnricher
-        result = ArticleEnricher().run_once()
+        # Context manager: the enricher holds an httpx client, and a scheduled
+        # job that leaks one every run exhausts sockets over a long session.
+        with ArticleEnricher() as enricher:
+            result = enricher.run_once()
         _LOG.info("job:enrich | %s", result)
     except Exception as exc:
         _LOG.error("job:enrich | failed: %s", exc, exc_info=True)
@@ -203,7 +213,8 @@ def _job_enrich() -> None:
 def _job_images() -> None:
     try:
         from news.images.news_image_pipeline import NewsImagePipeline
-        result = NewsImagePipeline().run_once()
+        with NewsImagePipeline() as pipeline:
+            result = pipeline.run_once()
         _LOG.info("job:images | %s", result)
     except Exception as exc:
         _LOG.error("job:images | failed: %s", exc, exc_info=True)
@@ -272,7 +283,12 @@ def _job_reconcile() -> None:
                 UPDATE daily_news
                 SET fetch_status = 'pending', updated_at = now()
                 WHERE fetch_status = 'failed_fetch'
-                  AND (metadata->>'fetch_retry_count')::int < %s
+                  -- COALESCE is load-bearing. An article that fails its FIRST
+                  -- fetch has no fetch_retry_count key yet, so the ->> yields
+                  -- NULL, NULL::int < 3 is NULL, and the row is silently never
+                  -- reset to 'pending' — i.e. the articles most eligible for a
+                  -- retry were the only ones that never got one.
+                  AND COALESCE((metadata->>'fetch_retry_count')::int, 0) < %s
             """, [cfg.fetch_max_retries])
 
             # Reset articles stuck mid-fetch (worker crash).
