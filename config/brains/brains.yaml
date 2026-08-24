@@ -11,7 +11,7 @@
 
 # -----------------------------------------------------------------------------
 # FAST Brain — Qwen2.5-Omni-7B Q6_K — port 8011
-# GPU: Gigabyte GeForce RTX 5090 OC (CUDA1, 32 GB VRAM)
+# GPU: RTX 5090 (CUDA0, display GPU) — SOLE service on it, ~20.8 GB left free
 #
 # Replaces the former Qwen2.5-14B Q6_K.
 # Qwen2.5-Omni supports text, image, and audio input via the --mmproj file.
@@ -40,7 +40,13 @@ fast:
 
     alias: "Qwen2.5-Omni-7B-Q6_K"
 
-    device: "CUDA1"
+    # Moved CUDA1 -> CUDA0 on 2026-08-24 (main CLAUDE.md 16, Option 2).
+    # CUDA0 drives three monitors, so it hosts exactly one service and nothing
+    # else: ~10.3 GB here leaves ~20.8 GB free, versus the 106 MiB it was down
+    # to when ARCHITECT + BGE-M3 both lived here. The enforced invariant is "no
+    # PyTorch compute on cuda:0" (torch.compile autotune is the TDR trigger);
+    # llama-server is C++ and has run here for months.
+    device: "CUDA0"
     n_gpu_layers: "all"
     split_mode: "none"
 
@@ -102,7 +108,7 @@ fast:
 
 # -----------------------------------------------------------------------------
 # ARCHITECT Brain — unsloth/Qwen3.6-27B-MTP-GGUF Q6_K — port 8012
-# GPU: RTX 5090 (CUDA0, 32 GB VRAM)
+# GPU: Gigabyte RTX 5090 OC (CUDA1, headless) — shares CUDA1 with BGE-M3
 #
 # Architecture: Hybrid Gated DeltaNet linear attention + full softmax attention
 #   (architecture id: qwen35; confirmed via GGUF metadata)
@@ -135,8 +141,12 @@ architect:
 
     alias: "Qwen3.6-27B-MTP-Q6_K"
 
-    # The 27B model runs on the larger GPU
-    device: "CUDA0"
+    # Moved CUDA0 -> CUDA1 on 2026-08-24. ~27 GB is far too much to sit on the
+    # display GPU; CUDA1 is headless and dedicated. It shares CUDA1 with BGE-M3
+    # (1.15 GB), leaving ~3.9 GB free -- see the startup-ordering note in
+    # ui_streamlit_server._auto_start_servers, which now serialises embed
+    # startup so ARCHITECT's --fit cannot reserve VRAM that BGE-M3 then eats.
+    device: "CUDA1"
     n_gpu_layers: "all"
     split_mode: "none"
 
@@ -418,7 +428,11 @@ wiki_embed:
     # explicit device= per service (A/B -> cuda:1, C -> cuda:0 only with
     # --gpu0-workers 1, D -> cuda:2), so this value was never reached from there,
     # but it is the fallback for any other consumer of this config block.
-    device: "cuda:1"
+    # Moved cuda:1 -> cuda:2 on 2026-08-24 to free CUDA1 for ARCHITECT.
+    # Still NOT cuda:0: this is PyTorch, and torch.compile autotune on the
+    # display GPU is the documented Windows TDR trigger. WikiRetriever's
+    # DisplayGpuRefused guard enforces that and permits cuda:2.
+    device: "cuda:2"
 
     # Maximum batch sizes enforced by the service endpoints.
     # wiki_ingest.py uses the same values as its per-call batch size so that
@@ -612,7 +626,7 @@ voice:
 
 # -----------------------------------------------------------------------------
 # Summarizer Brain — optional lightweight CPU model for search summarization
-# GPU: CPU-only (no VRAM cost; runs on Ryzen 9 9950X3D via AVX-512)
+# GPU: CUDA2 (RTX 5080 eGPU) since 2026-08-24 — was CPU-only
 #
 # Why this exists: search summarization currently calls the FAST brain (8011).
 # With parallel=1 on FAST, a summarization sub-call occupies the only slot
@@ -640,8 +654,13 @@ summarizer:
 
     alias: "Qwen3-4B-Summarizer"
 
-    # CPU-only — no VRAM cost.  All CUDA0/CUDA1 headroom preserved for brains.
-    n_gpu_layers: 0
+    # Moved CPU -> CUDA2 (RTX 5080 eGPU) on 2026-08-24. It sat on the search
+    # critical path doing CPU inference while a 16 GB GPU idled. The eGPU link
+    # is OCuLink Gen4 x4 and costs 2-3% for a fully-resident model, and this is
+    # the lowest-risk tenant for it: a tunnel hiccup delays search
+    # summarisation, it does not break a chat turn.
+    device: "CUDA2"
+    n_gpu_layers: "all"
 
     ctx_size: 2048          # summarization prompts are short; 2K is plenty
     batch_size: 512
@@ -680,5 +699,6 @@ media_embed:
   audio_service:
     host: "127.0.0.1"
     port: 8040              # CLAP embed service (laion/clap-htsat-unfused, 512-dim)
-    device: "cuda:1"        # RTX 5090 OC (CUDA1); override via CLAP_DEVICE env var
+    device: "cuda:2"        # RTX 5080 eGPU (CUDA2); override via CLAP_DEVICE env var
+                            # Moved from cuda:1 on 2026-08-24 to free CUDA1.
     audio_batch: 32         # audio files per /embed/audio call

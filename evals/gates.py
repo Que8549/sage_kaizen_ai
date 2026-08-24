@@ -57,19 +57,17 @@ ROUTER_LABELS: frozenset[str] = frozenset(
 # jina-clip-v2 understated it by ~60%, which is the wrong direction for a gate
 # whose job is to refuse a model that will not fit.
 DEVICE_CO_TENANTS: dict[str, dict[str, float]] = {
-    # CUDA0 hosts ARCHITECT alone as of 2026-08-06. BGE-M3 was moved off it —
-    # the display GPU was down to 106 MiB free with both resident.
-    "CUDA0": {},
-    # CUDA1 is the crowded one: FAST shares it with BGE-M3, the wiki embed
-    # service and CLAP. Wiki embed B only runs during ingest, which never runs
-    # concurrently with the app — so it is listed but is not a chat-time tenant.
-    "CUDA1": {
-        "BGE-M3 embed (8020)": 1.13,
+    # Remapped 2026-08-24 (CLAUDE.md 16, Option 2). CUDA0 drives three monitors
+    # and now hosts FAST and nothing else; ARCHITECT moved to the headless
+    # CUDA1; every PyTorch embed service moved to the idle CUDA2 eGPU.
+    "CUDA0": {},                                   # FAST alone, by design
+    "CUDA1": {"BGE-M3 embed (8020)": 1.13},        # shares with ARCHITECT
+    "CUDA2": {                                     # RTX 5080 eGPU, 16.3 GiB
+        "summarizer (8013)": 5.0,
         "wiki embed A (8031, jina-clip-v2)": 3.16,
-        "wiki embed B (8032, jina-clip-v2, ingest only)": 3.16,
         "CLAP embed (8040)": 1.5,
+        "wiki embed B (8032, ingest only)": 3.16,
     },
-    "CUDA2": {},
 }
 
 _GIB = 1024 ** 3

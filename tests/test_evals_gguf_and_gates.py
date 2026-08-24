@@ -345,17 +345,21 @@ class TestVramBudgetGate:
     def test_co_tenant_table_covers_the_three_devices(self):
         assert set(DEVICE_CO_TENANTS) == {"CUDA0", "CUDA1", "CUDA2"}
 
-    def test_cuda1_table_lists_the_crowded_tenants(self):
-        """FAST shares CUDA1 with both wiki embed services and CLAP."""
-        tenants = " ".join(DEVICE_CO_TENANTS["CUDA1"])
-        assert "8031" in tenants and "8032" in tenants and "CLAP" in tenants
+    def test_co_tenant_table_matches_the_2026_08_24_remap(self):
+        """CUDA0 hosts FAST alone; the embed services moved to the CUDA2 eGPU.
 
+        Before the remap CUDA1 was the crowded card (FAST + both wiki embeds +
+        CLAP). Now CUDA0 is deliberately empty of co-tenants because it drives
+        three monitors, CUDA1 carries only BGE-M3 alongside ARCHITECT, and every
+        PyTorch service sits on the otherwise idle RTX 5080.
+        """
+        assert DEVICE_CO_TENANTS["CUDA0"] == {}
+        assert "BGE-M3" in " ".join(DEVICE_CO_TENANTS["CUDA1"])
+        cuda2 = " ".join(DEVICE_CO_TENANTS["CUDA2"])
+        assert "jina-clip-v2" in cuda2 and "CLAP" in cuda2 and "summarizer" in cuda2
+        # The 5080 is 16.3 GiB; the planned set must actually fit.
+        assert sum(DEVICE_CO_TENANTS["CUDA2"].values()) < 16.0
 
-# ---------------------------------------------------------------------------
-# Brain-level gate sets
-# ---------------------------------------------------------------------------
-
-class TestStaticGateSets:
     def test_fast_set_passes_a_good_candidate(self, tmp_path):
         model = write_gguf(tmp_path, "m.gguf", _model_kv("qwen2vl", ctx=32768))
         mmproj = write_gguf(tmp_path, "p.gguf", _mmproj_kv())

@@ -475,8 +475,20 @@ def _auto_start_servers() -> None:
     while Q6 starts concurrently so the heavier ARCHITECT brain is ready as
     soon as possible.
     """
-    from server_manager import ManagedServers, ensure_q5_running, ensure_q6_running
+    from server_manager import (
+        ManagedServers, ensure_embed_running, ensure_q5_running, ensure_q6_running,
+    )
     servers = ManagedServers.from_yaml()
+
+    # Embed FIRST, and SYNCHRONOUSLY. Since 2026-08-24 BGE-M3 and ARCHITECT
+    # share CUDA1, and llama-server's --fit samples free VRAM at ITS OWN
+    # startup: if embed allocates afterwards it consumes the reserve ARCHITECT
+    # just set aside. Launched in parallel threads that is a race, and it is
+    # exactly how the display GPU ended up with 106 MiB free (CLAUDE.md 16).
+    # ensure_q5_running also calls this, but it is idempotent -- it returns
+    # immediately once the port answers.
+    ensure_embed_running(servers)
+
     threading.Thread(
         target=ensure_q5_running, args=(servers,), daemon=True, name="autostart_q5"
     ).start()

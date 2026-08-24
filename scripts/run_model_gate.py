@@ -30,7 +30,7 @@ if str(_ROOT) not in sys.path:
 from evals.gates import free_vram_gib, static_gates_architect, static_gates_fast  # noqa: E402
 from server_manager import ManagedServers  # noqa: E402
 
-_DEVICE_INDEX = {"fast": 1, "architect": 0}   # CUDA1 / CUDA0 per brains.yaml
+_DEVICE_INDEX = {"fast": 0, "architect": 1}   # CUDA0 / CUDA1 per brains.yaml (remapped 2026-08-24)
 
 
 def _incumbent_paths(brain: str) -> tuple[str, str | None]:
