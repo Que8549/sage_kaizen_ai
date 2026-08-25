@@ -61,7 +61,17 @@ class WikiEmbedServiceConfig(BaseModel):
     """Embed service settings (read by app.py / FastAPI)."""
     host: str          = "127.0.0.1"
     port: int          = 8031
-    device: str        = "cuda:0"
+    # cuda:1 = RTX 5090 OC, the headless compute card.  NEVER cuda:0: that card
+    # drives three monitors, and sustained CUDA work on it is the documented
+    # Windows TDR / display-driver-reset trigger.
+    #
+    # This is only a fallback — the live value comes from brains.yaml, which was
+    # corrected in a1ac499.  It stayed "cuda:0" until 2026-08-04 anyway, which is
+    # exactly the drift sage_kaizen_ai_ingest's CLAUDE.md §19 gap 1 warns about:
+    # a default is a convention, not an invariant.  The invariant is the hard
+    # guard in WikiRetriever._ensure_service(), which checks the *effective*
+    # device and so holds even if this value regresses.
+    device: str        = "cuda:1"
     text_batch: int    = 32
     image_batch: int   = 8
     idle_timeout_s: float = 120.0

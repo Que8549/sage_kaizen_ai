@@ -1,0 +1,65 @@
+{
+  "label": "mtp-b10298",
+  "model": "E:\\unsloth_Qwen3.6-27B-MTP-GGUF\\Qwen3.6-27B-Q6_K.gguf",
+  "base_tg": 45.621853,
+  "base_label": "baseline-b10298",
+  "measured_at": "2026-08-06T20:12:55.505281+00:00",
+  "turns": [
+    {
+      "label": "reasoning",
+      "prompt_tokens": 4,
+      "predicted_tokens": 512,
+      "prompt_ms": 102.0,
+      "predicted_ms": 7472.364,
+      "predicted_per_second": 68.51914601590609,
+      "reasoning_tokens": 1452,
+      "counters": {
+        "drafted": 264,
+        "accepted": 247,
+        "drafts": 264
+      }
+    },
+    {
+      "label": "code",
+      "prompt_tokens": 41,
+      "predicted_tokens": 512,
+      "prompt_ms": 185.661,
+      "predicted_ms": 7652.179,
+      "predicted_per_second": 66.90904642978164,
+      "reasoning_tokens": 2046,
+      "counters": {
+        "drafted": 269,
+        "accepted": 242,
+        "drafts": 269
+      }
+    },
+    {
+      "label": "creative",
+      "prompt_tokens": 32,
+      "predicted_tokens": 512,
+      "prompt_ms": 104.022,
+      "predicted_ms": 8526.207,
+      "predicted_per_second": 60.0501489114679,
+      "reasoning_tokens": 1916,
+      "counters": {
+        "drafted": 286,
+        "accepted": 224,
+        "drafts": 286
+      }
+    },
+    {
+      "label": "architecture",
+      "prompt_tokens": 42,
+      "predicted_tokens": 512,
+      "prompt_ms": 161.919,
+      "predicted_ms": 8226.429,
+      "predicted_per_second": 62.23842690431049,
+      "reasoning_tokens": 2353,
+      "counters": {
+        "drafted": 286,
+        "accepted": 225,
+        "drafts": 286
+      }
+    }
+  ]
+}

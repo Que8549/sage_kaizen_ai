@@ -140,7 +140,13 @@ def _searxng_search(query: str) -> str:
             return ""
         lines: list[str] = []
         for r in evidence.results[:5]:
-            snippet = (r.content or "")[:_MAX_SNIPPET_CHARS].replace("\n", " ")
+            # WebResult's field is `snippet`. This read `r.content` until
+            # 2026-08-05 — a field that does not exist — so the AttributeError
+            # was caught by the `except Exception` below and every successful
+            # search silently returned "". The node had therefore never
+            # contributed anything to a review, and the failure was invisible
+            # because it degrades quietly by design when SearXNG is down.
+            snippet = (r.snippet or "")[:_MAX_SNIPPET_CHARS].replace("\n", " ")
             lines.append(f"- **[{r.title}]({r.url})**\n  {snippet}")
         return "\n".join(lines)
     except Exception as exc:

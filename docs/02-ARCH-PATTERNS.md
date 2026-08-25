@@ -12,8 +12,8 @@ Two independent llama-server instances with distinct roles:
 
 | Brain | Model | Port | GPU | Role |
 |-------|-------|------|-----|------|
-| FAST | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (RTX 5090 OC) | Default; multimodal (text + image + audio); low-latency |
-| ARCHITECT | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (RTX 5090) | Deep reasoning; 128K context; `<think>` tokens; speculative decoding |
+| FAST | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA0 (RTX 5090, display) | Default; multimodal (text + image + audio); low-latency |
+| ARCHITECT | Qwen3.6-27B-MTP-Q6_K | 8012 | CUDA1 (RTX 5090 OC) | Deep reasoning; 128K context; `<think>` tokens; MTP speculative decoding |
 
 ### Why
 - Performance isolation — FAST handles 80–90 % of requests without occupying the 5090
@@ -53,7 +53,7 @@ All ingest pipelines use stable source IDs + content hashing to allow safe re-ru
 
 ### Why
 - Prevents duplicate vector entries when ingest is re-run after a crash
-- Enables partial-failure recovery without corrupting the HNSW index
+- Enables partial-failure recovery without corrupting the vector index
 
 ### Rules
 - Source ID format: `localfile:<path>`, `rss_item:<url>`, `web:<url>`, `wiki:<title>`
@@ -68,18 +68,49 @@ All ingest pipelines use stable source IDs + content hashing to allow safe re-ru
 ### Description
 Expensive resources (DB connections, ML model services, process spawning) are initialized on first use, not at import time.
 
+**Implementation: `@lazy_singleton` from `lazy.py`.** Decorate a zero-argument
+factory; the wrapper handles the locking. Do not hand-roll
+`global X; if X is None: X = ...` — that is what this replaced.
+
+```python
+from lazy import lazy_singleton
+
+@lazy_singleton
+def get_orchestrator() -> SearchOrchestrator:
+    return SearchOrchestrator()
+
+get_orchestrator()          # constructs once, under a lock
+get_orchestrator.reset()    # drops it — tests only
+```
+
 ### Where Used
-- `MemoryService` — created on first chat turn; `None` returned gracefully if schema missing
-- `SearchOrchestrator` — `get_orchestrator()` lazy singleton; thread-safe
-- `WikiRetriever` — auto-starts jina-clip-v2 embed service on first query; atexit cleanup
-- `VoiceBridge` — `@st.cache_resource` singleton; ZMQ sockets bound on first `start_turn()`
+- `rag_v1/runtime/context_injector.py` — `_rag_pair`, `_get_wiki_retriever`, `_get_music_retriever`
+- `search/search_orchestrator.py` — `get_orchestrator()`
+- `news/retrieval/` — `get_news_resolver()`, `get_market_client()`
+- `news/news_settings.py` — `get_news_settings()`, `_get_pg_settings()`
+- `memory/embedder.py` — `_get_client()` (BGE-M3)
+- `memory/langmem_bridge.py` — `get_langmem_bridge()`
+- `MemoryService` (`chat_service._get_memory`) — hand-rolled, because it also latches a permanent "disabled" state on schema failure
+- `VoiceBridge` — `@st.cache_resource`; Streamlit owns that lifecycle
+- `rag_v1/db/pg.py`, `memory/db.py` — `psycopg_pool.ConnectionPool`, which does its own lazy open
 
 ### Why
 - Streamlit reruns on every interaction — heavy init at import time would stall every rerun
 - Some services depend on GPU availability; deferring init lets the app start even if a service is down
 
+### Why the locking is not optional
+These accessors are called from `context_injector`'s worker pool. An
+unsynchronised initialiser is a real race, and for `WikiRetriever` a lost race
+meant two cold torch/CUDA initialisations of jina-clip-v2 on the same physical
+GPU at once — the failure mode `sage_kaizen_ai_ingest` hit twice (its CLAUDE.md
+§15, 2026-05-28 and 2026-07-18) and had to serialise service startup to stop
+machines freezing. Before 2026-08-04, 8 of the 10 singletons here were unlocked.
+
 ### Rules
-- Use double-checked locking or `threading.Lock` for thread-safety
+- Use `@lazy_singleton`; it gives you double-checked locking with one lock per accessor
+- A `None` return is deliberately **not** cached — the optional-dependency accessors rely on retrying
+- An exception propagates and caches nothing, so a later call can retry
+- `.reset()` is for tests; production code must not call it
 - Log clearly when initialization succeeds or fails
 - Always fall back gracefully — caller receives `None` or empty results, never an exception bubble
 
@@ -201,7 +232,7 @@ Each subsystem exposes a narrow interface; the implementation behind it can be s
 |-----------|---------|-----------------|
 | STT | faster-whisper distil-large-v3.5 (ONNX, CPU) | any model implementing `transcribe(audio) -> str` |
 | TTS | Kokoro-82M ONNX (CPU) | any model implementing `synthesize(text) -> audio_bytes` |
-| Vector DB | pgvector HNSW | any service returning `(source_id, chunk_id, score, content)` tuples |
+| Vector DB | pgvector (HNSW for rag_chunks/media; ivfflat for partitioned wiki_chunks) | any service returning `(source_id, chunk_id, score, content)` tuples |
 | LLM backend | llama-server (GGUF) | any OpenAI-compatible `/v1/chat/completions` endpoint |
 | Text embeddings | BGE-M3 FP16 via llama-server | any service returning float vectors via `/v1/embeddings` |
 | Image embeddings | jina-clip-v2 (FastAPI) | any 1024-dim CLIP-style model |
@@ -257,11 +288,66 @@ Review runs are dominated by ARCHITECT inference (minutes per node). Overhead is
 Long-running background tasks (Wiki ingest, model consolidation) coordinate with active chat sessions to avoid GPU contention.
 
 ### Why
-- Wiki ingest on CUDA1 (RTX 5090 OC) shares GPU compute with FAST brain (also CUDA1)
+- Wiki ingest moved to CUDA2 (RTX 5080 eGPU) on 2026-08-24; it no longer shares a GPU with FAST (now CUDA0)
 - Running ingest during a live chat session causes inference timeouts
 
 ### Implementation
 - `chat_service.record_chat_activity()` — updates a shared timestamp on every turn
 - `chat_service.last_chat_activity_ts()` — read by background tasks to check idle time
-- Wiki ingest: stops service B (port 8032 / CUDA1) when chat is active; restarts during idle windows
+- Wiki ingest: services A/B (ports 8031/8032) run on CUDA2, so chat and ingest no longer contend for the same GPU
 - Background memory consolidation: runs only when no turn has fired in the last N seconds
+
+---
+
+## 13. Shared Transport Base Pattern
+
+### Description
+Every client that talks to the same *kind* of service shares one base class
+holding the transport concerns — connection pooling, health, retry policy,
+cleanup — and subclasses add only the endpoint methods.
+
+### Where Used
+- `rag_v1/embed/base_client.py` → `BaseHttpEmbedClient`, subclassed by
+  `EmbedClient` (BGE-M3, 8020), `MmEmbedClient` (jina-clip-v2, 8031),
+  `ImageEmbedClient` (a thin subclass of `MmEmbedClient`), and
+  `AudioEmbedClient` (CLAP, 8040)
+- `server_manager._ensure_brain_running()` — the same idea for process
+  lifecycle: one body for all four llama-server brains
+- `rag_v1/db/pg.py` and `memory/db.py` — both on `psycopg_pool.ConnectionPool`
+
+### Why
+Four independently-written HTTP clients had drifted into three connection
+strategies and four readings of `/health`:
+
+| | Pooled? | On exhausted retries |
+|---|---|---|
+| `MmEmbedClient` | yes | original exception |
+| `ImageEmbedClient` | **no** | `tenacity.RetryError` |
+| `AudioEmbedClient` | **no** | `tenacity.RetryError` |
+| `EmbedClient` | yes | raw `raise_for_status` |
+
+Concretely, that cost:
+
+- **A duplicate implementation.** `ImageEmbedClient` and `MmEmbedClient` spoke
+  the same protocol to the same service on the same port.
+- **Unpooled connections on a hot path.** The two media clients called
+  module-level `httpx.post()`, building and discarding a TCP connection per
+  call, while driven at volume by `sage_kaizen_ai_ingest`'s media pipeline —
+  a project with an unresolved TCP ephemeral-port-exhaustion investigation
+  whose notes recorded that `MmEmbedClient` had been checked and was pooled.
+  Nobody had checked these two.
+- **A retry contract that differed between siblings.** Code catching
+  `httpx.HTTPStatusError` worked against one client and silently missed the
+  other.
+
+### Rules
+- Transport belongs in the base; protocol belongs in the subclass
+- One retry policy (`EMBED_RETRY`), applied at exactly one level — decorating
+  both the base's request helper and the subclass's method gives 3 × 3 attempts
+- `health()` returns the parsed payload or `None`; `{}` means "answered, said
+  nothing useful", which is not the same as "did not answer"
+- A subclass may tighten readiness (`AudioEmbedClient.ping()` additionally
+  requires `loaded`, because CLAP answers 200 while still loading) but must not
+  loosen the transport contract
+- Every client is a context manager and has `close()`; a pooled client that is
+  never closed leaks its connection pool

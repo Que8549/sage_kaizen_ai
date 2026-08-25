@@ -48,6 +48,7 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
+from lazy import lazy_singleton
 from memory.embedder import aembed_texts as _bge_aembed  # shared async embed — no duplicate HTTP
 from pg_settings import PgSettings
 from sk_logging import get_logger
@@ -369,16 +370,16 @@ class LangMemBridgeSync:
 # Module-level singleton (lazy init)
 # ---------------------------------------------------------------------------
 
-_bridge_singleton: LangMemBridgeSync | None = None
-
-
+@lazy_singleton
 def get_langmem_bridge() -> LangMemBridgeSync:
     """
     Get or create the module-level LangMemBridgeSync singleton.
 
-    Call start() before first use.  Safe to call multiple times.
+    Call start() before first use.  Safe to call multiple times, and safe to
+    call concurrently.
+
+    Locked: LangMemBridgeSync owns a background event loop thread, so a lost
+    race would start two of them — one of which nothing holds a reference to
+    and nothing will ever stop.
     """
-    global _bridge_singleton
-    if _bridge_singleton is None:
-        _bridge_singleton = LangMemBridgeSync()
-    return _bridge_singleton
+    return LangMemBridgeSync()

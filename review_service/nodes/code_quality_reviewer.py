@@ -37,7 +37,7 @@ _SYSTEM_PROMPT = """\
 You are a Python code quality specialist reviewing the Sage Kaizen AI codebase.
 
 Sage Kaizen context:
-  - Python 3.14 on Windows 11 / CUDA 13.1
+  - Python 3.14 on Windows 11 / CUDA 13.3
   - Asyncio throughout (Streamlit main thread + background daemon threads for reviews)
   - PostgreSQL via psycopg3 (async), httpx for HTTP, LangChain / LangGraph for review orchestration
   - Heavy ML imports (torch, transformers, langchain_core) that carry significant import-time cost

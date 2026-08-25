@@ -15,7 +15,9 @@
       "Bash(Select-Object -Last 60)"
     ],
     "additionalDirectories": [
-      "F:\\Projects\\sage_kaizen_ai_ingest"
+      "F:\\Projects\\sage_kaizen_ai_ingest",
+      "F:\\Projects\\sage_kaizen_ai_ingest\\rag_v1\\wiki",
+      "F:\\Projects\\sage_kaizen_ai_ingest\\tests"
     ]
   }
 }

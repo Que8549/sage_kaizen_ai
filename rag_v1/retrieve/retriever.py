@@ -1,4 +1,4 @@
-from rag_v1.db.pg import get_conn
+from rag_v1.db.vector_index import vector_search
 from rag_v1.embed.embed_client import EmbedClient
 from rag_v1.config.rag_settings import RetrievedChunk
 
@@ -25,9 +25,9 @@ class PgvectorRetriever:
         LIMIT %s;
         """
 
-        conn = get_conn(self.cfg.pg_dsn)
-        conn.execute("SET hnsw.ef_search = 100")
-        rows = conn.execute(sql, (q_emb, q_emb, k)).fetchall()
+        # rag_chunks carries an HNSW index; vector_search applies ef_search
+        # and a statement_timeout backstop that this path never had.
+        rows = vector_search(self.cfg.pg_dsn, sql, (q_emb, q_emb, k))
         rows = [r for r in rows if float(r["distance"]) < max_dist]
 
         results = []

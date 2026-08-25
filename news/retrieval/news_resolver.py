@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 
 from rapidfuzz import fuzz as _fuzz
 
+from lazy import lazy_singleton
 from news.news_settings import get_news_settings
 from rag_v1.db.pg import conn_ctx
 from sk_logging import get_logger
@@ -65,18 +66,58 @@ _NEWS_INTENT_PHRASES: tuple[str, ...] = (
 )
 
 # Phrases that indicate a market / price lookup.
-_MARKET_PHRASES: tuple[str, ...] = (
+#
+# Split into two tiers on 2026-08-05.  Previously this was one flat tuple whose
+# comment claimed it kept "strict matching to avoid false positives on queries
+# like 'how much is this worth'" — while "how much is" was itself in the list,
+# so that exact example matched.  The tiers make the comment true:
+#
+#   STRONG — unambiguously financial on their own.
+#   WEAK   — ordinary English that only means "market" when an instrument is
+#            actually named, so they additionally require _extract_ticker() to
+#            find one.  "how much is nvidia" → market; "how much is this
+#            worth" → not.
+_MARKET_PHRASES_STRONG: tuple[str, ...] = (
     "stock price", "share price", "trading at", "market price",
-    "what is the price", "what's the price", "how much is",
     "bitcoin price", "crypto price", "btc price", "eth price",
     "stock today", "stock yesterday", "market today",
     "closing price", "open price", "52-week",
-    "how has", "performed this week", "performed this month",
+    "performed this week", "performed this month",
     "nasdaq", "s&p", "dow jones", "oil price", "gold price",
 )
 
+_MARKET_PHRASES_WEAK: tuple[str, ...] = (
+    "what is the price", "what's the price", "how much is", "how has",
+)
+
+# Retained as the union for callers/tests that just want "is this phrase
+# market-ish at all" without the instrument requirement.
+_MARKET_PHRASES: tuple[str, ...] = _MARKET_PHRASES_STRONG + _MARKET_PHRASES_WEAK
+
 # Common ticker patterns in user messages (e.g. "NVDA", "BTC-USD").
 _TICKER_PATTERN = re.compile(r"\b([A-Z]{1,5}(?:-[A-Z]{2,3})?)\b")
+
+# Compiled word-boundary matchers for the company-name aliases, built once.
+# `\b` does not work directly against keys containing "&" or "." (e.g.
+# "s&p 500"), so the boundary is asserted with lookarounds on word characters
+# instead — equivalent for our keys and safe for punctuation-bearing ones.
+_NAME_BOUNDARY_RE: dict[str, re.Pattern[str]] = {}
+
+
+def _name_matches(name: str, txt_lower: str) -> bool:
+    """
+    True when `name` occurs in `txt_lower` as a whole word, not a substring.
+
+    The boundary class includes the hyphen, so hyphenated compounds do not
+    match: "meta-analysis" must not resolve to META. No key in
+    _NAME_TO_TICKER contains a hyphen, so this costs nothing (the hyphenated
+    forms like "BTC-USD" are the mapping's *values*).
+    """
+    pattern = _NAME_BOUNDARY_RE.get(name)
+    if pattern is None:
+        pattern = re.compile(rf"(?<![\w-]){re.escape(name)}(?![\w-])")
+        _NAME_BOUNDARY_RE[name] = pattern
+    return pattern.search(txt_lower) is not None
 
 # Fuzzy match threshold (same calibration as router.py — see comments there).
 _FUZZY_THRESHOLD = 76
@@ -212,9 +253,19 @@ class NewsResolver:
         return False
 
     def _is_market_query(self, txt: str) -> bool:
-        # Market queries contain specific financial terms — keep strict matching
-        # to avoid false positives on queries like "how much is this worth".
-        return any(p in txt for p in _MARKET_PHRASES)
+        """
+        True when the query is a market/price lookup.
+
+        Strong phrases ("stock price", "trading at") are financial on their
+        own.  Weak ones ("how much is", "how has") are ordinary English and
+        additionally require a nameable instrument, so "how much is this worth"
+        is correctly rejected while "how much is nvidia" is not.
+        """
+        if any(p in txt for p in _MARKET_PHRASES_STRONG):
+            return True
+        if any(p in txt for p in _MARKET_PHRASES_WEAK):
+            return self._extract_ticker(txt) is not None
+        return False
 
     # ------------------------------------------------------------------
     # Resolution paths
@@ -314,9 +365,19 @@ class NewsResolver:
         txt_lower = text.lower()
 
         # Check known names first (longest match wins).
+        #
+        # Word-boundary matching, not bare `name in txt_lower`. _NAME_TO_TICKER
+        # keys include 3-4 letter aliases ("eth", "btc", "amd", "dow", "oil",
+        # "gold", "meta") which, matched as raw substrings, fire inside ordinary
+        # words: "something" contains "eth", "goldfish" contains "gold". That
+        # injected a live gold-futures price into any turn mentioning a
+        # goldfish. Fixed 2026-08-05.
+        #
+        # Longest-first still matters so "dow jones" beats "dow", and \b works
+        # for multi-word keys too ("s&p 500" is bounded at each end).
         names_sorted = sorted(_NAME_TO_TICKER.keys(), key=len, reverse=True)
         for name in names_sorted:
-            if name in txt_lower:
+            if _name_matches(name, txt_lower):
                 return _NAME_TO_TICKER[name]
 
         # Fall back to uppercase ticker pattern.
@@ -347,14 +408,15 @@ class NewsResolver:
 # ---------------------------------------------------------------------------
 # Module-level lazy singleton
 # ---------------------------------------------------------------------------
-_resolver: NewsResolver | None = None
-
-
+@lazy_singleton
 def get_news_resolver() -> NewsResolver:
-    global _resolver
-    if _resolver is None:
-        _resolver = NewsResolver()
-    return _resolver
+    """
+    Process-wide resolver.
+
+    Locked: resolve_news_context() runs on the context injector's news worker
+    thread, concurrently with the other four fetches.
+    """
+    return NewsResolver()
 
 
 def resolve_news_context(user_text: str) -> NewsContext | None:

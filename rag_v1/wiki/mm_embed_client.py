@@ -6,16 +6,18 @@ Used by both wiki_ingest.py (batch job) and wiki_retriever.py (runtime).
 
 Host and port default to the values in config/brains/brains.yaml (wiki_embed.service).
 Callers that already hold a WikiEmbedConfig should pass cfg.host and cfg.port explicitly.
+
+Transport (pooling, retries, /health, close) comes from BaseHttpEmbedClient —
+see rag_v1/embed/base_client.py for why the four embed clients were unified.
 """
 from __future__ import annotations
 
 import base64
 
-import httpx
-from tenacity import retry, stop_after_attempt, wait_fixed
+from rag_v1.embed.base_client import BaseHttpEmbedClient
 
 
-class MmEmbedClient:
+class MmEmbedClient(BaseHttpEmbedClient):
     """
     Thin HTTP client wrapping the /embed/text and /embed/image endpoints.
 
@@ -37,26 +39,24 @@ class MmEmbedClient:
             _cfg = load_wiki_embed_config()
             host = host if host is not None else _cfg.host
             port = port if port is not None else _cfg.port
-        self.base_url = f"http://{host}:{port}"
-        self._client = httpx.Client(timeout=timeout_s)
+        super().__init__(host=host, port=port, timeout_s=timeout_s)
 
     # ------------------------------------------------------------------ #
     # Health                                                               #
     # ------------------------------------------------------------------ #
-
-    def ping(self, timeout_s: float = 5.0) -> bool:
-        """Return True if the embed service is reachable and healthy."""
-        try:
-            r = self._client.get(f"{self.base_url}/health", timeout=timeout_s)
-            return r.is_success
-        except Exception:
-            return False
+    #
+    # health() / ping() are inherited.  health() returns the service payload:
+    #
+    #     {"status": "ok", "device": "cuda:1", "model": "jina-clip-v2",
+    #      "loaded": true, "offloaded": false, "idle_timeout_s": 120.0}
+    #
+    # `device` is what WikiRetriever's display-GPU guard reads — ping() alone
+    # proves only that *something* answered, never where the model is loaded.
 
     # ------------------------------------------------------------------ #
     # Text embeddings                                                      #
     # ------------------------------------------------------------------ #
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), reraise=True)
     def embed_text(self, texts: list[str]) -> list[list[float]]:
         """
         Embed a batch of strings.
@@ -64,18 +64,14 @@ class MmEmbedClient:
         Returns a list of 1024-dim L2-normalised float vectors.
         The service enforces the batch limit configured in brains.yaml.
         """
-        r = self._client.post(
-            f"{self.base_url}/embed/text",
-            json={"texts": texts, "normalize": True},
+        return self._post_embeddings(
+            "/embed/text", {"texts": list(texts), "normalize": True}
         )
-        r.raise_for_status()
-        return r.json()["embeddings"]
 
     # ------------------------------------------------------------------ #
     # Image embeddings                                                     #
     # ------------------------------------------------------------------ #
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), reraise=True)
     def embed_image_bytes(self, images_bytes: list[bytes]) -> list[list[float]]:
         """
         Embed a batch of raw image bytes (any PIL-compatible format).
@@ -84,9 +80,6 @@ class MmEmbedClient:
         shared vector space as embed_text(), enabling text ↔ image cosine search.
         """
         b64_list = [base64.b64encode(b).decode("ascii") for b in images_bytes]
-        r = self._client.post(
-            f"{self.base_url}/embed/image",
-            json={"images_b64": b64_list, "normalize": True},
+        return self._post_embeddings(
+            "/embed/image", {"images_b64": b64_list, "normalize": True}
         )
-        r.raise_for_status()
-        return r.json()["embeddings"]

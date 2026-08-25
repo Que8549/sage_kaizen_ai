@@ -9,7 +9,7 @@
 
 ## 1. Purpose
 
-The Architect Reviewer is a stateful, human-gated code review service built on LangGraph. It runs the ARCHITECT brain (Qwen3.5-27B-Q6_K, port 8012, CUDA0) against the Sage Kaizen codebase and its associated projects, produces structured findings, pauses for human approval, then writes review artifacts to disk.
+The Architect Reviewer is a stateful, human-gated code review service built on LangGraph. It runs the ARCHITECT brain (Qwen3.6-27B-MTP-Q6_K, port 8012, CUDA1) against the Sage Kaizen codebase and its associated projects, produces structured findings, pauses for human approval, then writes review artifacts to disk.
 
 It is **not a continuous process**. It activates only when a review trigger phrase is detected in the chat input, executes its pipeline in a background thread, and terminates. No autonomous writes occur without explicit user approval.
 
@@ -152,6 +152,14 @@ The ARCHITECT brain uses these results to:
 
 If SearXNG is unavailable, the `web_researcher` node logs a warning and continues without web context — review does not fail.
 
+> **Historical note (fixed 2026-08-05):** that quiet-degradation design hid a
+> real bug for the node's entire life. `_searxng_search()` formatted each hit
+> with `r.content`, but `WebResult`'s field is `snippet` — the resulting
+> `AttributeError` was caught by the same `except Exception` that handles
+> "SearXNG is down", so **every successful search returned `""`** and
+> `web_research` was always empty. It looked exactly like SearXNG being
+> permanently unavailable. Found by writing the first tests for this node.
+
 ---
 
 ## 7. Performance & Latency Review (Mandatory)
@@ -190,7 +198,7 @@ All ARCHITECT prompts in this service follow these rules:
 2. **Reference specificity**: Prompts instruct ARCHITECT to cite `file:line` references where possible.
 3. **Severity tagging**: All findings must be tagged `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, or `[LOW]`.
 4. **No hallucinated fixes**: ARCHITECT is instructed to only suggest patches for code it has actually read in context.
-5. **Think tokens**: The `<think>` mode is active on ARCHITECT (Qwen3.5-27B supports extended reasoning). Prompts are designed to benefit from multi-step reasoning.
+5. **Think tokens**: The `<think>` mode is active on ARCHITECT (Qwen3.6-27B-MTP supports extended reasoning). Prompts are designed to benefit from multi-step reasoning.
 
 ---
 

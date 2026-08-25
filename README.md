@@ -166,7 +166,7 @@ Designed and tested on a high-performance workstation:
 - Gigabyte RTX 5090 OC (32GB VRAM)
 - 40TB storage
 - Windows 11 Pro
-- Custom CUDA 13.2.1 llama.cpp build (b9305, 63248fc3e)
+- Custom CUDA 13.3 llama.cpp build (b9305, 63248fc3e)
 
 Also integrates with:
 - Raspberry Pi 4 / 5 nodes
@@ -300,3 +300,57 @@ A tutor.
 A continuously evolving system.
 
  ---
+
+## Development
+
+### Setup
+
+```powershell
+# Runtime dependencies
+pip install -r requirements.txt
+
+# Test/dev tooling (pytest, coverage, respx, freezegun)
+pip install -e ".[dev]"
+```
+
+### Tests
+
+```powershell
+# Full suite with coverage; fails below the 80% floor
+python -m pytest
+
+# Fast run, no coverage
+python -m pytest --no-cov -q
+
+# One module
+python -m pytest tests/test_chat_service.py -v
+```
+
+**1404 tests, 82.9% coverage**, `fail_under = 80` enforced in `pyproject.toml`
+so a regression fails the run rather than going unnoticed.
+
+Nothing in the suite touches a live database, GPU, or network: PostgreSQL is
+mocked, `httpx` clients go through `respx` at the transport layer, and
+subprocess spawning is patched.
+
+`ui_streamlit_server.py` and `code_download.py` are deliberately unmeasured —
+the first is a Streamlit entry script whose module-level code starts the
+llama-servers and the voice subprocess at import, which `AppTest` cannot drive.
+The reasoning is recorded next to the `omit` list.
+
+> `tests/test_coverage_config.py` guards the coverage config itself. `news/`
+> and `rag_v1/` are namespace packages shared with `sage_kaizen_ai_ingest`, and
+> coverage only descends into *regular* packages — so every source directory
+> has to be listed by hand, and an unlisted one is **absent from the report
+> rather than reported as 0%**. That silently understated the denominator by
+> ~390 statements before it was caught.
+
+### Type checking
+
+```powershell
+python -m pyright <files>
+```
+
+Pylance/pyright clean is the standard for new code. The 13 pre-existing errors
+are third-party stub gaps (`requests.adapters`, `langmem`) and the
+optional-dependency import guards in `context_injector.py`.

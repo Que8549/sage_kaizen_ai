@@ -575,6 +575,12 @@ def llm_route(
             search_categories=search_categories,
             needs_music=needs_music,
         )
+        # Emit the same structured route_json record every other path emits.
+        # This success path used to return without calling _log_decision(), so
+        # the route_json stream was missing entries for exactly the turns that
+        # reached the LLM classifier — the ambiguous ones, which are the
+        # interesting ones for tuning ARCHITECT_THRESHOLD.
+        _log_decision(decision, user_text, processing_time_ms)
         return decision
 
     except Exception:

@@ -30,7 +30,7 @@ The system is intentionally:
 
 - Modular (each subsystem independently replaceable)
 - Observable (log markers determine readiness; nothing is implicit)
-- Production-minded (typed Python, rotating logs, pgvector HNSW for recall)
+- Production-minded (typed Python, rotating logs, pgvector ANN indexes for recall)
 - Accuracy-first (ARCHITECT escalation for depth; RAG + search for grounding)
 
 ---
@@ -44,8 +44,8 @@ flowchart TD
     C["Router\nrouter.py\n(LLM-assisted + heuristic fallback)"]
     D["Chat Service\nchat_service.py\n(turn lifecycle)"]
     E["Template Engine\nprompt_library.py\n(build_messages + TemplateKey)"]
-    F["FAST Brain\nQwen2.5-Omni-7B-Q6_K\nllama-server :8011  CUDA1 RTX 5090 OC\nmultimodal: text + image + audio"]
-    G["ARCHITECT Brain\nQwen3.5-27B-Q6_K\nllama-server :8012  CUDA0 RTX 5090\n128K ctx · reasoning · speculative decoding"]
+    F["FAST Brain\nQwen2.5-Omni-7B-Q6_K\nllama-server :8011  CUDA0 RTX 5090 (display)\nmultimodal: text + image + audio"]
+    G["ARCHITECT Brain\nQwen3.6-27B-MTP-Q6_K\nllama-server :8012  CUDA1 RTX 5090 OC\n128K ctx · reasoning · speculative decoding"]
     H["Context Injector\nrag_v1/runtime/context_injector.py\n(parallel: doc-RAG · wiki · search · music)"]
     I["Memory Service\nmemory/service.py\n(episodes · profiles · rules)"]
     J["RAG Retrieval\nrag_v1/retrieve/\nPostgreSQL + pgvector\nBGE-M3 :8020"]
@@ -90,27 +90,30 @@ flowchart TD
 | UI | `ui_streamlit_server.py` | Rendering, session state, user controls, voice mode |
 | Service | `chat_service.py` | Turn lifecycle: route → memory → prompt → RAG → stream |
 | Session | `inference_session.py` | Server health, lifecycle, URL/port management |
-| Routing | `router.py` | LLM-assisted brain selection + heuristic fallback; review trigger detection |
+| Routing | `router.py` | LLM-assisted brain selection + heuristic fallback |
+| Review trigger | `review_service/trigger.py` | `is_review_command()`; called from `ui_streamlit_server.py` |
 | Prompts | `prompt_library.py` | System prompt, core roles, templates, `build_messages()` |
 | HTTP | `openai_client.py` | SSE streaming client to llama-server; session pooling; multimodal content |
 | Process | `server_manager.py` | YAML-driven `Popen` spawning, readiness polling via log markers |
-| Context | `rag_v1/runtime/context_injector.py` | Parallel RAG + wiki + search + music injection (5-worker ThreadPoolExecutor) |
+| Context | `rag_v1/runtime/context_injector.py` | Parallel doc-RAG + wiki + search + music + news injection; 5-way fan-out on a 10-thread pool, collected under one shared deadline |
 | RAG | `rag_v1/retrieve/retriever.py` | pgvector HNSW vector search; citation formatting |
-| Wiki RAG | `rag_v1/wiki/wiki_retriever.py` | Wikipedia HNSW retrieval at query time; auto-starts jina-clip-v2 embed service |
+| Wiki RAG | `rag_v1/wiki/wiki_retriever.py` | Wikipedia ivfflat retrieval over a 32-way partitioned table; detects index kind and sets `ivfflat.probes`; auto-starts jina-clip-v2 |
 | Media RAG | `rag_v1/media/` | Cross-modal retrieval: images (jina-clip-v2) + audio (CLAP) + lyrics |
 | Ingest | `sage_kaizen_ai_ingest` project | All ingest pipelines (doc, RSS, web, ZIM, media, news); runs standalone |
-| Embed | `rag_v1/embed/embed_client.py` | HTTP client to BGE-M3 embed server; persistent sync + lazy async httpx client |
+| Embed | `rag_v1/embed/` | `BaseHttpEmbedClient` — pooled httpx transport, `/health`, retries, `close()` — shared by the BGE-M3, jina-clip-v2 and CLAP clients |
 | Memory | `memory/service.py` | Episode retrieval, profile management, learned rules; lazy singleton |
 | Search | `search/search_orchestrator.py` | SearXNG metasearch; scoring, dedup, per-brain ceilings; lazy singleton |
 | Summarizer | `search/summarizer.py` | FAST-brain or fallback summarization of search evidence |
 | News (retrieval) | `news/retrieval/` | Query-time news resolver and market data client; read-only DB queries |
 | News (ingest) | `sage_kaizen_ai_ingest` project | News collection, clustering, enrichment, images, scheduling — separate process |
 | Review | `review_service/` | LangGraph sequential review; human-gated before file writes |
+| DB | `rag_v1/db/pg.py`, `memory/db.py` | `psycopg_pool.ConnectionPool` per DSN; validates on checkout |
+| Singletons | `lazy.py` | `@lazy_singleton` — the one thread-safe lazy-init helper |
 | Config | `settings.py` + `pg_settings.py` | Typed Pydantic settings loaded from `.env` |
 | Env | `env_utils.py` | Per-call env var accessors (re-read every turn, not cached) |
 | Docs | `document_parser.py` | Multi-format doc extraction (docx, xlsx, csv, code, etc.) |
 | Guard | `input_guard.py` | Prompt-injection defense for RAG/web content |
-| Logging | `sk_logging.py` | Rotating file logger factory (5 MB × 5 backups) |
+| Logging | `sk_logging.py` | Logger factory: rotating file (5 MB × 5) + buffered Postgres mirror for six mapped sources (1 MB × 2 crash-safety file) |
 | Mermaid | `mermaid_streamlit.py` | Mermaid diagram detection and rendering |
 | Voice | `voice_bridge.py` | ZMQ bridge: transcript pull, token pub, barge-in interrupt |
 | Agents | `agents/` | ZeroMQ Pi transport *(planned — directory empty)* |
@@ -153,7 +156,7 @@ chat_service.py → select_templates() → prepare_messages()
 context_injector.apply_rag_and_wiki_parallel()
   │  ThreadPoolExecutor (5 workers), all parallel:
   │  ├─ Worker 1: PgvectorRetriever → rag_chunks HNSW (BGE-M3 :8020)
-  │  ├─ Worker 2: WikiRetriever → wiki_chunks HNSW (jina-clip-v2 :8031)
+  │  ├─ Worker 2: WikiRetriever → wiki_chunks ivfflat, 32 partitions (jina-clip-v2 :8031)
   │  ├─ Worker 3: SearchOrchestrator → SearXNG :8080 → summarizer
   │  ├─ Worker 4: MusicRetriever (if music-related query)
   │  └─ Worker 5: NewsRetriever (if news-related query)
@@ -206,10 +209,10 @@ sage_kaizen_ai_ingest/rag_v1/wiki/wiki_ingest.py
   │  ZIM dump scan → _iter_md_files()
   │  3-stage parallel pipeline:
   │  ├─ 1 IO scanner thread
-  │  ├─ 2 embed/write workers (one per GPU: :8031 CUDA0, :8032 CUDA1)
+  │  ├─ 2 embed/write workers (:8031 and :8032, both CUDA2 since 2026-08-24)
   │  └─ 1 reporter thread
   │  resume-safe by content_hash
-  │  NOTE: wiki ingest port 8032 (CUDA1) shares RTX 5090 OC with FAST brain — stop FAST first to avoid compute contention
+  │  NOTE: wiki ingest now runs on CUDA2 (RTX 5080 eGPU); it no longer shares a GPU with FAST
   │
   ▼
 MmEmbedClient → POST /embed → jina-clip-v2 FastAPI service
@@ -218,7 +221,9 @@ MmEmbedClient → POST /embed → jina-clip-v2 FastAPI service
   │
   ▼
 PostgreSQL: wiki_bundles, wiki_pages, wiki_chunks, wiki_images
-  │  HNSW cosine index on 1024-dim embeddings
+  │  wiki_chunks: 32-way HASH partitions on page_id, one halfvec ivfflat
+  │  index each (lists=4000, query probes=5). HNSW was abandoned after a
+  │  ~44-day build projection — see CLAUDE.md §18.2.
 ```
 
 ### Media / Audio Ingest (Cross-Modal)
@@ -258,7 +263,7 @@ Streamlit app starts → _auto_start_servers() launches two daemon threads
   │    │  _wait_for_ready() polls /health every 150 ms
   │    │  log marker detection: "server is listening" OR fatal error
   │    │
-  │    └─ then start FAST brain (port 8011, CUDA1, same flow)
+  │    └─ then start FAST brain (port 8011, CUDA0, same flow)
   │
   └─ Thread 2: ensure_q6_running(servers)
        BrainConfig(architect) from brains.yaml
@@ -274,13 +279,13 @@ Config source: config/brains/brains.yaml — no .bat files exist
 
 | Service | Model | Port / Address | GPU | Purpose |
 |---------|-------|----------------|-----|---------|
-| FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA1 (RTX 5090 OC) | Multimodal chat (text + image + audio via mmproj) |
-| ARCHITECT brain | Qwen3.5-27B-Q6_K | 8012 | CUDA0 (RTX 5090) | Deep reasoning; 128K ctx; `<think>` tokens; speculative decoding |
-| Summarizer | Qwen3-4B-Q8_0 | 8013 | CPU-only | Lightweight search evidence summarization |
-| BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA0 (RTX 5090) | RAG text embeddings (1024-dim) |
-| Wiki embed A | jina-clip-v2 | 8031 | CUDA0 (RTX 5090) | Wikipedia multimodal embeddings (normal operation) |
-| Wiki embed B | jina-clip-v2 | 8032 | CUDA1 (RTX 5090 OC) | Wikipedia ingest only (2nd worker; needs FAST brain stopped) |
-| CLAP embed | clap-htsat-unfused | 8040 | CUDA1 (RTX 5090 OC) | Audio embeddings (512-dim) |
+| FAST brain | Qwen2.5-Omni-7B-Q6_K | 8011 | CUDA0 (RTX 5090, display) | Multimodal chat. Sole tenant of the display GPU |
+| ARCHITECT brain | Qwen3.6-27B-MTP-Q6_K | 8012 | CUDA1 (RTX 5090 OC) | Deep reasoning; 128K ctx; `<think>`; MTP speculative decoding (1.41x measured) |
+| Summarizer | Qwen3-4B-Q8_0 | 8013 | CUDA2 (RTX 5080 eGPU) | Lightweight search evidence summarization. Moved off CPU 2026-08-24 |
+| BGE-M3 embed | bge-m3-FP16 | 8020 | CUDA1 (RTX 5090 OC) | RAG text embeddings (1024-dim) |
+| Wiki embed A | jina-clip-v2 | 8031 | CUDA2 (RTX 5080 eGPU) | Wikipedia multimodal embeddings; also serves media image embeds |
+| Wiki embed B | jina-clip-v2 | 8032 | CUDA2 (RTX 5080 eGPU) | Wikipedia ingest only. FAST no longer shares this GPU |
+| CLAP embed | clap-htsat-unfused | 8040 | CUDA2 (RTX 5080 eGPU) | Audio embeddings (512-dim) |
 | SearXNG | (metasearch) | 8080 | Docker Desktop | Live web search JSON API |
 | Voice STT/TTS | Whisper distil-large-v3.5 + Kokoro-82M | ZMQ 5790/5791/5792 | CPU (ONNX) | Voice: transcript in, token stream out, barge-in interrupt |
 
@@ -293,9 +298,9 @@ Config source: config/brains/brains.yaml — no .bat files exist
 | PostgreSQL `rag_chunks` | Doc/RSS/web embeddings (BGE-M3 1024-dim) | `localhost:5432/sage_kaizen` |
 | PostgreSQL `wiki_*` | Wikipedia text + image embeddings (jina-clip-v2) | same DB |
 | PostgreSQL `memory_*` | Conversation episodes, user profiles, learned rules | same DB |
-| pgvector HNSW | Vector similarity indexes (1024-dim RAG, wiki; 512-dim audio) | same DB |
+| pgvector | ANN indexes: HNSW for rag_chunks / images / audio; **ivfflat** for the partitioned wiki_chunks | same DB |
 | PostgreSQL `langgraph` schema | LangGraph checkpoint blobs (review service) | same DSN, separate schema |
-| Rotating logs | App + server stdout | `logs/` (5 MB × 5 backups) |
+| Rotating logs | App + server stdout | `logs/` (5 MB × 5 backups; 1 MB × 2 for the six DB-mirrored sources — see CLAUDE.md §12) |
 | Streamlit session | Chat history, route decision, model IDs | In-memory; lost on page refresh |
 | `.env` | Secrets, URL overrides, tuning knobs | Project root (not committed) |
 
@@ -309,5 +314,7 @@ Config source: config/brains/brains.yaml — no .bat files exist
 4. **Paths must be fully expanded** before Python uses them — no `%ROOT%` or env var assumptions
 5. **Review service uses `pg_settings.py` DSN** — LangGraph tables live in the `langgraph` schema (not `public`); run `scripts/setup_langgraph_schema.sql` once before first review
 6. **`prompt_library.py` is the authoritative source for all prompts** — `settings.py` imports from it; no prompt strings outside this module
-7. **Namespace packages must not have `__init__.py`** — `rag_v1/`, `rag_v1/wiki/`, `rag_v1/media/`, and `news/` are namespace packages shared between this project and `sage_kaizen_ai_ingest`; adding `__init__.py` breaks the cross-project split
+7. **Namespace packages must not have `__init__.py`** — `rag_v1/`, `rag_v1/wiki/`, `rag_v1/media/`, and `news/` are namespace packages shared between this project and `sage_kaizen_ai_ingest`; adding `__init__.py` breaks the cross-project split. Guarded by `tests/test_coverage_config.py`, which also fails if a new namespace sub-package is added without listing it in coverage's `source`
+8. **No PyTorch compute on `cuda:0`** (previously worded "cuda:0 is display-only") — it drives three monitors, and `torch.compile` autotune there is the Windows TDR trigger. llama-server is C++ and is permitted: the FAST brain runs on cuda:0 as its sole tenant. `WikiRetriever` raises `DisplayGpuRefused` rather than starting an embed service there, checking the *effective* device (env var, then `brains.yaml`). See CLAUDE.md §10 and `sage_kaizen_ai_ingest` CLAUDE.md §19
+9. **Seven modules are shared with `sage_kaizen_ai_ingest` and resolve to THIS repo** — `sk_logging`, `pg_settings`, `openai_client`, `rag_v1.db.pg`, `rag_v1.wiki.wiki_embed_config`, `rag_v1.wiki.mm_embed_client`, `rag_v1.media.media_embed_client`. Changing any of them is a cross-project change; see CLAUDE.md §13
 8. **Pylance cross-project resolution** — `pyrightconfig.json` at project root has `extraPaths: ["../sage_kaizen_ai_ingest"]`; do not remove this entry

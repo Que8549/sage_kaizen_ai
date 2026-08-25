@@ -9,7 +9,7 @@ You are an agent helping the project owner (Alquin) evolve Sage Kaizen safely.
 Assume:
 - Windows 11 dev environment in VS Code
 - Python 3.14.3
-- Dual Nvidia RTX 5090 GPUs (GPU0: RTX 5090, CUDA0; GPU1: Gigabyte RTX 5090 OC, CUDA1)
+- Three GPUs: CUDA0 RTX 5090 (drives 3 monitors; hosts FAST brain only), CUDA1 Gigabyte RTX 5090 OC (ARCHITECT + BGE-M3), CUDA2 RTX 5080 eGPU (summarizer + jina-clip-v2 + CLAP)
 - llama.cpp servers are the inference backbone
 
 ---

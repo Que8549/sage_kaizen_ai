@@ -1,5 +1,12 @@
 # Claude_Code_Memory_Implementation_Prompt.md
 
+> **HISTORICAL — this prompt was executed and the work is done.** The Memory
+> Service exists (`memory/`: episodes, profiles, learned rules, PostgreSQL-backed,
+> lazy singleton with graceful degradation). Kept as a record of the original
+> specification, not as an instruction to follow. For the current design read
+> `docs/04-Memory_Service.md`; for current brain/context figures read `CLAUDE.md`
+> §2 — the numbers below were correct in 2026-04 and are now out of date.
+
 Use the following prompt in Claude Code inside the Sage Kaizen repository.
 
 ---
@@ -47,8 +54,8 @@ Memory bundles MUST be sized for the receiving brain:
 
 | Brain | Max bundle tokens |
 |-------|-------------------|
-| FAST (Qwen2.5-Omni-7B, 16K ctx) | 600 tokens |
-| ARCHITECT (Qwen3.5-27B, 64K ctx) | 1,500 tokens |
+| FAST (Qwen2.5-Omni-7B, 32K ctx today; 16K when written) | 600 tokens |
+| ARCHITECT (Qwen3.6-27B-MTP, 128K ctx today; Qwen3.5-27B/64K when written) | 1,500 tokens |
 
 The bundle_builder.py must enforce these caps. Drop lowest-scored episodes first.
 

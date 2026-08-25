@@ -20,6 +20,7 @@ import functools
 import os
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,9 @@ from typing import Any
 import yaml
 
 from openai_client import HttpTimeouts, health_check
+from sk_logging import get_logger
+
+_LOG = get_logger("sage_kaizen.server_manager")
 
 
 # ---------------------------
@@ -40,6 +44,7 @@ _LOGS_DIR.mkdir(parents=True, exist_ok=True)
 _BRAINS_YAML = _PROJECT_ROOT / "config" / "brains" / "brains.yaml"
 
 _FATAL_MARKERS = (
+    "error: invalid argument",       # unknown/removed CLI flag (fast-fail, no timeout)
     "error while handling argument",
     "failed to load model",
     "error loading model",
@@ -67,11 +72,28 @@ _FATAL_MARKERS = (
 # so we skip it safely.
 
 _spawned_procs: list[subprocess.Popen] = []
+_spawned_procs_lock = threading.Lock()
+
+
+def _register_spawned(proc: subprocess.Popen) -> None:
+    """
+    Track a spawned server, dropping any that have already exited.
+
+    Without the prune this list only ever grew: every restart cycle appended a
+    new Popen and kept the dead one forever, holding its OS process handle
+    open. A long Streamlit session that restarts brains repeatedly accumulated
+    them for the life of the process.
+    """
+    with _spawned_procs_lock:
+        _spawned_procs[:] = [p for p in _spawned_procs if p.poll() is None]
+        _spawned_procs.append(proc)
 
 
 def _kill_spawned_servers() -> None:
     """atexit handler — terminate all llama-server processes started this session."""
-    for proc in _spawned_procs:
+    with _spawned_procs_lock:
+        procs = list(_spawned_procs)
+    for proc in procs:
         try:
             if proc.poll() is None:   # still running
                 proc.terminate()
@@ -352,6 +374,74 @@ def _wait_for_ready(
 # Command building from YAML config                                             #
 # ──────────────────────────────────────────────────────────────────────────── #
 
+_CUDA_DEVICE_RE = re.compile(r"^CUDA(\d+)$", re.IGNORECASE)
+
+
+def _plan_cuda_isolation(device: Any) -> tuple[str, str] | None:
+    """
+    Translate a physical device spec into (CUDA_VISIBLE_DEVICES, renumbered spec).
+
+    `--device CUDA1` restricts where llama.cpp *places* tensors, but not which
+    devices it *initialises*: every llama-server still builds a CUDA context on
+    every visible GPU. Measured 2026-08-06 with three servers running — each
+    held a context on all three cards, ~231 MiB apiece, including 694 MiB on the
+    RTX 5080 that this app never uses at all.
+
+    `CUDA_VISIBLE_DEVICES` is the documented way to actually hide them
+    (upstream: "if you set it, llama.cpp only sees the specified GPUs"). The
+    catch is that hiding renumbers what is left: with CUDA_VISIBLE_DEVICES=1 the
+    surviving GPU is called CUDA0 inside the process, so a literal
+    `--device CUDA1` would fail. Translating here keeps brains.yaml written in
+    *physical* device numbers — which is what makes it readable, and what every
+    comment and invariant in it assumes — while the process still sees one GPU.
+
+    Returns None for anything not recognisably CUDA (a CPU-only brain like the
+    summarizer, or a non-CUDA backend), leaving those spawns untouched.
+
+    Note this is NOT the approach sage_kaizen_ai_ingest uses. It tried
+    CUDA_VISIBLE_DEVICES and reverted: it broke jina-clip-v2's
+    trust_remote_code paths, which passed /health and then returned 500 on real
+    inference (its wiki_ingest.py documents this). That is a PyTorch failure
+    mode; llama-server is C++ and was verified here before this was written —
+    a BGE-M3 server started under CUDA_VISIBLE_DEVICES=1 with --device CUDA0
+    served real embeddings and held a context on exactly one GPU.
+    """
+    if not isinstance(device, str):
+        return None
+    parts = [p.strip() for p in device.split(",") if p.strip()]
+    indices: list[str] = []
+    for part in parts:
+        match = _CUDA_DEVICE_RE.match(part)
+        if match is None:
+            return None
+        indices.append(match.group(1))
+    if not indices:
+        return None
+    # After hiding, the survivors are renumbered 0..n-1 in the order listed.
+    return ",".join(indices), ",".join(f"CUDA{i}" for i in range(len(indices)))
+
+
+def _child_env(brain: BrainConfig) -> dict[str, str]:
+    """
+    Environment for a spawned llama-server: the parent's, plus GPU isolation.
+
+    CUDA_DEVICE_ORDER is pinned to PCI_BUS_ID rather than inherited. The index
+    in CUDA_VISIBLE_DEVICES only means the card brains.yaml names if the CUDA
+    runtime enumerates in PCI order; the default is FASTEST_FIRST, under which
+    the mapping is a guess. It happens to be set as a user-level variable on
+    this machine, but relying on that would make a correct GPU assignment
+    depend on an environment variable nothing in this repo controls — and the
+    failure mode is ARCHITECT silently landing on the display GPU.
+    """
+    env = dict(os.environ)
+    plan = _plan_cuda_isolation(brain.server.get("device"))
+    if plan is not None:
+        visible, _ = plan
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        env["CUDA_VISIBLE_DEVICES"] = visible
+    return env
+
+
 def _build_argv(brain: BrainConfig) -> list:
     """
     Build the full subprocess argument list from a BrainConfig.
@@ -367,14 +457,23 @@ def _build_argv(brain: BrainConfig) -> list:
         false (or omit) to leave the positive default in effect.
       - All other keys         → --flag <value>
 
+    The `device` key is rewritten to its post-isolation name — see
+    _plan_cuda_isolation. brains.yaml keeps saying CUDA1; the process is handed
+    CUDA0 and shown only that card.
+
     --log-file is always appended last (project invariant: never rely on
     stdout/stderr redirection for long-running servers).
     """
     argv: list = [str(brain.exe), "--model", str(brain.model)]
+    isolation = _plan_cuda_isolation(brain.server.get("device"))
 
     for yaml_key, value in brain.server.items():
         cli_name = yaml_key.replace("_", "-")
         flag = f"--{cli_name}"
+
+        if yaml_key == "device" and isolation is not None:
+            argv.extend([flag, isolation[1]])
+            continue
 
         if isinstance(value, bool):
             if cli_name in _BOOL_ONOFF:
@@ -420,6 +519,28 @@ def start_server_from_config(brain: BrainConfig) -> tuple[bool, str]:
 
     brain.log.parent.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%a %m/%d/%Y %H:%M:%S", time.localtime())
+    isolation = _plan_cuda_isolation(brain.server.get("device"))
+
+    # Record the physical->visible GPU mapping through sk_logging, NOT into the
+    # header below. llama-server opens --log-file in truncating mode, so
+    # anything written to that path before the spawn is erased the moment the
+    # child starts — verified 2026-08-06: not one "START (yaml)" header has ever
+    # survived in logs/*.log. The header is still written because it is the only
+    # thing that captures early CUDA stderr on a spawn that dies before the
+    # child's logger exists; it just cannot be relied on afterwards.
+    #
+    # This matters more than it used to: after isolation the server's own log
+    # only ever says "CUDA0", so this record is the only thing tying a run to
+    # the physical card it used.
+    if isolation is not None:
+        _LOG.info(
+            "%s launch | device=%s | CUDA_VISIBLE_DEVICES=%s | --device %s",
+            brain.name, brain.server.get("device"), isolation[0], isolation[1],
+        )
+    else:
+        _LOG.info("%s launch | no CUDA isolation (device=%s)",
+                  brain.name, brain.server.get("device"))
+
     header = (
         f"\n==== {brain.name.upper()} START (yaml) {ts} ====\n"
         f"EXE={brain.exe}\n"
@@ -451,11 +572,12 @@ def start_server_from_config(brain: BrainConfig) -> tuple[bool, str]:
                 stdin=subprocess.DEVNULL,
                 creationflags=creationflags,
                 close_fds=False,
+                env=_child_env(brain),
             )
         finally:
             log_fh.close()  # parent closes its copy; child keeps its own fd
 
-        _spawned_procs.append(proc)
+        _register_spawned(proc)
     except Exception as e:
         return False, f"Failed to spawn llama-server: {e}"
 
@@ -466,78 +588,70 @@ def start_server_from_config(brain: BrainConfig) -> tuple[bool, str]:
 # Public API: ensure_* functions (called by InferenceSession)                   #
 # ──────────────────────────────────────────────────────────────────────────── #
 
-def ensure_embed_running(servers: ManagedServers) -> tuple[bool, str]:
-    base_url = servers.embed.base_url
+def _ensure_brain_running(brain: BrainConfig, label: str) -> tuple[bool, str]:
+    """
+    Bring one llama-server up, or confirm it already is.
 
-    if find_pid_by_port(servers.embed_port) is not None:
+    Steps, in order:
+      1. If something is listening on the port AND answers a readiness probe,
+         it is already up — return without touching it.
+      2. Otherwise clear the port. Something listening but not answering is a
+         stale or wedged process; respawning on an occupied port would fail.
+      3. Spawn from the BrainConfig (which came from brains.yaml).
+      4. Block until /health answers or the configured timeout expires,
+         aborting early on a fatal marker in the server's own log.
+
+    `label` appears in the returned status strings, which the Streamlit status
+    panel renders verbatim.
+
+    Extracted 2026-08-05: ensure_embed_running / ensure_q5_running /
+    ensure_q6_running / ensure_summarizer_running were four copies of this
+    body differing only in which BrainConfig they read and what they called
+    themselves.
+    """
+    base_url = brain.base_url
+
+    if find_pid_by_port(brain.port) is not None:
         ok, how = _http_ready(base_url, timeout_s=1.0)
         if ok:
-            return True, f"EMBED already ready ({how})"
+            return True, f"{label} already ready ({how})"
 
-    stop_server_on_port(servers.embed_port)
+    stop_server_on_port(brain.port)
 
-    ok, msg = start_server_from_config(servers.embed)
+    ok, msg = start_server_from_config(brain)
     if not ok:
-        return False, f"EMBED start failed: {msg}"
+        return False, f"{label} start failed: {msg}"
 
     return _wait_for_ready(
-        host=servers.host,
-        port=servers.embed_port,
+        host=brain.host,
+        port=brain.port,
         base_url=base_url,
-        timeout_s=servers.embed_start_timeout_s,
-        log_path=servers.embed_log,
+        timeout_s=brain.startup_timeout_s,
+        log_path=brain.log,
     )
+
+
+def ensure_embed_running(servers: ManagedServers) -> tuple[bool, str]:
+    """Start the BGE-M3 embedding server (port 8020) if not already running."""
+    return _ensure_brain_running(servers.embed, "EMBED")
 
 
 def ensure_q5_running(servers: ManagedServers) -> tuple[bool, str]:
-    # Embedding server must be ready before the chat brain starts
+    """
+    Start the FAST brain (port 8011) if not already running.
+
+    The embedding server is brought up first: RAG retrieval runs on every turn,
+    so a chat brain without embeddings would answer without context.
+    """
     ok, msg = ensure_embed_running(servers)
     if not ok:
         return False, f"Embeddings not ready: {msg}"
-
-    base_url = servers.fast.base_url
-
-    if find_pid_by_port(servers.q5_port) is not None:
-        ok, how = _http_ready(base_url, timeout_s=1.0)
-        if ok:
-            return True, f"Q5 already ready ({how})"
-
-    stop_server_on_port(servers.q5_port)
-
-    ok, msg = start_server_from_config(servers.fast)
-    if not ok:
-        return False, f"Q5 start failed: {msg}"
-
-    return _wait_for_ready(
-        host=servers.host,
-        port=servers.q5_port,
-        base_url=base_url,
-        timeout_s=servers.q5_start_timeout_s,
-        log_path=servers.q5_log,
-    )
+    return _ensure_brain_running(servers.fast, "Q5")
 
 
 def ensure_q6_running(servers: ManagedServers) -> tuple[bool, str]:
-    base_url = servers.architect.base_url
-
-    if find_pid_by_port(servers.q6_port) is not None:
-        ok, how = _http_ready(base_url, timeout_s=1.0)
-        if ok:
-            return True, f"Q6 already ready ({how})"
-
-    stop_server_on_port(servers.q6_port)
-
-    ok, msg = start_server_from_config(servers.architect)
-    if not ok:
-        return False, f"Q6 start failed: {msg}"
-
-    return _wait_for_ready(
-        host=servers.host,
-        port=servers.q6_port,
-        base_url=base_url,
-        timeout_s=servers.q6_start_timeout_s,
-        log_path=servers.q6_log,
-    )
+    """Start the ARCHITECT brain (port 8012) if not already running."""
+    return _ensure_brain_running(servers.architect, "Q6")
 
 
 def ensure_summarizer_running(servers: ManagedServers) -> tuple[bool, str]:
@@ -550,25 +664,4 @@ def ensure_summarizer_running(servers: ManagedServers) -> tuple[bool, str]:
     """
     if servers.summarizer is None:
         return False, "summarizer: section not configured in brains.yaml"
-
-    s = servers.summarizer
-    base_url = s.base_url
-
-    if find_pid_by_port(s.port) is not None:
-        ok, how = _http_ready(base_url, timeout_s=1.0)
-        if ok:
-            return True, f"Summarizer already ready ({how})"
-
-    stop_server_on_port(s.port)
-
-    ok, msg = start_server_from_config(s)
-    if not ok:
-        return False, f"Summarizer start failed: {msg}"
-
-    return _wait_for_ready(
-        host=s.host,
-        port=s.port,
-        base_url=base_url,
-        timeout_s=s.startup_timeout_s,
-        log_path=s.log,
-    )
+    return _ensure_brain_running(servers.summarizer, "Summarizer")

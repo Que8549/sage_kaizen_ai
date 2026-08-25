@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timedelta, timezone
 
+from lazy import lazy_singleton
 from sk_logging import get_logger
 
 _LOG = get_logger("sage_kaizen.news.market_client", file_name="news_agent.log")
@@ -193,11 +194,12 @@ class MarketClient:
 
 
 # Module-level lazy singleton.
-_client: MarketClient | None = None
-
-
+@lazy_singleton
 def get_market_client() -> MarketClient:
-    global _client
-    if _client is None:
-        _client = MarketClient()
-    return _client
+    """
+    Process-wide market client.
+
+    Locked: reached from the context injector's news worker thread via the
+    market-query branch of resolve_news_context().
+    """
+    return MarketClient()

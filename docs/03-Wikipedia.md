@@ -428,7 +428,7 @@ flowchart TD
     C["Run zim_dump.py"]
     D["Structured article folders + images"]
     E["wiki_ingest.py (future / standalone)"]
-    F["Embeddings service on CUDA0"]
+    F["Embeddings service on CUDA2 (RTX 5080 eGPU)"]
     G["PostgreSQL + pgvector wiki_* tables"]
     H["Router RAG injection in Sage Kaizen"]
 

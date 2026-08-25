@@ -9,114 +9,90 @@ HTTP clients for the CLIP + CLAP dual-modal embed pipeline.
   AudioEmbedClient  — wraps the CLAP clap-htsat-unfused service (port 8040)
                       Returns  512-dim L2-normalized float vectors.
 
-Both clients use httpx with tenacity retries (3 attempts, 1 s wait).
-Both raise httpx.HTTPStatusError on non-2xx responses after all retries.
+Rewritten 2026-08-05 (see rag_v1/embed/base_client.py for the full rationale):
+
+  * ImageEmbedClient was a second, independent implementation of
+    MmEmbedClient — same host, same endpoints, same contract. It is now a thin
+    subclass, so there is one implementation of the jina-clip-v2 protocol.
+    The name is kept because sage_kaizen_ai_ingest's media_ingest.py imports
+    it, and that project resolves this module from THIS repo (its CLAUDE.md
+    §20).
+
+  * Both clients previously called module-level ``httpx.post()``, building and
+    discarding a TCP connection per call, while being driven at volume by the
+    ingest media pipeline. Both are now pooled.
+
+  * Both previously raised ``tenacity.RetryError`` after exhausting retries,
+    unlike MmEmbedClient which re-raised the real error. All embed clients now
+    re-raise ``httpx.HTTPStatusError``.
 """
 from __future__ import annotations
 
 import base64
 from collections.abc import Sequence
 
-import httpx
-from tenacity import retry, stop_after_attempt, wait_fixed
-
-_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=5.0)
+from rag_v1.embed.base_client import BaseHttpEmbedClient
+from rag_v1.wiki.mm_embed_client import MmEmbedClient
 
 
-class ImageEmbedClient:
+class ImageEmbedClient(MmEmbedClient):
     """
-    Client for the jina-clip-v2 embed service (reuses wiki embed service).
+    Client for the jina-clip-v2 embed service (reuses the wiki embed service).
 
-    The wiki service already supports:
-      POST /embed/text  — list[str]  → list[list[float]] (1024-dim)
-      POST /embed/image — list[bytes as base64] → list[list[float]] (1024-dim)
+    Identical protocol to MmEmbedClient; this subclass exists only so the media
+    pipeline reads with its own vocabulary and keeps a stable import path.
+
+    Endpoints:
+      POST /embed/text  — list[str]                → list[list[float]] (1024-dim)
+      POST /embed/image — list[bytes] as base64    → list[list[float]] (1024-dim)
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8031) -> None:
-        self._base = f"http://{host}:{port}"
+        super().__init__(host=host, port=port)
 
-    def ping(self, timeout_s: float = 3.0) -> bool:
-        try:
-            r = httpx.get(f"{self._base}/health", timeout=timeout_s)
-            if r.status_code != 200:
-                return False
-            data = r.json()
-            # Wiki embed service returns {"status": "ok"};
-            # any future service using the CLAP pattern returns {"loaded": true}.
-            return data.get("loaded", False) or data.get("status") == "ok"
-        except Exception:
-            return False
-
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
     def embed_text(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed text strings for image similarity search (1024-dim)."""
-        r = httpx.post(
-            f"{self._base}/embed/text",
-            json={"texts": list(texts)},
-            timeout=_TIMEOUT,
-        )
-        r.raise_for_status()
-        return r.json()["embeddings"]
+        return super().embed_text(list(texts))
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
-    def embed_image_bytes(self, images: Sequence[bytes]) -> list[list[float]]:
+    def embed_image_bytes(self, images_bytes: Sequence[bytes]) -> list[list[float]]:
         """Embed raw image bytes (1024-dim)."""
-        r = httpx.post(
-            f"{self._base}/embed/image",
-            json={"images_b64": [base64.b64encode(b).decode() for b in images]},
-            timeout=_TIMEOUT,
-        )
-        if not r.is_success:
-            raise httpx.HTTPStatusError(
-                f"{r.status_code} from {r.url}: {r.text[:500]}",
-                request=r.request,
-                response=r,
-            )
-        return r.json()["embeddings"]
+        # Parameter name matches MmEmbedClient.embed_image_bytes deliberately —
+        # a mismatch is a Liskov violation pyright flags, and callers
+        # (sage_kaizen_ai_ingest's media_ingest) pass it positionally anyway.
+        return super().embed_image_bytes(list(images_bytes))
 
 
-class AudioEmbedClient:
+class AudioEmbedClient(BaseHttpEmbedClient):
     """
     Client for the CLAP (clap-htsat-unfused) embed service on port 8040.
 
     Endpoints:
-      POST /embed/text  — list[str]   → list[list[float]] (512-dim)
-      POST /embed/audio — list[bytes] as base64 → list[list[float]] (512-dim)
+      POST /embed/text  — list[str]                → list[list[float]] (512-dim)
+      POST /embed/audio — list[bytes] as base64    → list[list[float]] (512-dim)
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8040) -> None:
-        self._base = f"http://{host}:{port}"
+        super().__init__(host=host, port=port)
 
-    def ping(self, timeout_s: float = 3.0) -> bool:
-        try:
-            r = httpx.get(f"{self._base}/health", timeout=timeout_s)
-            return r.status_code == 200 and r.json().get("loaded", False)
-        except Exception:
-            return False
+    def ping(self, timeout_s: float = 5.0) -> bool:
+        """
+        True only when CLAP reports the model actually loaded.
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
+        Stricter than the inherited 2xx check, and deliberately kept that way:
+        the CLAP service answers /health with 200 while the model is still
+        loading, so plain reachability would report ready too early. The wiki
+        service does not need this because it returns 503 until loaded.
+        """
+        payload = self.health(timeout_s=timeout_s)
+        return bool(payload and payload.get("loaded", False))
+
     def embed_text(self, texts: Sequence[str]) -> list[list[float]]:
         """Embed text strings for audio similarity search (512-dim)."""
-        r = httpx.post(
-            f"{self._base}/embed/text",
-            json={"texts": list(texts)},
-            timeout=_TIMEOUT,
-        )
-        r.raise_for_status()
-        return r.json()["embeddings"]
+        return self._post_embeddings("/embed/text", {"texts": list(texts)})
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
     def embed_audio_bytes(self, audios: Sequence[bytes]) -> list[list[float]]:
         """Embed raw audio file bytes (512-dim). Decoding happens server-side."""
-        r = httpx.post(
-            f"{self._base}/embed/audio",
-            json={"audios_b64": [base64.b64encode(b).decode() for b in audios]},
-            timeout=_TIMEOUT,
+        return self._post_embeddings(
+            "/embed/audio",
+            {"audios_b64": [base64.b64encode(b).decode() for b in audios]},
         )
-        if not r.is_success:
-            raise httpx.HTTPStatusError(
-                f"{r.status_code} from {r.url}: {r.text[:500]}",
-                request=r.request,
-                response=r,
-            )
-        return r.json()["embeddings"]
